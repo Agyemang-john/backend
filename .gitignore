@@ -1,0 +1,49 @@
+# Database
+db.sqlite3
+
+# Media & Static
+media/
+staticfiles/
+
+# Environments
+.env
+.venv/
+venv/
+env/
+ENV/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE & Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Node.js / Frontend dependencies (if applicable)
+node_modules/
+npm-debug.log*
+
+# Coverage reports
+.coverage
+htmlcov/
+
+# macOS files
+.DS_Store
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# pytest
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Local settings
+local_settings.py
+settings/local.py

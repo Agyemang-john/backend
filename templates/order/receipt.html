@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Order Receipt</title>
+  <style>
+    body {
+      font-family: "Helvetica", sans-serif;
+      margin: 0;
+      padding: 2rem;
+      color: #333;
+    }
+    .header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+    .header h1 {
+      margin: 0;
+    }
+    .info, .footer {
+      margin-bottom: 1.5rem;
+    }
+    .info strong {
+      display: inline-block;
+      width: 150px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 1rem;
+    }
+    th, td {
+      padding: 8px;
+      border-bottom: 1px solid #ccc;
+      text-align: left;
+    }
+    th {
+      background-color: #f5f5f5;
+    }
+    .footer {
+      font-style: italic;
+      font-size: 0.9rem;
+      text-align: center;
+      margin-top: 3rem;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <h1>🧾 Order Receipt</h1>
+    <p><strong>Order Number:</strong> {{ order.order_number }}</p>
+  </div>
+
+  <div class="info">
+    <p><strong>Name:</strong> {{ order.user.first_name }} {{ order.user.last_name }}</p>
+    <p><strong>Email:</strong> {{ order.user.email }}</p>
+    <p><strong>Payment Method:</strong> {{ order.get_payment_method_display }}</p>
+    <p><strong>Status:</strong> {{ order.status|capfirst }}</p>
+    <p><strong>Total:</strong> GHS {{ order.total|floatformat:2 }}</p>
+  </div>
+
+  <h3>Items</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Product</th>
+        <th>Variant</th>
+        <th>Qty</th>
+        <th>Unit Price</th>
+        <th>Total</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in order.order_products.all %}
+        <tr>
+          <td>{{ item.product.title }}</td>
+          <td>
+            {% if item.variant %}
+              {% if item.variant.color %}Color: {{ item.variant.color.name }}{% endif %}
+              {% if item.variant.size %} | Size: {{ item.variant.size.name }}{% endif %}
+            {% else %}
+              N/A
+            {% endif %}
+          </td>
+          <td>{{ item.quantity }}</td>
+          <td>GHS {{ item.price|floatformat:2 }}</td>
+          <td>GHS {{ item.amount|floatformat:2 }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="footer">
+    Thank you for shopping with us! ❤️
+  </div>
+
+</body>
+</html>
