@@ -24,11 +24,13 @@ from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
-
+from django.core.validators import validate_email
 from djoser.conf import settings as djoser_settings
 from djoser import utils as djoser_utils
 # from djoser.serializers import PasswordResetSerializer
-
+from django.utils import timezone
+from datetime import timedelta
+from django.db.models import F
 
 class CustomPasswordResetSerializer(serializers.Serializer):
     email = serializers.EmailField()
@@ -76,21 +78,93 @@ class CustomPasswordResetSerializer(serializers.Serializer):
 
         send_mail(subject, plain_message, from_email, [to], html_message=html_message)
 
+MAX_FAILED_ATTEMPTS = 5      # max attempts before lockout
+LOCKOUT_TIME = timedelta(minutes=15)  # lockout duration
 
+class CustomTokenObtainPairSerializer(serializers.Serializer):
+    email = serializers.CharField()  # can be email or phone
+    password = serializers.CharField(write_only=True)
 
-class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     def validate(self, attrs):
-        email = attrs.get("email")
-        user = User.objects.filter(email=email).first()
+        identifier = attrs.get("email")
+        password = attrs.get("password")
 
-        if user:
-            if user.auth_provider != 'email':
-                raise AuthenticationFailed(
-                    f"This account was registered using {user.auth_provider.capitalize()}. Please use that method to log in.",
-                    code="authorization"
+        if not identifier or not password:
+            raise serializers.ValidationError("Please provide both email/phone and password.")
+
+        is_email = "@" in identifier
+
+        # 1. If email, validate format
+        if is_email:
+            try:
+                validate_email(identifier)
+            except ValidationError:
+                raise serializers.ValidationError("Please enter a valid email address.")
+
+        # 2. Find user
+        try:
+            if is_email:
+                user = User.objects.get(email__iexact=identifier)
+            else:
+                user = User.objects.get(phone=identifier)
+        except User.DoesNotExist:
+            raise serializers.ValidationError(
+                "Email not registered." if is_email else "Phone number not registered."
+            )
+
+        # 3. Check if account is locked due to too many failed attempts
+        if getattr(user, "failed_login_attempts", 0) >= MAX_FAILED_ATTEMPTS:
+            lockout_until = getattr(user, "lockout_until", None)
+            if lockout_until and lockout_until > timezone.now():
+                raise serializers.ValidationError(
+                    f"Too many failed attempts. Try again after {lockout_until.strftime('%H:%M:%S')}."
+                )
+            else:
+                # Reset counter after lockout expired
+                user.failed_login_attempts = 0
+                user.lockout_until = None
+                user.save()
+
+        # 4. Check if active
+        if not user.is_active:
+            raise serializers.ValidationError("Your account is not activated yet.")
+
+        # 5. Check if suspended
+        if getattr(user, "is_suspended", False):
+            raise serializers.ValidationError("Your account has been suspended. Contact support.")
+
+        # 6. Authenticate credentials
+        authenticated_user = authenticate(email_or_phone=identifier, password=password)
+        if authenticated_user is None:
+            # increment failed login counter
+            user.failed_login_attempts = F('failed_login_attempts') + 1
+            user.save(update_fields=['failed_login_attempts'])
+
+            # reload user to get updated counter
+            user.refresh_from_db()
+            
+            if user.failed_login_attempts >= MAX_FAILED_ATTEMPTS:
+                # set lockout
+                user.lockout_until = timezone.now() + LOCKOUT_TIME
+                user.save(update_fields=['lockout_until'])
+                raise serializers.ValidationError(
+                    f"Too many failed attempts. Please try again after {LOCKOUT_TIME.seconds // 60} minutes."
                 )
 
-        return super().validate(attrs)
+            raise serializers.ValidationError("Incorrect password.")    
+
+        # reset failed login attempts on successful login
+        user.failed_login_attempts = 0
+        user.lockout_until = None
+        user.save(update_fields=['failed_login_attempts', 'lockout_until'])
+
+        # 7. Generate JWT manually
+        refresh = RefreshToken.for_user(user)
+        return {
+            "refresh": str(refresh),
+            "access": str(refresh.access_token),
+        }
+    
 
 class UserRegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(max_length=70, min_length=8, write_only=True)

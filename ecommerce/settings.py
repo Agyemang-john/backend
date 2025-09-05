@@ -208,6 +208,15 @@ REST_FRAMEWORK = {
     #     'anon': '4000/day',
     #     'user': '1000/day',
     # }
+
+    # 'DEFAULT_THROTTLE_CLASSES': [
+    #     'rest_framework.throttling.AnonRateThrottle',
+    #     'rest_framework.throttling.UserRateThrottle',
+    # ],
+    # 'DEFAULT_THROTTLE_RATES': {
+    #     'anon': '5/min',  # anonymous users
+    #     'user': '10/min', # authenticated users
+    # }
 }
 
 #Paystack configuration
@@ -232,6 +241,7 @@ EMAIL_HOST_PASSWORD = config("SENDGRID_API_KEY")
 DEFAULT_FROM_EMAIL = "Negromart <no-reply@negromart.com>"
 
 DJOSER = {
+    'TOKEN_SERIALIZER': 'userauths.serializers.CustomTokenObtainPairSerializer',
     'PASSWORD_RESET_CONFIRM_URL': 'auth/password-reset/{uid}/{token}',
     'SEND_ACTIVATION_EMAIL': True,
     'ACTIVATION_URL': 'auth/activation/{uid}/{token}',

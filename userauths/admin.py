@@ -7,8 +7,8 @@ from django.utils.translation import gettext_lazy as _
 
 class UserAdmin(BaseUserAdmin):
     # Fields to be displayed in the admin list view
-    list_display = ('email', 'first_name', 'last_name', 'role', 'is_active', 'is_staff', 'is_superuser', 'date_joined', 'last_login')
-    list_filter = ('is_active', 'is_staff', 'is_superuser', 'role', 'auth_provider', 'date_joined')
+    list_display = ('email', 'first_name', 'is_suspended', 'role', 'is_active', 'is_staff', 'is_superuser', 'date_joined', 'last_login')
+    list_filter = ('is_active', 'is_staff', 'is_superuser', 'role', 'is_suspended', 'date_joined')
     
     search_fields = ('email', 'first_name', 'last_name', 'phone')
     ordering = ('-date_joined',)
