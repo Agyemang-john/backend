@@ -139,12 +139,15 @@ class Profile(models.Model):
         else:
             text = self.user.email or "User"
 
-        # Generate avatar (200px size)
-        avatar = Avatar.generate(200, text)
+        # Generate avatar as bytes
+        avatar_bytes = Avatar.generate(200, text)  # returns bytes
+
+        # Wrap bytes into PIL Image
+        avatar_image = Image.open(BytesIO(avatar_bytes))
 
         # Save to buffer
         buffer = BytesIO()
-        avatar.save(buffer, format="PNG")
+        avatar_image.save(buffer, format="PNG")
         buffer.seek(0)
 
         # Build safe filename
