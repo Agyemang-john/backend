@@ -15,6 +15,7 @@ services:
     depends_on:
       - redis
       - elasticsearch
+    restart: always
 
   celery:
     build: .

@@ -54,9 +54,9 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
     'core.middleware.CurrencyMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -221,9 +221,8 @@ FRONTEND_LOGIN_URL = config("FRONTEND_LOGIN_URL")
 
 # Emailing settings
 SITE_URL = config('FRONTEND_BASE_URL')   # set correctly in each environment
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_TIMEOUT = 20  # seconds
 
+EMAIL_TIMEOUT = 30  # seconds
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_HOST = "smtp.sendgrid.net"
 EMAIL_PORT = 587
@@ -324,7 +323,7 @@ SIMPLE_JWT = {
     'LEEWAY': 30,  # Allow a 30-second leeway for clock discrepancies
 }
 
-CORS_ALLOW_CREDENTIALS = False
+CORS_ALLOW_CREDENTIALS = True
 
 CSRF_TRUSTED_ORIGINS = [
     "https://negromart.com",      # frontend domain
