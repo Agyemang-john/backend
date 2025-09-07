@@ -201,14 +201,16 @@ class ProductDetailAPIView(APIView):
             can_ship, user_region = can_product_ship_to_user(request, product)
 
             variant_data = {}
-            if product.variant != "None" and variant:
+            if product.variant != "None":
+                size_variant_ids = Variants.objects.filter(product=product).values('size').annotate(id=Min('id')).values_list('id', flat=True)
+                # Get the variant objects for those IDs
+                size_variants = Variants.objects.filter(pk__in=size_variant_ids)
+                
                 variant_data = {
                     'variant': VariantSerializer(variant, context={'request': request}).data,
                     'variant_images': VariantImageSerializer(VariantImage.objects.filter(variant=variant), many=True, context={'request': request}).data,
                     'colors': VariantSerializer(Variants.objects.filter(product=product, size=variant.size), many=True, context={'request': request}).data,
-                    'sizes': VariantSerializer(Variants.objects.raw(
-                        'SELECT * FROM product_variants WHERE product_id=%s GROUP BY size_id', [product.id]
-                    ), many=True, context={'request': request}).data,
+                    'sizes': VariantSerializer(size_variants, many=True, context={'request': request}).data,
                 }
             
             shared_data['variant_data'] = variant_data
