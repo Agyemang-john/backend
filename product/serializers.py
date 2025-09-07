@@ -163,14 +163,6 @@ class ProductSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         return request.headers.get('X-Currency', 'GHS') if request else 'GHS'
 
-    def get_price(self, obj):
-        request = self.context.get('request')
-        currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
-        if currency:
-            rates = get_exchange_rates()
-            return round(obj.price * rates.get(currency, 1), 2)
-        return obj.price
-
     def get_old_price(self, obj):
         request = self.context.get('request')
         currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
@@ -178,6 +170,14 @@ class ProductSerializer(serializers.ModelSerializer):
             rates = get_exchange_rates()
             return round(obj.old_price * rates.get(currency, 1), 2)
         return obj.old_price
+    
+    def get_price(self, obj):
+        request = self.context.get('request')
+        currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
+        rates = get_exchange_rates()  # Make sure this is imported and working
+
+        exchange_rate = rates.get(currency, 1)  # Default to 1 if currency not found
+        return round(obj.price * exchange_rate, 2)
 
     
 

@@ -12,11 +12,14 @@ from rest_framework_simplejwt.views import (
 from .serializers import CustomTokenObtainPairSerializer
 from django.contrib.auth.forms import PasswordResetForm
 from django.contrib.auth import get_user_model
-
+from .custom_throttles import LoginThrottle, AnonLoginThrottle, CheckoutThrottle, PasswordResetThrottle
 User = get_user_model()
+from rest_framework.permissions import AllowAny
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
+    permission_classes = [AllowAny]  # allow guests to login
+    throttle_classes = [LoginThrottle, AnonLoginThrottle]
 
     def post(self, request, *args, **kwargs):
         response = super().post(request, *args, **kwargs)
@@ -54,6 +57,9 @@ class CustomTokenObtainPairView(TokenObtainPairView):
         return response
 
 class CustomTokenRefreshView(TokenRefreshView):
+    permission_classes = [AllowAny]
+    throttle_scope = "auth_refresh"
+
     def post(self, request, *args, **kwargs):
         refresh_token = request.COOKIES.get('refresh')
 
@@ -88,6 +94,9 @@ class CustomTokenRefreshView(TokenRefreshView):
 
 
 class CustomTokenVerifyView(TokenVerifyView):
+    permission_classes = [AllowAny]
+    throttle_scope = "auth_verify"
+    
     def post(self, request, *args, **kwargs):
         access_token = request.COOKIES.get('access')
 

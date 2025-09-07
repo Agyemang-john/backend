@@ -2,7 +2,7 @@ services:
   web:
     build: .
     entrypoint: /entrypoint.sh
-    command: gunicorn ecommerce.wsgi:application --bind 0.0.0.0:8000
+    command: gunicorn ecommerce.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 2 --timeout 120 --max-requests 1000 --max-requests-jitter 100
     environment:
       - DJANGO_SETTINGS_MODULE=ecommerce.settings
     volumes:
@@ -58,8 +58,29 @@ services:
 
   redis:
     image: redis:7
+    command: [
+      "redis-server",
+      "--appendonly", "yes",
+      "--appendfsync", "everysec"   # fsync once per second (balance safety + performance)
+    ]
     ports:
       - "6379:6379"
+    restart: always
+    volumes:
+      - redis_data:/data
+
+  flower:
+    build: .
+    command: celery -A ecommerce flower --port=5555 --broker=redis://redis:6379/0
+    ports:
+      - "5555:5555"
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    depends_on:
+      - redis
+      - web
     restart: always
 
   elasticsearch:
@@ -79,6 +100,7 @@ services:
 
 volumes:
   esdata:
+  redis_data:
   static_volume:
   certbot-etc:
   certbot-var:

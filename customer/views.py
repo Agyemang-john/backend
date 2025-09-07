@@ -6,6 +6,7 @@ from userauths.models import Profile
 from .serializers import *
 from product.models import  *
 from order.models import *
+from rest_framework.exceptions import NotFound
 
 
 class ProfileAPIView(APIView):

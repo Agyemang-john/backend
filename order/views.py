@@ -759,7 +759,7 @@ class OrderReceiptAPIView(APIView):
         # === Footer ===
         y -= 40
         p.setFont("Helvetica-Oblique", 10)
-        p.drawString(margin, y, "Thank you for your order! For questions, contact support@example.com")
+        p.drawString(margin, y, "Thank you for your order! For questions, contact support@negromart.com")
 
         p.showPage()
         p.save()

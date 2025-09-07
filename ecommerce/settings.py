@@ -195,29 +195,25 @@ AUTHENTICATION_BACKENDS = [
 AUTH_USER_MODEL = 'userauths.User'
 
 REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES': [
-        'userauths.authentication.CustomJWTAuthentication',
-        # 'rest_framework_simplejwt.authentication.JWTAuthentication',
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "userauths.authentication.CustomJWTAuthentication",
     ],
 
-    # 'DEFAULT_PERMISSION_CLASSES': [
-    #     'rest_framework.permissions.IsAuthenticated',
-    # ],
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
 
-    # 'DEFAULT_THROTTLE_RATES': {
-    #     'anon': '4000/day',
-    #     'user': '1000/day',
-    # }
-
-    # 'DEFAULT_THROTTLE_CLASSES': [
-    #     'rest_framework.throttling.AnonRateThrottle',
-    #     'rest_framework.throttling.UserRateThrottle',
-    # ],
-    # 'DEFAULT_THROTTLE_RATES': {
-    #     'anon': '5/min',  # anonymous users
-    #     'user': '10/min', # authenticated users
-    # }
+    "DEFAULT_THROTTLE_RATES": {
+        # Browsing (guests)
+        "anon": "2000/day",     # enough for product browsing/search
+        # Browsing (logged-in)
+        "user": "5000/day",     # generous since users are trusted
+        "auth_refresh": "60/min",
+        "auth_verify": "200/min",
+    },
 }
+
 
 #Paystack configuration
 PAYSTACK_SECRET_KEY = "sk_test_08697652e07898b20f337875bdd241b668a2abaa"
@@ -255,7 +251,7 @@ DJOSER = {
 }
 
 # Redis URL (set in .env)
-REDIS_URL = config("REDIS_URL", default="redis://127.0.0.1:6379/1")
+REDIS_URL = config("REDIS_URL", default="redis://redis:6379/0")
 
 # Caches (Redis as default backend)
 CACHES = {
@@ -274,16 +270,15 @@ CACHES = {
 SESSION_ENGINE = "django.contrib.sessions.backends.cache"
 SESSION_CACHE_ALIAS = "default"
 
-# Redis as broker
-CELERY_BROKER_URL = 'redis://redis:6379/0'
-CELERY_RESULT_BACKEND = 'redis://redis:6379/0'
-CELERY_ACCEPT_CONTENT = ['json']
-CELERY_TASK_SERIALIZER = 'json'
+# Celery settings
+CELERY_BROKER_URL = config("REDIS_URL", default="redis://redis:6379/0")
+CELERY_RESULT_BACKEND = config("REDIS_RESULT_URL", default="redis://redis:6379/1")
 
-#celery settings
-CELERY_TIMEZONE = 'UTC'
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_TIMEZONE = "UTC"
 CELERY_ENABLE_UTC = True
-CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
+CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 
 #SIMPLE JWT CONFIGURATION
 AUTH_COOKIE = 'access'

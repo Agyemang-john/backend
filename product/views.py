@@ -6,7 +6,7 @@ from .serializers import *
 from django.db.models import Avg, Count
 from userauths.authentication import CustomJWTAuthentication
 from address.serializers import AddressSerializer
-
+from django.http import Http404
 from django.core.cache import cache
 from rest_framework.permissions import AllowAny
 from product.service import get_recommended_products, get_cart_based_recommendations
@@ -56,8 +56,45 @@ class AjaxColorAPIView(APIView):
 
 
 
-def get_cached_product_data(sku, slug, request, currency):
-    cache_key = f"product_detail_cache:{sku}:{slug}:{currency}"
+# def get_cached_product_data(sku, slug, request, currency):
+#     cache_key = f"product_detail_cache:{sku}:{slug}:{currency}"
+#     cached_data = cache.get(cache_key)
+
+#     if cached_data:
+#         return deepcopy(cached_data), Product.objects.get(sku=sku, slug=slug)
+    
+#     product = get_object_or_404(
+#         Product.objects.annotate(
+#             average_rating=Avg('reviews__rating'),
+#             review_count=Count('reviews')
+#         ),
+#         slug=slug,
+#         status='published',
+#         sku=sku
+#     )
+
+#     p_images = ProductImageSerializer(product.p_images.all(), many=True, context={'request': request}).data
+#     related_products = Product.objects.filter(sub_category=product.sub_category, status="published").exclude(id=product.id)[:10]
+#     vendor_products = Product.objects.filter(vendor=product.vendor, status="published").exclude(id=product.id)[:10]
+#     reviews = ProductReview.objects.filter(product=product, status=True).order_by("-date")
+#     delivery_options = ProductDeliveryOption.objects.filter(product=product)
+
+#     shared_data = {
+#         "product": ProductSerializer(product, context={'request': request}).data,
+#         "p_images": p_images,
+#         "related_products": ProductSerializer(related_products, many=True, context={'request': request}).data,
+#         "vendor_products": ProductSerializer(vendor_products, many=True, context={'request': request}).data,
+#         "reviews": ProductReviewSerializer(reviews, many=True, context={'request': request}).data,
+#         'average_rating': product.average_rating or 0,
+#         'review_count': product.review_count or 0,
+#         'delivery_options': ProductDeliveryOptionSerializer(delivery_options, many=True).data
+#     }
+
+#     cache.set(cache_key, shared_data, timeout=600)
+#     return deepcopy(shared_data), product
+
+def get_cached_product_data(sku, slug, request):
+    cache_key = f"product_detail_cache:{sku}:{slug}"
     cached_data = cache.get(cache_key)
 
     if cached_data:
@@ -73,6 +110,7 @@ def get_cached_product_data(sku, slug, request, currency):
         sku=sku
     )
 
+    # Serialize static data only (exclude price/old_price/currency)
     p_images = ProductImageSerializer(product.p_images.all(), many=True, context={'request': request}).data
     related_products = Product.objects.filter(sub_category=product.sub_category, status="published").exclude(id=product.id)[:10]
     vendor_products = Product.objects.filter(vendor=product.vendor, status="published").exclude(id=product.id)[:10]
@@ -90,22 +128,55 @@ def get_cached_product_data(sku, slug, request, currency):
         'delivery_options': ProductDeliveryOptionSerializer(delivery_options, many=True).data
     }
 
+    # Remove cached dynamic fields
+    for field in ['price', 'old_price', 'currency']:
+        if field in shared_data['product']:
+            shared_data['product'].pop(field)
+
+        for list_name in ['related_products', 'vendor_products']:
+            for p in shared_data[list_name]:
+                if field in p:
+                    p.pop(field)
+
     cache.set(cache_key, shared_data, timeout=600)
     return deepcopy(shared_data), product
 
 
 def convert_currency(product_data, currency):
-    product_data['product']['currency'] = currency
-    product_data['product']['price'] = round(product_data['product']['price'], 2)
-    product_data['product']['old_price'] = round(product_data['product']['old_price'], 2)
+    rates = get_exchange_rates()  # always fresh
+    exchange_rate = rates.get(currency, 1)
 
+    # Update main product
+    product_obj = Product.objects.get(id=product_data['product']['id'])
+    product_data['product']['price'] = round(product_obj.price * exchange_rate, 2)
+    product_data['product']['old_price'] = round(product_obj.old_price * exchange_rate, 2)
+    product_data['product']['currency'] = currency
+
+    # Update related and vendor products
     for list_name in ['related_products', 'vendor_products']:
         for p in product_data[list_name]:
+            p_obj = Product.objects.get(id=p['id'])
+            p['price'] = round(p_obj.price * exchange_rate, 2)
+            p['old_price'] = round(p_obj.old_price * exchange_rate, 2)
             p['currency'] = currency
-            p['price'] = round(p['price'], 2)
-            p['old_price'] = round(p['old_price'], 2)
+
+    # ✅ Add fresh variant prices (if variant_data exists)
+    if 'variant_data' in product_data:
+        variant_info = product_data['variant_data'].get('variant')
+        if variant_info:
+            variant_obj = Variants.objects.get(id=variant_info['id'])
+            variant_info['price'] = round(variant_obj.price * exchange_rate, 2)
+            variant_info['currency'] = currency
+
+        # Also update sizes/colors if needed
+        for key in ['sizes', 'colors']:
+            for v in product_data['variant_data'].get(key, []):
+                v_obj = Variants.objects.get(id=v['id'])
+                v['price'] = round(v_obj.price * exchange_rate, 2)
+                v['currency'] = currency
 
     return product_data
+
 
 
 class ProductDetailAPIView(APIView):
@@ -115,11 +186,11 @@ class ProductDetailAPIView(APIView):
         try:
             variant_id = request.GET.get('variantid')
             currency = request.headers.get('X-Currency', 'GHS')
-            rates = get_exchange_rates()
-            exchange_rate = rates.get(currency, 1)
+            try:
+                shared_data, product = get_cached_product_data(sku, slug, request)
+            except Http404:
+                return Response({"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
 
-            # 🔁 Get cached or DB data
-            shared_data, product = get_cached_product_data(sku, slug, request, currency)
             shared_data = convert_currency(shared_data, currency)
 
             # 🔄 Fresh: variant, stock, shipping, cart
@@ -139,6 +210,9 @@ class ProductDetailAPIView(APIView):
                         'SELECT * FROM product_variants WHERE product_id=%s GROUP BY size_id', [product.id]
                     ), many=True, context={'request': request}).data,
                 }
+            
+            shared_data['variant_data'] = variant_data
+            shared_data = convert_currency(shared_data, currency)
 
             is_following = (
                 request.user.is_authenticated and
@@ -185,7 +259,7 @@ class ProductDetailAPIView(APIView):
 
             if cart_data["cart_quantity"] >= stock_quantity and stock_quantity != 0:
                 is_out_of_stock = True
-
+            
             return Response({
                 **shared_data,
                 "address": AddressSerializer(address).data if address else None,
