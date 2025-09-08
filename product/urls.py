@@ -1,9 +1,10 @@
 
 from django.urls import path
-from .views import AjaxColorAPIView, ProductDetailAPIView, CategoryProductListView, BrandProductListView, CartDataView, RecentlyViewedProducts, ProductSearchAPIView, SearchSuggestionsAPIView, CartRecommendationsAPIView, FrequentlyBoughtTogetherAPIView, ProductsAPIView
+from .views import AddProductReviewView, AjaxColorAPIView, ProductDetailAPIView, CategoryProductListView, BrandProductListView, CartDataView, RecentlyViewedProducts, ProductSearchAPIView, SearchSuggestionsAPIView, CartRecommendationsAPIView, FrequentlyBoughtTogetherAPIView, ProductsAPIView
 
 urlpatterns = [
     # AJAX and custom endpoints
+    path('add-review/', AddProductReviewView.as_view(), name='product-review-create'),
     path('products/', ProductsAPIView.as_view(), name='products'),
     path('ajaxcolor/', AjaxColorAPIView.as_view(), name='change_color'),
 

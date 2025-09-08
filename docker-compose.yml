@@ -2,14 +2,7 @@ services:
   web:
     build: .
     entrypoint: /entrypoint.sh
-    command: >
-      gunicorn ecommerce.wsgi:application
-      --bind 0.0.0.0:8000
-      --workers 1
-      --worker-class gevent
-      --worker-connections 500
-      --timeout 120
-
+    command: gunicorn ecommerce.wsgi:application --bind 0.0.0.0:8000
     environment:
       - DJANGO_SETTINGS_MODULE=ecommerce.settings
     volumes:
