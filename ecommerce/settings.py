@@ -196,8 +196,8 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 if ENV == 'production':
     AWS_ACCESS_KEY_ID = config("AWS_ACCESS_KEY_ID")
     AWS_SECRET_ACCESS_KEY = config("AWS_SECRET_ACCESS_KEY")
-    AWS_STORAGE_BUCKET_NAME = "negromart-space"
-    AWS_S3_REGION_NAME = "sfo3"
+    AWS_STORAGE_BUCKET_NAME = "negromart-storage"
+    AWS_S3_REGION_NAME = "nyc3"
     AWS_S3_ENDPOINT_URL = f"https://{AWS_S3_REGION_NAME}.digitaloceanspaces.com"
     AWS_S3_CUSTOM_DOMAIN = f"{AWS_STORAGE_BUCKET_NAME}.{AWS_S3_REGION_NAME}.cdn.digitaloceanspaces.com"
     AWS_DEFAULT_ACL = "public-read"
