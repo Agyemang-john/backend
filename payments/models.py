@@ -3,11 +3,13 @@ from userauths.models import User
 from django.utils import timezone
 import secrets
 from vendor.models import *
+from order.models import Order
+from django.conf import settings
 # from paystack import Paystack
 
 # Create your models here.
 class UserWallet(models.Model):
-    user = models.OneToOneField(User,null=True ,on_delete=models.CASCADE)
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, related_name='wallet', null=True ,on_delete=models.CASCADE)
     currency = models.CharField(max_length=50, default='GHS')
     created_at = models.DateTimeField(default=timezone.now, null=True)
 
@@ -15,7 +17,7 @@ class UserWallet(models.Model):
         return self.user.__str__()
     
 class Payment(models.Model):
-    user = models.ForeignKey(User, on_delete=models.CASCADE, blank=True, null=True)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='payments', blank=True, null=True)
     amount = models.PositiveIntegerField()
     ref = models.CharField(max_length=200)
     email = models.EmailField()
@@ -62,3 +64,16 @@ class Subscription(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.plan.name}"
+
+
+class Payout(models.Model):
+    vendor = models.ForeignKey(Vendor, on_delete=models.CASCADE)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    product_total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    delivery_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    status = models.CharField(max_length=20, choices=[('success', 'Success'), ('failed', 'Failed')])
+    transaction_id = models.CharField(max_length=100, null=True, blank=True)
+    error_message = models.TextField(null=True, blank=True)
+    order = models.ManyToManyField(Order, related_name='payouts')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)

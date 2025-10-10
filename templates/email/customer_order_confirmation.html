@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <title>Order Confirmation</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background-color: #f5f5f5;
+        padding: 20px;
+        color: #111;
+      }
+      .container {
+        max-width: 600px;
+        background: #ffffff;
+        margin: auto;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.08);
+      }
+      .header {
+        background: #ffffff;
+        padding: 20px;
+        text-align: center;
+        border-bottom: 2px solid #000;
+      }
+      .header img {
+        max-height: 50px;
+      }
+      .content {
+        padding: 20px;
+      }
+      .content h2 {
+        color: #000;
+        margin-bottom: 15px;
+      }
+      .order-summary {
+        background: #fafafa;
+        padding: 15px;
+        border-radius: 6px;
+        border: 1px solid #e5e5e5;
+        margin: 20px 0;
+      }
+      .order-summary p {
+        margin: 5px 0;
+        font-size: 14px;
+      }
+      .btn {
+        display: inline-block;
+        background: #000;
+        color: #fff !important;
+        padding: 12px 20px;
+        text-decoration: none;
+        border-radius: 4px;
+        font-weight: bold;
+      }
+      .btn:hover {
+        background: #333;
+      }
+      .footer {
+        text-align: center;
+        font-size: 12px;
+        color: #777;
+        padding: 15px 0;
+        border-top: 1px solid #eee;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <!-- Header with logo -->
+      <div class="header">
+        <img src="{{ site_logo_url }}" alt="{{ site_name }} Logo">
+      </div>
+
+      <div class="content">
+        <h2>Thank You for Your Order, {{ customer_name }}!</h2>
+        <p>Your order #{{ order.order_number }} has been successfully placed.</p>
+
+        <div class="order-summary">
+          <p><strong>Order Number:</strong> {{ order.order_number }}</p>
+          <p><strong>Total Amount:</strong> ${{ order.total }}</p>
+          <p><strong>Payment Method:</strong> {{ order.get_payment_method_display }}</p>
+          <p><strong>Status:</strong> {{ order.get_status_display }}</p>
+          <p><strong>Shipping Address:</strong><br>
+             {{ order.address.full_name }}<br>
+             {{ order.address.address }}<br>
+             {{ order.address.town }}, {{ order.address.region }}<br>
+             {{ order.address.country }}
+          </p>
+        </div>
+
+        <p>
+          <a href="{{ order_url }}" class="btn">Track Your Order</a>
+        </p>
+
+        <p>If you have any questions, please contact our support team. support@negromart.com</p>
+      </div>
+
+      <div class="footer">
+        <p>&copy; {{ year }} {{ site_name }}. All rights reserved.</p>
+      </div>
+    </div>
+  </body>
+</html>

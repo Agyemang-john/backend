@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Shop Application Status</title>
+</head>
+<body style="font-family: 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; background-color: #f4f4f4;">
+    <div style="max-width: 600px; margin: 20px auto; padding: 20px; background-color: #ffffff; border-radius: 0px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+        <div style="background-color: #2c3e50; padding: 15px; text-align: center; border-radius: 8px 8px 0 0;">
+            <img src="https://negromart.com/favicon.png" alt="Negromart Logo" style="max-width: 150px; height: auto;">
+        </div>
+        <div style="padding: 20px;">
+            <h2 style="color: #2c3e50; font-size: 24px; margin-bottom: 20px;">Shop Application Status</h2>
+            <p style="font-size: 16px;">Dear {{ user.get_full_name|default:user.first_name }},</p>
+            <p style="font-size: 16px;">
+                We regret to inform you that your shop application for <strong>{{ vendor_name }}</strong> 
+                has not been approved at this time.
+            </p>
+            <p style="font-size: 16px;">
+                This decision may be due to incomplete documentation or other verification issues. 
+                Please review our vendor requirements and resubmit your application if needed.
+            </p>
+            <p style="text-align: center; margin: 30px 0;">
+                <a href="https://seller.negromart.com"
+                   style="background-color: #dc3545; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-size: 16px; font-weight: bold;">
+                    Review Requirements
+                </a>
+            </p>
+            <p style="font-size: 16px;">
+                For further assistance, contact our support team at 
+                <a href="mailto:support@negromart.com" style="color: #dc3545; text-decoration: none;">support@negromart.com</a>.
+            </p>
+            <p style="font-size: 16px;">Best regards,<br>The Negromart Team</p>
+        </div>
+        <div style="background-color: #f4f4f4; padding: 10px; text-align: center; font-size: 12px; color: #666; border-radius: 0 0 8px 8px;">
+            <p>&copy; {% now 'Y' %} Negromart. All rights reserved.</p>
+            <p><a href="https://negromart.com" style="color: #dc3545; text-decoration: none;">Visit our website</a></p>
+        </div>
+    </div>
+</body>
+</html>

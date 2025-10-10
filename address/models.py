@@ -5,13 +5,14 @@ from userauths.models import User
 
 
 class Country(models.Model):
-    name = models.CharField(max_length=40)
+    name = models.CharField(max_length=40, unique=True)
+    code = models.CharField(max_length=3, unique=True, blank=True, null=True, default='GH')  # ISO code like 'GH', 'US', etc.
 
     class Meta:
         verbose_name_plural = "Countries"
 
     def __str__(self):
-        return self.name
+        return f"{self.name} ({self.code})"
 
 
 class Region(models.Model):
@@ -60,8 +61,8 @@ class Address(models.Model):
     email = models.EmailField(null=True, blank=True, validators=[EmailValidator()])
     mobile = models.CharField(max_length=15, null=True, blank=True, validators=[RegexValidator(r'^\+?\d{10,15}$', message="Invalid phone number.")])
     status = models.BooleanField(default=False)
-    latitude = models.FloatField(null=True, blank=True)
-    longitude = models.FloatField(null=True, blank=True)
+    latitude = models.FloatField(null=True, blank=True, default=5.5600)
+    longitude = models.FloatField(null=True, blank=True, default=-0.2050)
     modified_at = models.DateTimeField(auto_now=True)
     date_added = models.DateTimeField(default=timezone.now)
 

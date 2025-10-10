@@ -5,16 +5,14 @@ from django.utils.html import mark_safe
 from address.models import *
 from vendor.models import *
 from decimal import Decimal
-from .service import calculate_delivery_fee
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ObjectDoesNotExist
 import uuid
 from product.utils import *
+from .service import FeeCalculator, FeeResult
 
 
 # Create your models here.
-
-
 
 PAYMENT_STATUS = (
     ('received', 'Received'),
@@ -57,7 +55,6 @@ class Cart(models.Model):
 
     objects = CartManager()
 
-
     class Meta:
         ordering = ['-updated_at']
 
@@ -84,82 +81,33 @@ class Cart(models.Model):
     def total_items(self):
         return self.cart_items.count()
     
+    def calculate_total_delivery_fee(self):
+        address = Address.objects.filter(user=self.user, status=True).first()
+        if not address or address.latitude is None or address.longitude is None:
+            logger.warning(f"No valid default address for user {self.user.email if self.user else 'anonymous'}. Falling back to zero delivery fee.")
+            return Decimal(0)
+        
+        # Get buyer country: Address > Profile > 'GH'
+        user_profile = Profile.objects.filter(user=self.user).first()
+        buyer_country = address.country if address and address.country else \
+                        user_profile.country if user_profile and user_profile.country else 'GH'
+        
+        fee_result = FeeCalculator.calculate_total_delivery_fee(self.cart_items.all(), address, buyer_country_code=buyer_country)
+        return fee_result.total
+
+    def calculate_grand_total(self):
+        return Decimal(self.total_price) + self.calculate_total_delivery_fee()
     
     def calculate_packaging_fees(self):
         """Calculate total packaging fees."""
-        return sum(item.packaging_fee() for item in self.cart_items.all())
-    
-    def calculate_total_delivery_fee(self, user_profile):
-        """
-        Calculate the total delivery fee based on vendors and their respective locations.
-        Each vendor is processed once.
-        """
-        processed_vendors = set()
-        total_delivery_fee = Decimal(0)
-        vendor_delivery_fees = {}
-
-        packaging_fees = Decimal(self.calculate_packaging_fees())
-
-        for item in self.cart_items.all():
-
-            product_delivery_option = ProductDeliveryOption.objects.filter(
-                product=item.product, default=True
-            ).first()
-
-            # Fallback if no default option is defined
-            if not product_delivery_option:
-                product_delivery_option = ProductDeliveryOption.objects.filter(product=item.product).first()
-
-
-            product = item.product
-            vendor = product.vendor
-            # delivery_option_cost = item.delivery_option.cost if item.delivery_option else product_delivery_option.delivery_option.cost
-            if item.delivery_option:
-                delivery_option_cost = item.delivery_option.cost
-            elif product_delivery_option and product_delivery_option.delivery_option:
-                delivery_option_cost = product_delivery_option.delivery_option.cost
-            else:
-                raise ValidationError(f"No delivery option available for product: {item.product.title}")
-
-
-
-            # Retrieve delivery options for the product that are set to default
-
-
-            if vendor not in processed_vendors:
-                # Calculate the delivery fee based on the vendor's location
-                delivery_fee = calculate_delivery_fee(
-                    vendor.about.latitude, vendor.about.longitude,
-                    user_profile.latitude, user_profile.longitude,
-                    delivery_option_cost  # Use the first product's delivery option cost for calculation
-                )
-                total_delivery_fee += Decimal(delivery_fee)
-                vendor_delivery_fees[vendor.id] = Decimal(delivery_fee)
-                processed_vendors.add(vendor)
-            else:
-                # If the vendor has already been processed, add only the delivery option cost
-                total_delivery_fee += Decimal(delivery_option_cost)
-
-        return total_delivery_fee + packaging_fees
-    
-    
-    def calculate_grand_total(self, user_profile):
-        """
-        Calculate the grand total amount for the cart.
-        """
-        total_amount = Decimal(self.total_price)  # Convert total_price to Decimal
-        # packaging_fees = Decimal(self.calculate_packaging_fees())  # Convert packaging fees to Decimal
-        delivery_fees = Decimal(self.calculate_total_delivery_fee(user_profile))  # Convert delivery fees to Decimal
-
-        grand_total = total_amount + delivery_fees
-        return grand_total
+        return Decimal(sum(item.packaging_fee() for item in self.cart_items.all()))
     
     def check_address_region(self, user_profile):
         """
         Check if the user's address region is in the available regions for each product in the cart.
         If not, raise a validation error or remove the product from the cart.
         """
-        user_region = user_profile.region
+        user_region = user_profile.contry
 
         # Go through each cart item and check the product's available regions
         for item in self.cart_items.all():
@@ -178,7 +126,7 @@ class Cart(models.Model):
         Prevent checkout if the user's address region is not in the available regions for any product.
         Raises a ValidationError if any product is unavailable in the user's region.
         """
-        user_region = user_profile.region
+        user_region = user_profile.country
 
         # Go through each cart item and check the product's available regions
         for item in self.cart_items.all():
@@ -190,9 +138,6 @@ class Cart(models.Model):
                 if not product.available_in_regions.filter(name=user_region).exists():
                     raise ValidationError(f"The product '{product.title}' is not available in your region: {user_region}")
                 
-    
-    
-
 # CartItem model
 class CartItem(models.Model):
     cart = models.ForeignKey(Cart, related_name='cart_items', on_delete=models.CASCADE)
@@ -213,10 +158,10 @@ class CartItem(models.Model):
     @property
     def price(self):
         return self.variant.price if self.variant else self.product.price
-
+    
     @property
     def amount(self):
-        return self.quantity * self.price
+        return Decimal(self.quantity) * self.price
 
     def packaging_fee(self):
         return calculate_packaging_fee(self.product.weight, self.product.volume) * self.quantity
@@ -268,11 +213,12 @@ class Order(models.Model):
     payment_id = models.CharField(max_length=200, null=True, blank=True, editable=False)
     address = models.ForeignKey(Address, on_delete=models.CASCADE)
     payment_method = models.CharField(max_length=30, choices=PAYMENT_METHOD, default='paystack')
-    total = models.FloatField()
+    total = models.DecimalField(max_digits=10, decimal_places=2)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
     ip = models.CharField(blank=True, max_length=20)
     adminnote = models.CharField(blank=True, max_length=100)
     is_ordered = models.BooleanField(default=False)
+    response_date = models.DateTimeField(null=True, blank=True)
     date_created = models.DateTimeField(auto_now_add=True)
     date_updated = models.DateTimeField(auto_now=True)
 
@@ -289,161 +235,154 @@ class Order(models.Model):
     def total_price(self):
         return sum(item.amount for item in self.order_products.all())
     
+    def calculate_total_delivery_fee(self):
+        if not hasattr(self.address, 'latitude') or not hasattr(self.address, 'longitude') or self.address.latitude is None or self.address.longitude is None:
+            logger.warning(f"Order {self.order_number} has no valid address coordinates. Falling back to zero delivery fee.")
+            return Decimal(0)
+        return FeeCalculator.calculate_total_delivery_fee(self.order_products.all(), self.address, item_type='order')
+
+    def calculate_grand_total(self):
+        return Decimal(self.total_price) + self.calculate_total_delivery_fee().total
+    
     def calculate_packaging_fees(self):
         """Calculate total packaging fees."""
         return sum(item.packaging_fee() for item in self.order_products.all())
     
-    def calculate_total_delivery_fee(self, user_profile):
-        """
-        Calculate the total delivery fee based on vendors and their respective locations.
-        Each vendor is processed once.
-        """
-        processed_vendors = set()
-        total_delivery_fee = Decimal(0)
-        vendor_delivery_fees = {}
-
-        packaging_fees = Decimal(self.calculate_packaging_fees())
-
-        for item in self.order_products.all():
-
-            product_delivery_option = ProductDeliveryOption.objects.filter(
-                product=item.product, default=True
-            ).first()
-
-            product = item.product
-            vendor = product.vendor
-            delivery_option_cost = item.selected_delivery_option.cost if item.selected_delivery_option else product_delivery_option.delivery_option.cost
-
-            # Retrieve delivery options for the product that are set to default
-
-
-            if vendor not in processed_vendors:
-                # Calculate the delivery fee based on the vendor's location
-                delivery_fee = calculate_delivery_fee(
-                    vendor.about.latitude, vendor.about.longitude,
-                    user_profile.latitude, user_profile.longitude,
-                    delivery_option_cost  # Use the first product's delivery option cost for calculation
-                )
-                total_delivery_fee += Decimal(delivery_fee)
-                vendor_delivery_fees[vendor.id] = Decimal(delivery_fee)
-                processed_vendors.add(vendor)
-            else:
-                # If the vendor has already been processed, add only the delivery option cost
-                total_delivery_fee += Decimal(delivery_option_cost)
-
-        return total_delivery_fee + packaging_fees
-    
-    
-    def calculate_grand_total(self, user_profile):
-        """
-        Calculate the grand total amount for the cart.
-        """
-        total_amount = Decimal(self.total_price)  # Convert total_price to Decimal
-        # packaging_fees = Decimal(self.calculate_packaging_fees())  # Convert packaging fees to Decimal
-        delivery_fees = Decimal(self.calculate_total_delivery_fee(user_profile))  # Convert delivery fees to Decimal
-
-        grand_total = total_amount + delivery_fees
-        return grand_total
-    
     def get_overall_delivery_range(self):
         """
-        Calculate the overall delivery range for the order based on associated OrderProducts.
+        Calculate the overall delivery range for the order based on OrderProducts.
         """
-        today = datetime.now().date()
         order_products = self.order_products.all()
-
         if not order_products.exists():
-            return None  # No products in the order
-
-        # Initialize min and max dates to extreme values
-        overall_min_date = None
-        overall_max_date = None
-
-        for product in order_products:
-            if product.selected_delivery_option:
-                min_date = (product.date_created + timedelta(days=product.selected_delivery_option.min_days)).date()
-                max_date = (product.date_created + timedelta(days=product.selected_delivery_option.max_days)).date()
-
-                # Update overall min and max dates
-                if overall_min_date is None or min_date < overall_min_date:
-                    overall_min_date = min_date
-                if overall_max_date is None or max_date > overall_max_date:
-                    overall_max_date = max_date
-
-        # If any dates are missing, return None
-        if not overall_min_date or not overall_max_date:
+            logger.warning(f"No order products found for order {self.order_number}")
             return None
 
-        # If overdue
-        if overall_max_date < today:
-            return f"Delivery was expected by {overall_max_date.strftime('%d %B %Y')} and is now overdue."
+        min_date = None
+        max_date = None
 
-        # Humanize the range
-        from_date = "today" if overall_min_date == today else overall_min_date.strftime('%d %B %Y')
-        to_date = "today" if overall_max_date == today else overall_max_date.strftime('%d %B %Y')
+        for product in order_products:
+            delivery_range = product.get_delivery_range()
+            if not delivery_range or "Overdue" in delivery_range:
+                continue  # Skip invalid or overdue ranges
 
-        if from_date == to_date:
-            return f"Delivery expected on {from_date}"  # Single day range
-        return f"Delivery expected from {from_date} to {to_date}"
-    
-    def get_vendor_total(self, vendor):
-        """
-        Calculate the total amount for a specific vendor in this order.
-        """
-        order_products = self.order_products.filter(product__vendor=vendor)
-        return sum(op.amount for op in order_products)
-    
-    def get_vendor_delivery_cost(self, vendor):
-        """
-        Calculate the total delivery cost for a specific vendor in this order.
-        """
-        order_products = self.order_products.filter(product__vendor=vendor)
-        return sum(op.selected_delivery_option.cost for op in order_products if op.selected_delivery_option)
+            # Parse the delivery range string to extract dates
+            if delivery_range == "Today":
+                delivery_date = timezone.now().date()
+                min_date = min_date or delivery_date
+                max_date = max_date or delivery_date
+                min_date = min(min_date, delivery_date)
+                max_date = max(max_date, delivery_date)
+            elif delivery_range.startswith("Overdue"):
+                continue  # Skip overdue deliveries for overall range
+            else:
+                try:
+                    # Handle single date or range (e.g., "Sep 25, 2025" or "Sep 25, 2025 to Sep 27, 2025")
+                    parts = delivery_range.split(" to ")
+                    from_date = parts[0]
+                    to_date = parts[-1]
+                    from_date = timezone.datetime.strptime(from_date, "%b %d, %Y").date() if from_date != "Today" else timezone.now().date()
+                    to_date = timezone.datetime.strptime(to_date, "%b %d, %Y").date() if to_date != "Today" else timezone.now().date()
+                    min_date = min_date or from_date
+                    max_date = max_date or to_date
+                    min_date = min(min_date, from_date)
+                    max_date = max(max_date, to_date)
+                except ValueError as e:
+                    logger.error(f"Error parsing delivery range for order {self.order_number}: {delivery_range}, {str(e)}")
+                    continue
+
+        if not min_date or not max_date:
+            return None
+
+        today = timezone.now().date()
+        if max_date < today:
+            return f"Overdue (expected by {max_date.strftime('%b %d, %Y')})"
+
+        from_date = "Today" if min_date == today else min_date.strftime("%b %d, %Y")
+        to_date = "Today" if max_date == today else max_date.strftime("%b %d, %Y")
+        return f"{from_date}" if from_date == to_date else f"{from_date} to {to_date}"
 
     def get_vendor_delivery_date_range(self, vendor):
         """
         Calculate the delivery date range for a specific vendor in the order.
         """
-        from datetime import datetime, timedelta
-
-        min_delivery_date = None
-        max_delivery_date = None
-
-        # Filter order products by the vendor
         order_products = self.order_products.filter(product__vendor=vendor)
+        if not order_products.exists():
+            logger.warning(f"No order products found for vendor {vendor} in order {self.order_number}")
+            return None
+
+        min_date = None
+        max_date = None
 
         for order_product in order_products:
-            delivery_option = order_product.selected_delivery_option  # Buyer's selected option
-            if not delivery_option:
-                # Fall back to seller's default delivery option
-                delivery_option = ProductDeliveryOption.objects.filter(
-                    product=order_product.product,
-                    variant=order_product.variant,
-                    default=True,
-                ).first()
+            delivery_range = order_product.get_delivery_range()
+            if not delivery_range or "Overdue" in delivery_range:
+                continue  # Skip invalid or overdue ranges
 
-            if delivery_option:
-                delivery_dates = delivery_option.get_delivery_date_range()
-                if isinstance(delivery_dates, str):  # Handle same-day cases
-                    return delivery_dates
-                else:
-                    min_date, max_date = delivery_dates
-                    if min_delivery_date is None or min_date < min_delivery_date:
-                        min_delivery_date = min_date
-                    if max_delivery_date is None or max_date > max_delivery_date:
-                        max_delivery_date = max_date
+            if delivery_range == "Today":
+                delivery_date = timezone.now().date()
+                min_date = min_date or delivery_date
+                max_date = max_date or delivery_date
+                min_date = min(min_date, delivery_date)
+                max_date = max(max_date, delivery_date)
+            else:
+                try:
+                    parts = delivery_range.split(" to ")
+                    from_date = parts[0]
+                    to_date = parts[-1]
+                    from_date = timezone.datetime.strptime(from_date, "%b %d, %Y").date() if from_date != "Today" else timezone.now().date()
+                    to_date = timezone.datetime.strptime(to_date, "%b %d, %Y").date() if to_date != "Today" else timezone.now().date()
+                    min_date = min_date or from_date
+                    max_date = max_date or to_date
+                    min_date = min(min_date, from_date)
+                    max_date = max(max_date, to_date)
+                except ValueError as e:
+                    logger.error(f"Error parsing delivery range for vendor {vendor} in order {self.order_number}: {delivery_range}, {str(e)}")
+                    continue
 
-        if min_delivery_date and max_delivery_date:
-            return f"{min_delivery_date.strftime('%d %B')} to {max_delivery_date.strftime('%d %B')}"
-        return "Delivery date unavailable"
+        if not min_date or not max_date:
+            return "Delivery date unavailable"
+
+        today = timezone.now().date()
+        if max_date < today:
+            return f"Overdue (expected by {max_date.strftime('%b %d, %Y')})"
+
+        from_date = "Today" if min_date == today else min_date.strftime("%b %d, %Y")
+        to_date = "Today" if max_date == today else max_date.strftime("%b %d, %Y")
+        return f"{from_date}" if from_date == to_date else f"{from_date} to {to_date}"
+
+    def get_vendor_total(self, vendor):
+        """Calculate the total amount for a specific vendor in this order."""
+        order_products = self.order_products.filter(product__vendor=vendor)
+        return sum(op.amount for op in order_products)
+
+    def get_vendor_delivery_cost(self, vendor):
+        """Calculate the total delivery cost for a specific vendor in this order."""
+        order_products = self.order_products.filter(product__vendor=vendor)
+        return sum(op.selected_delivery_option.cost for op in order_products if op.selected_delivery_option)
+    
+    def calculate_vendor_delivery_fee(self, vendor):
+        if not hasattr(self.address, 'latitude') or not hasattr(self.address, 'longitude') or self.address.latitude is None or self.address.longitude is None:
+            logger.warning(f"Order {self.order_number} has no valid address coordinates for vendor {vendor}. Falling back to zero delivery fee.")
+            return FeeResult(total=Decimal(0), dynamic_quotes={}, invalid_items=[])
+
+        items = self.order_products.filter(product__vendor=vendor)
+        if not items.exists():
+            return FeeResult(total=Decimal(0), dynamic_quotes={}, invalid_items=[])
+
+        return FeeCalculator.calculate_total_delivery_fee(items, self.address, item_type='order')
+
+    def calculate_vendor_grand_total(self, vendor):
+        vendor_total = self.get_vendor_total(vendor)
+        vendor_delivery_fee = self.calculate_vendor_delivery_fee(vendor)
+        return vendor_total + vendor_delivery_fee.total
 
 class OrderProduct(models.Model):
     order = models.ForeignKey(Order, related_name='order_products', on_delete=models.CASCADE)
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
     variant = models.ForeignKey(Variants, on_delete=models.SET_NULL, null=True, blank=True)
     quantity = models.PositiveIntegerField()
-    price = models.FloatField()
-    amount = models.FloatField()  # Could be calculated as quantity * price
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
     status = models.CharField(max_length=20, choices=[
         ('pending', 'Pending'),
         ('processing', 'Processing'),
@@ -458,7 +397,11 @@ class OrderProduct(models.Model):
         null=True,
         blank=True,
         related_name="order_products",
-    ) 
+    )
+    shipped_date = models.DateTimeField(null=True, blank=True)
+    delivered_date = models.DateTimeField(null=True, blank=True)
+    tracking_number = models.CharField(max_length=100, null=True, blank=True)
+    refund_reason = models.CharField(max_length=200, null=True, blank=True)
 
     date_created = models.DateTimeField(auto_now_add=True)
     date_updated = models.DateTimeField(auto_now=True)
@@ -470,33 +413,45 @@ class OrderProduct(models.Model):
         return calculate_packaging_fee(self.product.weight, self.product.volume) * self.quantity
 
     def save(self, *args, **kwargs):
-        self.amount = self.quantity * self.price  # Calculate amount
+        self.amount = Decimal(self.quantity) * self.price  # Calculate amount
         super().save(*args, **kwargs)
     
     def get_delivery_range(self):
+        """
+        Get the delivery date range for this OrderProduct, using date_created as reference.
+        """
         if not self.selected_delivery_option:
-            return None  # No delivery option selected
+            # Fallback to default delivery option
+            product_delivery_option = ProductDeliveryOption.objects.filter(
+                product=self.product, variant=self.variant, default=True
+            ).first()
+            if product_delivery_option and product_delivery_option.delivery_option:
+                return product_delivery_option.get_delivery_date_range(self.date_created)
+            logger.warning(f"No delivery option for OrderProduct (product: {self.product.title})")
+            return None
+        return self.selected_delivery_option.get_delivery_date_range(self.date_created)
 
-        today = datetime.now().date()
-        min_delivery_date = (self.date_created + timedelta(days=self.selected_delivery_option.min_days)).date()
-        max_delivery_date = (self.date_created + timedelta(days=self.selected_delivery_option.max_days)).date()
-
-        # If the delivery is overdue
-        if max_delivery_date < today:
-            return f"Delivery was expected by {max_delivery_date.strftime('%d %B %Y')} and is now overdue."
-
-        # Humanize the dates
-        from_date = "today" if min_delivery_date == today else min_delivery_date.strftime('%d %B %Y')
-        to_date = "today" if max_delivery_date == today else max_delivery_date.strftime('%d %B %Y')
-
-        if from_date == to_date:
-            return f"Delivery expected on {from_date}"  # If from and to are the same
-        return f"Delivery expected from {from_date} to {to_date}"
+    def get_delivery_status(self):
+        """
+        Get the delivery status for this OrderProduct.
+        """
+        if not self.selected_delivery_option:
+            # Fallback to default delivery option
+            product_delivery_option = ProductDeliveryOption.objects.filter(
+                product=self.product, variant=self.variant, default=True
+            ).first()
+            if product_delivery_option and product_delivery_option.delivery_option:
+                return product_delivery_option.delivery_option.get_delivery_status(self.date_created)
+            return "Delivery option unavailable"
+        return self.selected_delivery_option.get_delivery_status(self.date_created)
+    
 
     def __str__(self):
         return f"{self.product.title} (Order {self.order.order_number})"
     
-    def get_delivery_status(self):
-        if self.selected_delivery_option:
-            return self.selected_delivery_option.get_delivery_status()
-        return "Delivery option unavailable"
+
+class Refund(models.Model):
+    order_product = models.ForeignKey(OrderProduct, on_delete=models.CASCADE)
+    amount = models.FloatField()
+    reason = models.TextField()
+    date = models.DateTimeField(auto_now_add=True)

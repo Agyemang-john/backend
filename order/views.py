@@ -1,32 +1,26 @@
 from decimal import Decimal
-from django.core.exceptions import ObjectDoesNotExist
 from django.shortcuts import get_object_or_404
 from rest_framework import status, views
 
 from address.models import Address
 from address.serializers import AddressSerializer
-from .serializers import OrderSerializer
 from order.service import calculate_delivery_fee
 from .models import Cart, CartItem, Order, OrderProduct
 from product.models import Product, Variants
 from rest_framework.response import Response
 from django.utils.crypto import get_random_string
 from django.core.exceptions import ObjectDoesNotExist
-from django.http import JsonResponse
 from product.models import Product, ProductDeliveryOption
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.permissions import AllowAny  # Optional, depending on your auth setup
 from .serializers import *
 from product.utils import *
 from userauths.models import User
-from userauths.authentication import CustomJWTAuthentication
-from django.utils.timezone import now
 from django.http import HttpResponse
 from reportlab.pdfgen import canvas
 import os
 from django.conf import settings
 
-
+from order.service import FeeCalculator
 from rest_framework.permissions import IsAuthenticated
 from django.http import JsonResponse
 from rest_framework import status, views
@@ -34,10 +28,9 @@ from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from order.models import Cart, CartItem
 from product.models import Product, Variants, ProductDeliveryOption
-from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework.exceptions import NotFound
 from rest_framework.views import APIView
-from product.serializers import ProductSerializer, VariantSerializer
-from .cart_utils import get_authenticated_cart_response, get_guest_cart_response, calculate_packaging_fee
+from .cart_utils import get_authenticated_cart_response, get_guest_cart_response
 
 logger = logging.getLogger(__name__)
 
@@ -344,85 +337,94 @@ class NavInfo(APIView):
         })
 
 
-###############################################################
 #####################CHECKOUT##################################
-###############################################################
-
 class CheckoutAPIView(APIView):
-    permission_classes = [IsAuthenticated]
-
     def get(self, request):
         user = request.user
+        default_address = Address.objects.filter(user=user, status=True).first()
         profile = get_object_or_404(Profile, user=user)
-
         cart = Cart.objects.get_for_request(request)
         if not cart:
             return Response({"error": "No cart found for this user"}, status=status.HTTP_404_NOT_FOUND)
 
-        cart_items = CartItem.objects.filter(cart=cart)
+        # Prioritize Address.country (CharField), then Profile.country, then 'GH'
+        buyer_country = default_address.country if default_address and default_address.country else \
+                        profile.country if profile and profile.country else 'GH'
+
+        try:
+            # Pass profile to check region compatibility
+            cart.prevent_checkout_unavailable_products(default_address)
+        except ValidationError as e:    
+            logger.error(f"Checkout validation failed: {str(e)}")
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        cart_items = CartItem.objects.filter(cart=cart).select_related(
+            'product__vendor__about', 'product__vendor__shipping_from_country', 'delivery_option'
+        ).prefetch_related('product__productdeliveryoption_set__delivery_option')
         if not cart_items.exists():
             return Response({"detail": "There are no items to checkout."}, status=status.HTTP_400_BAD_REQUEST)
 
-        total_delivery_fee = Decimal(0)
+        # Use default_address or dummy address for FeeCalculator
+        address = default_address if default_address else type('DummyAddress', (), {
+            'latitude': profile.latitude if profile and profile.latitude else 5.5600,
+            'longitude': profile.longitude if profile and profile.longitude else -0.2050,
+            'country': buyer_country
+        })()
+
+        try:
+            total_delivery_fee_result = FeeCalculator.calculate_total_delivery_fee(
+                cart_items, address, buyer_country_code=buyer_country
+            )
+            total_delivery_fee = total_delivery_fee_result.total
+            dynamic_quotes = total_delivery_fee_result.dynamic_quotes
+            invalid_items = total_delivery_fee_result.invalid_items
+        except ValidationError as e:
+            logger.error(f"Error calculating total delivery fee: {str(e)}")
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
         delivery_date_ranges = {}
         all_product_delivery_options = {}
 
         for item in cart_items:
             product = item.product
             vendor = product.vendor
+            vendor_country = vendor.shipping_from_country.name if vendor.shipping_from_country else 'GH'
+            is_international = buyer_country != vendor_country
 
-            # Get all delivery options for this product
-            product_delivery_options = ProductDeliveryOption.objects.filter(product=product)
-            if not product_delivery_options.exists():
-                return Response({
-                    "detail": f"No delivery options found for product {product.title}"
-                }, status=status.HTTP_400_BAD_REQUEST)
+            delivery_options_qs = product.productdeliveryoption_set.filter(
+                delivery_option__type='international' if is_international else 'local'
+            )
+            delivery_options = delivery_options_qs.all()
 
-            # Serialize all delivery options for frontend dropdown
             all_product_delivery_options[product.id] = ProductDeliveryOptionSerializer(
-                product_delivery_options, many=True,
-                context={'request': request}
+                delivery_options, many=True, context={'request': request}
             ).data
 
-            # Select delivery option: user-chosen or fallback to default
-            selected_delivery_option = item.delivery_option
-
-            if not selected_delivery_option:
-                default_option = product_delivery_options.filter(default=True).first()
-                if default_option:
-                    selected_delivery_option = default_option.delivery_option
-
-            if selected_delivery_option:
-                # Calculate delivery fee
-                delivery_fee = calculate_delivery_fee(
-                    vendor.about.latitude,
-                    vendor.about.longitude,
-                    profile.latitude,
-                    profile.longitude,
-                    selected_delivery_option.cost
-                )
-                total_delivery_fee += Decimal(delivery_fee)
-
-                min_date = now() + timezone.timedelta(days=selected_delivery_option.min_days)
-                max_date = now() + timezone.timedelta(days=selected_delivery_option.max_days)
-
-                # Estimate delivery date range
-                if selected_delivery_option.min_days == selected_delivery_option.max_days:
-                    if selected_delivery_option.min_days == 0:
-                        label = "Today"
-                    elif selected_delivery_option.min_days == 1:
-                        label = "Tomorrow"
-                    else:
-                        label = f"In {selected_delivery_option.min_days} days"
+            selected_option = item.selected_delivery_option
+            if selected_option:
+                # Use ProductDeliveryOption to handle buyer_country
+                product_delivery_option = product.productdeliveryoption_set.filter(
+                    delivery_option=selected_option
+                ).first()
+                if product_delivery_option:
+                    date_range = product_delivery_option.get_delivery_date_range(
+                        reference_date=timezone.now(),
+                        buyer_country=buyer_country,
+                        dynamic_min_days=dynamic_quotes.get(vendor.id, {}).get('min_days'),
+                        dynamic_max_days=dynamic_quotes.get(vendor.id, {}).get('max_days')
+                    )
                 else:
-                    label = f"{min_date.strftime('%d %B')} to {max_date.strftime('%d %B')}"
-
-                delivery_date_ranges[product.id] = label
+                    date_range = selected_option.get_delivery_date_range(
+                        reference_date=timezone.now(),
+                        dynamic_min_days=dynamic_quotes.get(vendor.id, {}).get('min_days'),
+                        dynamic_max_days=dynamic_quotes.get(vendor.id, {}).get('max_days')
+                    )
             else:
-                delivery_date_ranges[product.id] = "Delivery option not selected"
+                date_range = "Delivery option not selected"
 
-        # Coupons
-        clipped_coupons = ClippedCoupon.objects.filter(user=user)
+            delivery_date_ranges[product.id] = date_range
+
+        clipped_coupons = ClippedCoupon.objects.filter(user=user).select_related('coupon')
         applied_coupon = None
         discount_amount = Decimal(0)
 
@@ -437,21 +439,20 @@ class CheckoutAPIView(APIView):
             except Coupon.DoesNotExist:
                 del request.session['applied_coupon']
 
-        grand_total = cart.calculate_grand_total(profile) - discount_amount
-
         response_data = {
             'cart_items': CartItemSerializer(cart_items, many=True, context={'request': request}).data,
             'sub_total': cart.total_price,
             'total_delivery_fee': total_delivery_fee,
             'product_delivery_options': all_product_delivery_options,
             'total_packaging_fee': cart.calculate_packaging_fees(),
-            'grand_total': grand_total,
+            'grand_total': cart.calculate_grand_total() - discount_amount,
             'delivery_date_ranges': delivery_date_ranges,
+            'buyer_country': buyer_country,
+            'invalid_items': invalid_items,
             'clipped_coupons': CouponSerializer(clipped_coupons, many=True).data,
             'applied_coupon': CouponSerializer(applied_coupon).data if applied_coupon else None,
             'discount_amount': discount_amount,
         }
-
         return Response(response_data, status=status.HTTP_200_OK)
 
 
@@ -460,45 +461,92 @@ class UpdateDeliveryOptionAPIView(APIView):
 
     def post(self, request):
         try:
-            # Parse data from the request
+            # Parse and validate input data
             product_id = request.data.get('product_id')
             delivery_option_id = request.data.get('delivery_option_id')
 
-            # Validate inputs
             if not product_id or not delivery_option_id:
                 return Response(
                     {"error": "Product ID and Delivery Option ID are required."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Retrieve or create the cart for the user
+            # Retrieve the cart for the user
             cart = Cart.objects.get_for_request(request)
-
             if not cart:
                 return Response(
                     {"error": "No cart found for this user"},
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-            # Retrieve all cart items for the product ID within the user's cart
-            cart_items = CartItem.objects.filter(cart=cart, product__id=product_id)
+            # Retrieve the product
+            product = get_object_or_404(Product, id=product_id)
 
+            # Retrieve all cart items for the product
+            cart_items = CartItem.objects.filter(cart=cart, product=product)
             if not cart_items.exists():
                 return Response(
                     {"error": "No items found in the cart for the specified product."},
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-            # Validate the delivery option
+            # Retrieve the delivery option
             delivery_option = get_object_or_404(DeliveryOption, id=delivery_option_id)
 
-            # Update the delivery option for all matching cart items
+            if not ProductDeliveryOption.objects.filter(
+                product=product, delivery_option=delivery_option
+            ).exists():
+                return Response(
+                    {"error": "Selected delivery option is not available for this product."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # Get buyer country: Address > Profile > 'GH'
+            user = request.user
+            default_address = Address.objects.filter(user=user, status=True).first()
+            profile = Profile.objects.filter(user=user).first()
+            buyer_country = (
+                default_address.country if default_address and default_address.country
+                else profile.country if profile and profile.country
+                else 'GH'
+            )
+
+            # Validate international/local delivery for each cart item
+            for cart_item in cart_items:
+                vendor = cart_item.product.vendor
+                vendor_country = (
+                    vendor.shipping_from_country.name
+                    if vendor and vendor.shipping_from_country
+                    else 'GH'
+                )
+                is_international = buyer_country != vendor_country
+
+                if is_international and delivery_option.type != 'international':
+                    return Response(
+                        {
+                            "error": (
+                                f"International delivery required for {cart_item.product.title} "
+                                f"to {buyer_country}"
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                elif not is_international and delivery_option.type == 'international':
+                    return Response(
+                        {
+                            "error": (
+                                f"Local delivery required for {cart_item.product.title} "
+                                f"in {buyer_country}"
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+            # Update delivery option for all matching cart items
             cart_items.update(delivery_option=delivery_option)
 
             return Response(
-                {
-                    "message": "Delivery option updated successfully for all matching items.",
-                },
+                {"message": "Delivery option updated successfully for all matching items."},
                 status=status.HTTP_200_OK,
             )
 
@@ -508,56 +556,77 @@ class UpdateDeliveryOptionAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.error(f"Error updating delivery option: {str(e)}")
+            return Response(
+                {"error": "An unexpected error occurred."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class CartSummaryAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        user = request.user if request.user.is_authenticated else None
-
+        user = request.user
         currency = request.headers.get('X-Currency', 'GHS')
         rates = get_exchange_rates()
         exchange_rate = Decimal(str(rates.get(currency, 1)))
 
         try:
-            if user:
-                cart = Cart.objects.get_for_request(request)
-            else:
-                return Response({'detail': 'No cart found.'}, status=status.HTTP_404_NOT_FOUND)
-
-            user_profile = Profile.objects.get(user=user) if user else None
-
-            if not user_profile:
-                return Response({'detail': 'User profile not found.'}, status=status.HTTP_400_BAD_REQUEST)
-
-            # Fallback lat/lon if not set
-            if not user_profile.latitude:
-                user_profile.latitude = 5.5600  # Accra
-            if not user_profile.longitude:
-                user_profile.longitude = -0.2050  # Accra
-
-            if not user_profile:
-                return Response({'detail': 'User profile not found.'}, status=status.HTTP_400_BAD_REQUEST)
-
-            summary = {
-                "grand_total": round(cart.calculate_grand_total(user_profile) * exchange_rate, 2) or 0.00,
-                "grand_total_cedis": round(cart.calculate_grand_total(user_profile), 2) or 0,
-                "delivery_fee": round(cart.calculate_total_delivery_fee(user_profile) * exchange_rate, 2) or 0.00,
-                "packaging_fee": round(Decimal(cart.calculate_packaging_fees()) * exchange_rate, 2) or 0.00,
-                "total_price": round(Decimal(cart.total_price) * exchange_rate, 2) or 0.00,
-                "total_quantity": cart.total_quantity or 0,
-                "total_items": cart.total_items or 0,
-                "currency": currency,
-            }
-
-            return Response(summary, status=status.HTTP_200_OK)
-
+            cart = Cart.objects.get_for_request(request)
         except Cart.DoesNotExist:
             return Response({'detail': 'Cart not found.'}, status=status.HTTP_404_NOT_FOUND)
-        except Profile.DoesNotExist:
-            return Response({'detail': 'User profile not found.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        default_address = Address.objects.filter(user=user, status=True).first()
+        user_profile = Profile.objects.filter(user=user).first()
+
+        # Get country, latitude, longitude: Address > Profile > Accra
+        if default_address and default_address.country and default_address.latitude and default_address.longitude:
+            buyer_country = default_address.country
+            latitude = default_address.latitude
+            longitude = default_address.longitude
+        elif user_profile and user_profile.country and user_profile.latitude and user_profile.longitude:
+            buyer_country = user_profile.country
+            latitude = user_profile.latitude
+            longitude = user_profile.longitude
+        else:
+            buyer_country = 'GH'
+            latitude = 5.5600
+            longitude = -0.2050
+            logger.warning(f"No valid address or profile coordinates for user {user.email}. Using Accra default.")
+
+        # Create address object for FeeCalculator
+        address = default_address if default_address else type('DummyAddress', (), {
+            'latitude': latitude,
+            'longitude': longitude,
+            'country': buyer_country
+        })()
+
+        try:
+            total_delivery_fee_result = FeeCalculator.calculate_total_delivery_fee(
+                cart.cart_items.all(), address, buyer_country_code=buyer_country
+            )
+            total_delivery_fee = total_delivery_fee_result.total
+            invalid_items = total_delivery_fee_result.invalid_items
+        except ValidationError as e:
+            logger.warning(f"Delivery fee calculation failed: {str(e)}. Falling back to zero.")
+            total_delivery_fee = Decimal(0)
+            invalid_items = []
+
+        summary = {
+            "grand_total": round(cart.calculate_grand_total() * exchange_rate, 2) or 0.00,
+            "grand_total_cedis": round(cart.calculate_grand_total(), 2) or 0.00,
+            "delivery_fee": round(total_delivery_fee * exchange_rate, 2) or 0.00,
+            "packaging_fee": round(Decimal(cart.calculate_packaging_fees()) * exchange_rate, 2) or 0.00,
+            "total_price": round(Decimal(cart.total_price) * exchange_rate, 2) or 0.00,
+            "total_quantity": cart.total_quantity or 0,
+            "total_items": cart.total_items or 0,
+            "currency": currency,
+            "buyer_country": buyer_country,
+            "invalid_items": invalid_items,
+        }
+
+        return Response(summary, status=status.HTTP_200_OK)
 
 
 
@@ -595,21 +664,25 @@ class OrderReceiptAPIView(APIView):
 
     def get(self, request, order_id):
         currency = request.GET.get('currency') or request.headers.get('X-Currency', 'GHS')
-
         rates = get_exchange_rates()
         exchange_rate = Decimal(str(rates.get(currency, 1)))
+        currency_symbol = None
 
-        currency_symbol = "$" if currency == "USD" else "₵"  # 👈 UPDATED
-
+        if currency == 'USD':
+            currency_symbol = "$"
+        if currency == 'GHS':
+            currency_symbol = f"GHS"
+        
         try:
             order = Order.objects.get(id=order_id, user=request.user)
         except Order.DoesNotExist:
             return Response({'detail': 'Order not found.'}, status=404)
-        
-        user_profile = Profile.objects.filter(user=request.user).first()
 
+        user_profile = Profile.objects.filter(user=request.user).first()
         if not user_profile:
-            return Response({'detail': 'User profile not found.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'detail': 'User profile not found.'}, status=400)
+
+        buyer_country = order.address.country or 'GH'
 
         response = HttpResponse(content_type='application/pdf')
         response['Content-Disposition'] = f'attachment; filename="receipt_{order.order_number}.pdf"'
@@ -619,19 +692,17 @@ class OrderReceiptAPIView(APIView):
         margin = 50
         y = height - margin
 
-        # === Logo (Optional) ===
-        logo_path = os.path.join(settings.BASE_DIR, "static", "assets", "imgs", "logo.png")
+        # === Logo ===
+        logo_path = os.path.join(settings.BASE_DIR, "static", "logo-1.png")
         try:
             if os.path.exists(logo_path):
                 logo_width = 120
                 logo_height = 60
-                margin = 50
                 x_pos = width - logo_width - margin
-                y_pos = y - (logo_height / 2) + 6  # Adjust vertically to align with text baseline
-
+                y_pos = y - (logo_height / 2) + 6
                 p.drawImage(logo_path, x_pos, y_pos, width=logo_width, height=logo_height, preserveAspectRatio=True)
         except Exception as e:
-            print("Logo error:", e)
+            logger.warning(f"Logo error: {e}")
 
         # === Header ===
         p.setFont("Helvetica-Bold", 18)
@@ -654,7 +725,9 @@ class OrderReceiptAPIView(APIView):
         y -= 15
         p.drawString(margin, y, f"Email: {order.user.email}")
         y -= 15
-        p.drawString(margin, y, f"Address: {order.address.address}, {order.address.town}, {order.address.region}, {order.address.country}")
+        country_name = Country.objects.filter(code=buyer_country).first().name if Country.objects.filter(code=buyer_country).exists() else buyer_country
+        address_str = f"{order.address.address}, {order.address.town}, {order.address.region}, {country_name} ({buyer_country})"
+        p.drawString(margin, y, f"Address: {address_str}")
         y -= 30
 
         # === Payment Info ===
@@ -684,28 +757,32 @@ class OrderReceiptAPIView(APIView):
                 y = height - margin
                 p.setFont("Helvetica", 10)
 
-            # Product title
             p.drawString(margin, y, truncate(item.product.title))
             p.drawString(margin + 250, y, str(item.quantity))
-            converted_price = Decimal(item.price) * exchange_rate  # 👈 UPDATED
-            converted_amount = Decimal(item.amount) * exchange_rate  # 👈 UPDATED
-
-            p.drawString(margin + 300, y, f"{currency_symbol} {converted_price:,.2f}")  # 👈 UPDATED
-            p.drawString(margin + 400, y, f"{currency_symbol} {converted_amount:,.2f}") 
+            converted_price = Decimal(item.price) * exchange_rate
+            converted_amount = Decimal(item.amount) * exchange_rate
+            p.drawString(margin + 300, y, f"{currency_symbol} {converted_price:,.2f}")
+            p.drawString(margin + 400, y, f"{currency_symbol} {converted_amount:,.2f}")
             y -= 15
 
-            # Variant details
+            details = []
             if item.variant:
-                variant_details = []
                 if item.variant.size:
-                    variant_details.append(f"Size: {item.variant.size.name}")
+                    details.append(f"Size: {item.variant.size.name}")
                 if item.variant.color:
-                    variant_details.append(f"Color: {item.variant.color.name}")
-                if variant_details:
-                    p.setFont("Helvetica-Oblique", 8)
-                    p.drawString(margin + 15, y, "(" + ", ".join(variant_details) + ")")
-                    y -= 13
-                    p.setFont("Helvetica", 10)
+                    details.append(f"Color: {item.variant.color.name}")
+            if item.selected_delivery_option:
+                delivery_option = item.selected_delivery_option
+                is_international = buyer_country != (item.product.vendor.shipping_from_country.name if item.product.vendor.shipping_from_country else 'GH')
+                delivery_str = delivery_option.name
+                if is_international and item.delivery_provider:
+                    delivery_str += f" (via {item.delivery_provider})"
+                details.append(f"Delivery: {delivery_str}")
+            if details:
+                p.setFont("Helvetica-Oblique", 8)
+                p.drawString(margin + 15, y, "(" + ", ".join(details) + ")")
+                y -= 13
+                p.setFont("Helvetica", 10)
 
         y -= 10
         p.line(margin, y, width - margin, y)
@@ -717,10 +794,7 @@ class OrderReceiptAPIView(APIView):
         y -= 15
         p.setFont("Helvetica", 10)
 
-        
-        grand_total = Decimal(order.total)
         grand_delivery = Decimal(0)
-
         for vendor in order.vendors.all():
             if y < 100:
                 p.showPage()
@@ -729,8 +803,12 @@ class OrderReceiptAPIView(APIView):
 
             vendor_delivery = order.get_vendor_delivery_cost(vendor)
             delivery_range = order.get_vendor_delivery_date_range(vendor)
+            vendor_country = vendor.shipping_from_country.name if vendor.shipping_from_country else 'GH'
+            is_international = buyer_country != vendor_country
+            provider = order.order_products.filter(product__vendor=vendor).first().delivery_provider if is_international else None
 
-            grand_delivery += Decimal(vendor_delivery)
+            converted_delivery = Decimal(vendor_delivery) * exchange_rate
+            grand_delivery += converted_delivery
 
             p.drawString(margin, y, f"Seller: {vendor.name}")
             y -= 15
@@ -738,23 +816,24 @@ class OrderReceiptAPIView(APIView):
             y -= 15
             p.drawString(margin + 15, y, f"Contact: {vendor.contact}")
             y -= 15
-            p.drawString(margin + 15, y, f"Delivery Range: {delivery_range}")
+            # delivery_label = f"Delivery ({provider if provider else 'Local'})"
+            p.drawString(margin + 15, y, f"Range(ETA): {delivery_range}")
             y -= 25
 
         # === Total Summary ===
         p.setFont("Helvetica-Bold", 11)
-        subtotal = Decimal(order.total_price) * exchange_rate  # 👈 UPDATED
-        delivery = Decimal(order.calculate_total_delivery_fee(user_profile)) * exchange_rate  # 👈 UPDATED
-        grand_total = Decimal(order.calculate_grand_total(user_profile)) * exchange_rate  # 👈 UPDATED
+        subtotal = Decimal(order.total_price) * exchange_rate
+        grand_total = Decimal(order.calculate_grand_total()) * exchange_rate
+        delivery = order.calculate_total_delivery_fee().total * exchange_rate
 
         p.drawString(margin + 320, y, "Subtotal:")
-        p.drawString(margin + 420, y, f"{currency_symbol} {subtotal:,.2f}")  # 👈 UPDATED
+        p.drawString(margin + 420, y, f"{currency_symbol} {subtotal:,.2f}")
         y -= 15
         p.drawString(margin + 320, y, "Delivery:")
-        p.drawString(margin + 420, y, f"{currency_symbol} {delivery:,.2f}")  # 👈 UPDATED
+        p.drawString(margin + 420, y, f"{currency_symbol} {delivery:,.2f}")
         y -= 15
         p.drawString(margin + 320, y, "Grand Total:")
-        p.drawString(margin + 420, y, f"{currency_symbol} {grand_total:,.2f}")  # 👈 UPDATED
+        p.drawString(margin + 420, y, f"{currency_symbol} {grand_total:,.2f}")
 
         # === Footer ===
         y -= 40

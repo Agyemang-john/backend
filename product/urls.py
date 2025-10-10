@@ -1,25 +1,25 @@
 
 from django.urls import path
-from .views import AddProductReviewView, AjaxColorAPIView, ProductDetailAPIView, CategoryProductListView, BrandProductListView, CartDataView, RecentlyViewedProducts, ProductSearchAPIView, SearchSuggestionsAPIView, CartRecommendationsAPIView, FrequentlyBoughtTogetherAPIView, ProductsAPIView
+from . import views 
 
 urlpatterns = [
     # AJAX and custom endpoints
-    path('add-review/', AddProductReviewView.as_view(), name='product-review-create'),
-    path('products/', ProductsAPIView.as_view(), name='products'),
-    path('ajaxcolor/', AjaxColorAPIView.as_view(), name='change_color'),
+    path('add-review/', views.AddProductReviewView.as_view(), name='product-review-create'),
+    path('sitemap-data/', views.SitemapDataAPIView.as_view(), name='sitemap-data'),
+    path('ajaxcolor/', views.AjaxColorAPIView.as_view(), name='change_color'),
 
     # Category and brand list views (general slug-based)
-    path('category/<slug>/', CategoryProductListView.as_view(), name='category'),
-    path('brand/<slug>/', BrandProductListView.as_view(), name='brand'),
-    path('search/', ProductSearchAPIView.as_view(), name='product-search'),
-    path('search-suggestions/', SearchSuggestionsAPIView.as_view(), name='search-suggestions'),
+    path('category/<slug>/', views.CategoryProductListView.as_view(), name='category'),
+    path('brand/<slug>/', views.BrandProductListView.as_view(), name='brand'),
+    path('search/', views.ProductSearchAPIView.as_view(), name='product-search'),
+    path('search-suggestions/', views.SearchSuggestionsAPIView.as_view(), name='search-suggestions'),
 
     # Detailed product-related views
-    path('<sku>/<slug>/', ProductDetailAPIView.as_view(), name='product-detail-api'),
-    path('cart/<sku>/<slug>/', CartDataView.as_view(), name='cart-data'),
+    path('<sku>/<slug>/', views.ProductDetailAPIView.as_view(), name='product-detail-api'),
+    # path('cart/<sku>/<slug>/', CartDataView.as_view(), name='cart-data'),
 
     # Utility or miscellaneous views
-    path('recently-viewed-products/', RecentlyViewedProducts.as_view(), name='recently-viewed'),
-    path('recommendations/', CartRecommendationsAPIView.as_view(), name='cart-recommendations'),
-    path('frequently-bought/', FrequentlyBoughtTogetherAPIView.as_view(), name='fbt'),
+    path('recently-viewed-products/', views.RecentlyViewedProducts.as_view(), name='recently-viewed'),
+    path('recommendations/', views.CartRecommendationsAPIView.as_view(), name='cart-recommendations'),
+    path('frequently-bought/', views.FrequentlyBoughtTogetherAPIView.as_view(), name='fbt'),
 ]

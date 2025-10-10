@@ -3,13 +3,6 @@ from product.models import  *
 from order.models import *
 from .models import *
 from django.contrib.auth import get_user_model
-from django.contrib.auth import authenticate
-from rest_framework.response import Response
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from userauths.utils import send_sms
-from django.utils import timezone
-from datetime import timedelta
-from userauths.tokens import otp_token_generator
 from django.db.models.query_utils import Q
 from address.models import *
 from .service import get_exchange_rates
@@ -21,9 +14,19 @@ User = get_user_model()
 
 
 class UserSerializer(serializers.ModelSerializer):
+    profile = serializers.SerializerMethodField()
+
     class Meta:
         model = User
-        fields = ['id','first_name', 'last_name', 'email', 'phone', 'role']
+        fields = ['id','first_name', 'last_name', 'email', 'phone', 'role', 'profile']
+
+    def get_profile(self, obj):
+        request = self.context.get("request")
+        if hasattr(obj, "profile") and obj.profile.profile_image:
+            if request is not None:
+                return request.build_absolute_uri(obj.profile.profile_image.url)
+            return obj.profile.profile_image.url
+        return None
 
 class ProductSerializer(serializers.ModelSerializer):
     currency = serializers.SerializerMethodField()
@@ -33,7 +36,7 @@ class ProductSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Product
-        fields = ['id', 'title', 'slug', 'image', 'price', 'old_price', "currency", "sub_category"]
+        fields = ['id', 'title', 'slug', 'image', 'price', 'sku', 'old_price', "currency", "sub_category"]
     
     def get_currency(self, obj):
         request = self.context.get('request')
@@ -44,7 +47,8 @@ class ProductSerializer(serializers.ModelSerializer):
         currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
         if currency:
             rates = get_exchange_rates()
-            return round(obj.price * rates.get(currency, 1), 2)
+            exchange_rate = Decimal(str(rates.get(currency, 1)))
+            return round(obj.price * exchange_rate, 2)
         return obj.price
 
     def get_old_price(self, obj):
@@ -52,7 +56,8 @@ class ProductSerializer(serializers.ModelSerializer):
         currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
         if currency:
             rates = get_exchange_rates()
-            return round(obj.old_price * rates.get(currency, 1), 2)
+            exchange_rate = Decimal(str(rates.get(currency, 1)))
+            return round(obj.old_price * exchange_rate, 2)
         return obj.old_price
 
 class SubCategorySerializer(serializers.ModelSerializer):
@@ -165,8 +170,12 @@ class ProductReviewSerializer(serializers.ModelSerializer):
         extra_kwargs = {'user': {'read_only': True}}
     
     def get_product_image(self, obj):
-        # Access the image field from the related Product instance
-        return obj.product.image.url if obj.product.image else None
+        request = self.context.get("request")
+        if obj.product and obj.product.image:  # Check if product exists and has an image
+            if request is not None:
+                return request.build_absolute_uri(obj.product.image.url)  # Return full URL with domain
+            return obj.product.image.url  # Return relative URL if no request context
+        return None
 
     def create(self, validated_data):
         # Pop user from context and assign it explicitly

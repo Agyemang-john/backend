@@ -10,27 +10,23 @@ from rest_framework.exceptions import AuthenticationFailed
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.utils.http import urlsafe_base64_encode
 from django.utils.encoding import smart_str, smart_bytes
-
-from django.contrib.auth.tokens import PasswordResetTokenGenerator
-from django.contrib.sites.shortcuts import get_current_site
-from django.urls import reverse
-from django.utils.encoding import smart_bytes
 from django.core.mail import send_mail
 from django.conf import settings
 from .models import User 
 from .utils import send_password_reset_email
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
-
+from django.db.models import Q
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
 from django.core.validators import validate_email
 from djoser.conf import settings as djoser_settings
-from djoser import utils as djoser_utils
 # from djoser.serializers import PasswordResetSerializer
 from django.utils import timezone
 from datetime import timedelta
 from django.db.models import F
+from .tasks import send_otp
+
 
 class CustomPasswordResetSerializer(serializers.Serializer):
     email = serializers.EmailField()
@@ -78,10 +74,45 @@ class CustomPasswordResetSerializer(serializers.Serializer):
 
         send_mail(subject, plain_message, from_email, [to], html_message=html_message)
 
+
+from rest_framework import serializers
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from django.core.cache import cache
+from django.core.mail import send_mail
+from django.conf import settings
+from django.contrib.auth import authenticate
+from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
+from django.utils import timezone
+from django.db.models import F
+from .models import User
+from datetime import timedelta
+import six
+from django.utils.crypto import constant_time_compare
+from django.utils.http import base36_to_int, int_to_base36
+import random
+
+
+
+class OTPTokenGenerator:
+    token_ttl = timedelta(minutes=10)
+
+    def generate_otp(self):
+        return random.randint(10000, 99999)
+
+    def _is_token_expired(self, timestamp):
+        expiration_time = self._num_minutes(self.token_ttl)
+        return timezone.now() > (timestamp + timedelta(minutes=expiration_time))
+
+    def _num_minutes(self, td):
+        return td.days * 24 * 60 + td.seconds // 60 + td.microseconds / 60e6
+
+otp_token_generator = OTPTokenGenerator()
+
 MAX_FAILED_ATTEMPTS = 5      # max attempts before lockout
 LOCKOUT_TIME = timedelta(minutes=15)  # lockout duration
 
-class CustomTokenObtainPairSerializer(serializers.Serializer):
+class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     email = serializers.CharField()  # can be email or phone
     password = serializers.CharField(write_only=True)
 
@@ -112,58 +143,76 @@ class CustomTokenObtainPairSerializer(serializers.Serializer):
                 "Email not registered." if is_email else "Phone number not registered."
             )
 
-        # 3. Check if account is locked due to too many failed attempts
-        if getattr(user, "failed_login_attempts", 0) >= MAX_FAILED_ATTEMPTS:
-            lockout_until = getattr(user, "lockout_until", None)
-            if lockout_until and lockout_until > timezone.now():
+        # 3. Check if account is locked
+        if user.failed_login_attempts >= MAX_FAILED_ATTEMPTS:
+            if user.lockout_until and user.lockout_until > timezone.now():
                 raise serializers.ValidationError(
-                    f"Too many failed attempts. Try again after {lockout_until.strftime('%H:%M:%S')}."
+                    f"Too many failed attempts. Try again after {user.lockout_until.strftime('%H:%M:%S')}."
                 )
             else:
-                # Reset counter after lockout expired
+                # Reset if lockout expired
                 user.failed_login_attempts = 0
                 user.lockout_until = None
-                user.save()
+                user.save(update_fields=["failed_login_attempts", "lockout_until"])
 
-        # 4. Check if active
+        # 4. Check active
         if not user.is_active:
             raise serializers.ValidationError("Your account is not activated yet.")
 
-        # 5. Check if suspended
+        # 5. Check suspended
         if getattr(user, "is_suspended", False):
             raise serializers.ValidationError("Your account has been suspended. Contact support.")
 
         # 6. Authenticate credentials
         authenticated_user = authenticate(email_or_phone=identifier, password=password)
         if authenticated_user is None:
-            # increment failed login counter
-            user.failed_login_attempts = F('failed_login_attempts') + 1
-            user.save(update_fields=['failed_login_attempts'])
-
-            # reload user to get updated counter
+            # Increment failed login counter on the actual user object
+            User.objects.filter(pk=user.pk).update(
+                failed_login_attempts=F("failed_login_attempts") + 1
+            )
             user.refresh_from_db()
-            
+
             if user.failed_login_attempts >= MAX_FAILED_ATTEMPTS:
-                # set lockout
                 user.lockout_until = timezone.now() + LOCKOUT_TIME
-                user.save(update_fields=['lockout_until'])
+                user.save(update_fields=["lockout_until"])
                 raise serializers.ValidationError(
                     f"Too many failed attempts. Please try again after {LOCKOUT_TIME.seconds // 60} minutes."
                 )
 
-            raise serializers.ValidationError("Incorrect password.")    
+            raise serializers.ValidationError("Incorrect password.")
 
-        # reset failed login attempts on successful login
         user.failed_login_attempts = 0
         user.lockout_until = None
-        user.save(update_fields=['failed_login_attempts', 'lockout_until'])
-
-        # 7. Generate JWT manually
+        user.save(update_fields=["failed_login_attempts", "lockout_until"])
+        # For non-vendors (e.g., customers), issue tokens with custom claims
         refresh = RefreshToken.for_user(user)
+        refresh["role"] = user.role
+        refresh["is_active"] = user.is_active
+        refresh["is_admin"] = user.is_admin
         return {
             "refresh": str(refresh),
             "access": str(refresh.access_token),
         }
+
+
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+
+class CustomTokenRefreshSerializer(TokenRefreshSerializer):
+    def validate(self, attrs):
+        data = super().validate(attrs)
+
+        refresh = RefreshToken(attrs["refresh"])
+        user = self.context["request"].user or None
+
+        if user and user.is_authenticated:
+            # add role claims
+            new_access = refresh.access_token
+            new_access["role"] = user.role
+            refresh["is_active"] = user.is_active
+            new_access["is_admin"] = user.is_admin
+            data["access"] = str(new_access)
+
+        return data
     
 
 class UserRegisterSerializer(serializers.ModelSerializer):
@@ -208,22 +257,6 @@ class UserRegisterSerializer(serializers.ModelSerializer):
         # Create user and hash the password
         user = User.objects.create_user(**validated_data)
         return user
-
-class OTPVerificationSerializer(serializers.Serializer):
-    email = serializers.EmailField()
-    otp = serializers.CharField(max_length=6)
-
-    def validate(self, attrs):
-        email = attrs.get("email")
-        otp = attrs.get("otp")
-        cached_otp = cache.get(f"otp_{email}")
-        
-        if not cached_otp:
-            raise serializers.ValidationError("OTP has expired. Please request a new one.")
-        if cached_otp != otp:
-            raise serializers.ValidationError("Invalid OTP.")
-        
-        return attrs
 
 class LoginSerializer(serializers.ModelSerializer):
     email = serializers.EmailField(max_length=255, min_length=6)

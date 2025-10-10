@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Your Negromart OTP</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+            background-color: #f7fafc; /* Tailwind gray-100 */
+            color: #1a202c; /* Tailwind gray-900 */
+        }
+        .container {
+            max-width: 600px;
+            margin: 40px auto;
+            background: linear-gradient(135deg, #f7fafc, #edf2f7); /* Tailwind gray-50 to gray-200 */
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+        .header {
+            background: rgba(255, 255, 255, 0.8); /* Frosted-glass effect */
+            backdrop-filter: blur(10px);
+            padding: 20px;
+            text-align: center;
+        }
+        .header img {
+            max-width: 100px;
+            height: auto;
+        }
+        .content {
+            padding: 30px;
+            text-align: center;
+        }
+        .otp {
+            font-size: 32px;
+            font-weight: bold;
+            color: #2d3748; /* Tailwind gray-800 */
+            letter-spacing: 4px;
+            margin: 20px 0;
+            padding: 10px 20px;
+            background: #e2e8f0; /* Tailwind gray-200 */
+            display: inline-block;
+            border-radius: 4px;
+        }
+        .footer {
+            background: #edf2f7; /* Tailwind gray-200 */
+            padding: 20px;
+            text-align: center;
+            font-size: 14px;
+            color: #718096; /* Tailwind gray-600 */
+        }
+        .button {
+            display: inline-block;
+            padding: 12px 24px;
+            background-color: #000000; /* Black button like frontend */
+            color: #ffffff;
+            text-decoration: none;
+            border-radius: 4px;
+            margin: 20px 0;
+        }
+        @media only screen and (max-width: 600px) {
+            .container {
+                margin: 20px;
+            }
+            .content {
+                padding: 20px;
+            }
+            .otp {
+                font-size: 24px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <img src="{{ logo_url }}" alt="Negromart seller">
+            <h1 style="margin: 10px 0; font-size: 24px;">Verify Your Login</h1>
+        </div>
+        <div class="content">
+            <p style="font-size: 16px; line-height: 1.5;">
+                Hello, {{ brand_name }} Seller!,
+            </p>
+            <p style="font-size: 16px; line-height: 1.5;">
+                Your one-time password (OTP) for logging into your seller dashboard is:
+            </p>
+            <div class="otp">{{ otp }}</div>
+            <p style="font-size: 16px; line-height: 1.5;">
+                This OTP expires in {{ expiry_minutes }} minutes. Please enter it on the verification page to complete your login.
+            </p>
+            <!-- <a href="https://seller.negromart.com/auth/verify" class="button">Verify OTP</a> -->
+            <p style="font-size: 14px; color: #718096;">
+                If you didn’t request this OTP, please ignore this email or contact support at support@negromart.com.
+            </p>
+        </div>
+        <div class="footer">
+            <p>&copy; {{ brand_name }} {% now 'Y' %}. All rights reserved.</p>
+            <p>Negromart Seller central | <a href="https://seller.negromart.com" style="color: #000000;">seller.negromart.com</a></p>
+        </div>
+    </div>
+</body>
+</html>

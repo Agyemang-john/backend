@@ -18,7 +18,7 @@ class DeliveryOptionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DeliveryOption
-        fields = ['id', 'name', 'description', 'min_days', 'max_days', 'cost', 'status', 'currency', 'date_range']
+        fields = ['id', 'name', 'description', 'min_days', 'max_days', 'cost', 'type', 'provider', 'currency', 'date_range', 'status']
 
     def get_status(self, obj):
         return obj.get_delivery_status()
@@ -41,7 +41,7 @@ class DeliveryOptionSerializer(serializers.ModelSerializer):
         currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
         rates = get_exchange_rates()  # Make sure this is imported and working
 
-        exchange_rate = Decimal(rates.get(currency, 1))  # Default to 1 if currency not found
+        exchange_rate = Decimal(str(rates.get(currency, 1)))  # Default to 1 if currency not found
         return round(obj.cost * exchange_rate, 2)
 
 class ProductDeliveryOptionSerializer(serializers.ModelSerializer):
@@ -66,9 +66,10 @@ class ProductDeliveryOptionSerializer(serializers.ModelSerializer):
         return f"{min_delivery_date.strftime('%d %B')} to {max_delivery_date.strftime('%d %B')}"
 
 class VendorSerializer(serializers.ModelSerializer):
+    shipping_from_country = serializers.CharField(source="shipping_from_country.name", read_only=True)
     class Meta:
         model = Vendor
-        fields = ['name']
+        fields = ['name', 'shipping_from_country']
 
 class ProductSerializer(serializers.ModelSerializer):
     delivery_options = DeliveryOptionSerializer(many=True)
@@ -115,7 +116,8 @@ class ProductSerializer(serializers.ModelSerializer):
         currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
         if currency:
             rates = get_exchange_rates()
-            return round(obj.price * rates.get(currency, 1), 2)
+            exchange_rate = Decimal(str(rates.get(currency, 1)))
+            return round(obj.price * exchange_rate, 2)
         return obj.price
 
 class ColorSerializer(serializers.ModelSerializer):
@@ -138,7 +140,7 @@ class VariantSerializer(serializers.ModelSerializer):
     class Meta:
         model = Variants
         fields = [
-            "product", "price", "title", "color", "size", "sku",
+            "product", "price", "title", "color", "size",
             "quantity", "image", "currency", "id"
         ]
 
@@ -151,7 +153,7 @@ class VariantSerializer(serializers.ModelSerializer):
         currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
         rates = get_exchange_rates()  # Make sure this is imported and working
 
-        exchange_rate = rates.get(currency, 1)  # Default to 1 if currency not found
+        exchange_rate = Decimal(str(rates.get(currency, 1)))  # Default to 1 if currency not found
         return round(obj.price * exchange_rate, 2)   
 
 class CartItemSerializer(serializers.ModelSerializer):
@@ -163,7 +165,7 @@ class CartItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CartItem
-        fields = ['product', 'variant', 'quantity', 'item_total', 'packaging_fee', 'delivery_option']
+        fields = ['id', 'product', 'variant', 'quantity', 'item_total', 'packaging_fee', 'delivery_option']
     
     def get_item_total(self, obj):
         return obj.amount

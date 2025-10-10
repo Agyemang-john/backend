@@ -134,31 +134,67 @@ class AddressSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'date_added']
 
 class DeliveryOptionSerializer(serializers.ModelSerializer):
+    delivery_range = serializers.CharField(source='get_delivery_date_range', read_only=True)
+    delivery_status = serializers.CharField(source='get_delivery_status', read_only=True)
+
     class Meta:
         model = DeliveryOption
-        fields = '__all__'  # This will include all fields in the model
-        read_only_fields = []  # Specify any fields that should be read-only, if necessary
+        fields = [
+            'id',
+            'name',
+            'description',
+            'min_days',
+            'max_days',
+            'cost',
+            'delivery_range',
+            'delivery_status',
+        ]
+        read_only_fields = ['delivery_range', 'delivery_status']
 
     def create(self, validated_data):
-        """Override the create method if you want to customize the creation of DeliveryOption."""
-        return DeliveryOption.objects.create(**validated_data)
+        """Create a new DeliveryOption."""
+        try:
+            return DeliveryOption.objects.create(**validated_data)
+        except Exception as e:
+            logger.error(f"Error creating DeliveryOption: {str(e)}")
+            raise serializers.ValidationError(f"Failed to create delivery option: {str(e)}")
 
     def update(self, instance, validated_data):
-        """Override the update method if you want to customize the update of DeliveryOption."""
-        instance.name = validated_data.get('name', instance.name)
-        instance.description = validated_data.get('description', instance.description)
-        instance.min_days = validated_data.get('min_days', instance.min_days)
-        instance.max_days = validated_data.get('max_days', instance.max_days)
-        instance.cost = validated_data.get('cost', instance.cost)
-        instance.save()
-        return instance
+        """Update an existing DeliveryOption."""
+        try:
+            instance.name = validated_data.get('name', instance.name)
+            instance.description = validated_data.get('description', instance.description)
+            instance.min_days = validated_data.get('min_days', instance.min_days)
+            instance.max_days = validated_data.get('max_days', instance.max_days)
+            instance.cost = validated_data.get('cost', instance.cost)
+            instance.save()
+            return instance
+        except Exception as e:
+            logger.error(f"Error updating DeliveryOption {instance.id}: {str(e)}")
+            raise serializers.ValidationError(f"Failed to update delivery option: {str(e)}")
+
+
+class OptimizedProductSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Product
+        fields = ['id', 'title', 'image', 'price', 'variant']  # Limit fields for performance
+
+class OptimizedVariantSerializer(serializers.ModelSerializer):
+    size_name = serializers.CharField(source="size.name", read_only=True)
+    color_name = serializers.CharField(source="color.name", read_only=True)
+
+    class Meta:
+        model = Variants
+        fields = ['id', 'title', 'price', 'quantity', 'image', 'size_name', 'color_name']
 
 
 class OrderProductSerializer(serializers.ModelSerializer):
     delivery_range = serializers.SerializerMethodField()
-    variant = VariantSerializer()
-    product = ProductSerializer()
+    delivery_status = serializers.SerializerMethodField()
+    product = OptimizedProductSerializer()
+    variant = OptimizedVariantSerializer()
     selected_delivery_option = DeliveryOptionSerializer()
+
     class Meta:
         model = OrderProduct
         fields = [
@@ -173,13 +209,27 @@ class OrderProductSerializer(serializers.ModelSerializer):
             'date_created',
             'date_updated',
             'delivery_range',
+            'delivery_status',
         ]
+
     def get_delivery_range(self, obj):
-        return obj.get_delivery_range()
+        try:
+            return obj.get_delivery_range()
+        except Exception as e:
+            logger.error(f"Error getting delivery range for OrderProduct {obj.id}: {str(e)}")
+            return None
+
+    def get_delivery_status(self, obj):
+        try:
+            return obj.get_delivery_status()
+        except Exception as e:
+            logger.error(f"Error getting delivery status for OrderProduct {obj.id}: {str(e)}")
+            return "Delivery status unavailable"
 
 class OrderSerializer(serializers.ModelSerializer):
     order_products = OrderProductSerializer(many=True, read_only=True)
-    overall_delivery_message = serializers.SerializerMethodField()
+    overall_delivery_range = serializers.SerializerMethodField()
+    overall_delivery_status = serializers.SerializerMethodField()
     address = AddressSerializer()
 
     class Meta:
@@ -198,11 +248,46 @@ class OrderSerializer(serializers.ModelSerializer):
             'is_ordered',
             'date_created',
             'date_updated',
-            'order_products',  # Nested OrderProduct data
-            'overall_delivery_message',
+            'order_products',
+            'overall_delivery_range',
+            'overall_delivery_status',
         ]
-    def get_overall_delivery_message(self, obj):
-        return obj.get_overall_delivery_range()
+
+    def get_overall_delivery_range(self, obj):
+        try:
+            return obj.get_overall_delivery_range()
+        except Exception as e:
+            logger.error(f"Error getting overall delivery range for Order {obj.order_number}: {str(e)}")
+            return None
+
+    def get_overall_delivery_status(self, obj):
+        """
+        Get the overall delivery status for the order based on OrderProducts.
+        """
+        try:
+            order_products = obj.order_products.all()
+            if not order_products.exists():
+                return "No products"
+
+            # Get unique statuses from order products
+            statuses = {product.get_delivery_status() for product in order_products}
+            if len(statuses) == 1:
+                return statuses.pop()  # Single status, e.g., "TODAY"
+            if "OVERDUE" in statuses:
+                return "OVERDUE"
+            if "ONGOING" in statuses:
+                return "ONGOING"
+            if any(status.startswith("IN ") for status in statuses):
+                # Find the earliest "IN X DAYS" status
+                days = [
+                    int(status.split("IN ")[1].split(" DAYS")[0])
+                    for status in statuses if status.startswith("IN ")
+                ]
+                return f"IN {min(days)} DAYS" if days else "UPCOMING"
+            return "UPCOMING"
+        except Exception as e:
+            logger.error(f"Error getting overall delivery status for Order {obj.order_number}: {str(e)}")
+            return "Delivery status unavailable"
 
 
 

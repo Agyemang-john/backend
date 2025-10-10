@@ -1,4 +1,4 @@
-from django.shortcuts import render, get_object_or_404
+from django.shortcuts import get_object_or_404
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from .models import *
@@ -13,32 +13,93 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from address.serializers import *
-from rest_framework.generics import RetrieveAPIView
-from rest_framework.permissions import AllowAny
 from order.service import *
 from rest_framework.permissions import IsAuthenticated
 from .service import *
+from django.core.serializers import serialize
+
+
+class HomeSliderView(APIView):
+    """
+    API View to retrieve all sliders with caching for static fields
+    """
+    def get(self, request):
+        # Include currency in cache key to support different currencies
+        currency = request.headers.get('X-Currency', 'GHS')
+        cache_key = f'home_sliders_{currency}'
+        cached_data = cache.get(cache_key)
+        
+        if cached_data is None:
+            sliders = HomeSlider.objects.all()
+            # Cache the queryset as serialized JSON to avoid pickling issues
+            cached_data = json.loads(serialize('json', sliders))
+            cache.set(cache_key, cached_data, timeout=60 * 30)  # Cache for 30 minutes
+        
+        # Convert cached JSON back to queryset-like structure for serialization
+        sliders = HomeSlider.objects.filter(pk__in=[item['pk'] for item in cached_data])
+        serializer = HomeSliderSerializer(sliders, many=True, context={'request': request})
+        
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+class BannersView(APIView):
+    """
+    API View to retrieve all banners with caching
+    """
+    def get(self, request):
+        cache_key = 'banners'
+        cached_data = cache.get(cache_key)
+        
+        if cached_data is None:
+            banners = Banners.objects.all()
+            serializer = BannersSerializer(banners, many=True, context={'request': request})
+            cached_data = serializer.data
+            cache.set(cache_key, cached_data, timeout=60 * 30)  # Cache for 15 minutes
+        
+        return Response(cached_data, status=status.HTTP_200_OK)
 
 class MainCategoryWithCategoriesAPIView(APIView):
     def get(self, request):
-        main_categories = Main_Category.objects.all().order_by('title')
-        serializer = MainCategoryWithCategoriesAndSubSerializer(main_categories, many=True, context={'request': request})
-        return Response(serializer.data)
+        cache_key = 'main_categories_with_categories'
+        cached_data = cache.get(cache_key)
+        
+        if cached_data is None:
+            main_categories = Main_Category.objects.all().order_by('title')
+            serializer = MainCategoryWithCategoriesAndSubSerializer(main_categories, many=True, context={'request': request})
+            cached_data = serializer.data
+            cache.set(cache_key, cached_data, timeout=60 * 60)  # Cache for 15 minutes
+        
+        return Response(cached_data)
 
 class CategoryDetailView(APIView):
     def get(self, request, slug):
-        category = get_object_or_404(Category, slug=slug)
-        serializer = CategoryWithSubcategoriesSerializer(category, context={'request': request})
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        cache_key = f'category_detail_{slug}'
+        cached_data = cache.get(cache_key)
+        
+        if cached_data is None:
+            category = get_object_or_404(Category, slug=slug)
+            serializer = CategoryWithSubcategoriesSerializer(category, context={'request': request})
+            cached_data = serializer.data
+            cache.set(cache_key, cached_data, timeout=60 * 60)  # Cache for 15 minutes
+        
+        return Response(cached_data, status=status.HTTP_200_OK)
 
 
 class TopEngagedCategoryView(APIView):
     def get(self, request):
-        category = Category.objects.order_by('-engagement_score').first()
-        if category:
-            serializer = TopEngagedCategorySerializer(category)
-            return Response(serializer.data)
-        return Response({"detail": "No categories available"}, status=404)
+        cache_key = 'top_engaged_category'
+        cached_data = cache.get(cache_key)
+        
+        if cached_data is None:
+            category = Category.objects.order_by('-engagement_score').first()
+            if category:
+                serializer = TopEngagedCategorySerializer(category)
+                cached_data = serializer.data
+            else:
+                cached_data = {"detail": "No categories available"}
+            cache.set(cache_key, cached_data, timeout=60 * 30)  # Cache for 15 minutes
+        
+        return Response(cached_data, status=status.HTTP_200_OK if cached_data.get('detail') is None else status.HTTP_404_NOT_FOUND)
+    
 
 class MainAPIView(APIView):
     """
@@ -70,14 +131,6 @@ class MainAPIView(APIView):
             }
             products_with_details.append(product_data)
 
-        # Get and serialize slider data
-        sliders = HomeSlider.objects.all()
-        slider_data = HomeSliderSerializer(sliders, many=True, context={'request': request}).data
-
-        # Get and serialize banner data
-        banners = Banners.objects.all()
-        banner_data = BannersSerializer(banners, many=True, context={'request': request}).data
-
         # Get and serialize banner data
         brand_data = BrandSerializer(top_brands, many=True, context={'request': request}).data
 
@@ -88,8 +141,6 @@ class MainAPIView(APIView):
         context = {
             "new_products": products_with_details,
             "most_popular": ProductSerializer(most_popular, many=True, context={'request': request}).data,
-            "sliders": slider_data,
-            "banners": banner_data,
             "brands": brand_data,
             "subcategories": subcategory_data,
             "category": serializer.data,
@@ -253,16 +304,13 @@ class TrendingProductsAPIView(APIView):
 
         # Always convert prices for current request currency (dynamic part)
         currency = request.headers.get('X-Currency', 'GHS')
-        rates = get_exchange_rates()
-        exchange_rate = rates.get(currency, 1)
 
         for product in products_data:
             product['currency'] = currency
-            product['price'] = round(product['price'] * exchange_rate, 2)
+            product['price'] = round(product['price'], 2)
 
         return Response(products_data)
 
-# Suggested products based on cart
 # Suggested products based on cart
 class SuggestedCartProductsAPIView(APIView):
     def get(self, request):
@@ -271,7 +319,7 @@ class SuggestedCartProductsAPIView(APIView):
 
             if request.user.is_authenticated:
                 cart = Cart.objects.get_for_request(request)
-                cart_items = cart.cart_items.select_related("product").all()
+                cart_items = cart.cart_items.select_related("product").all() if cart else []
                 cart_product_ids = [item.product.id for item in cart_items if item.product]
             else:
                 guest_cart_header = request.headers.get('X-Guest-Cart')
@@ -304,51 +352,6 @@ class SuggestedCartProductsAPIView(APIView):
                 {"detail": "Failed to load suggestions", "error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
-#############################CUSTOMER DASHBOARD############################
-class AddressListCreateView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    # List all addresses for the authenticated user or create a new one
-    def get(self, request):
-        addresses = Address.objects.filter(user=request.user).order_by('-status')
-        serializer = AddressSerializer(addresses, many=True)
-        return Response(serializer.data)
-
-    def post(self, request):
-        serializer = AddressSerializer(data=request.data)
-        if serializer.is_valid():
-            serializer.save(user=request.user)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-class AddressDetailView(APIView):
-    permission_classes = [IsAuthenticated]
-    # Retrieve, update, or delete an address
-    def get_object(self, pk):
-        try:
-            return Address.objects.get(pk=pk, user=self.request.user)
-        except Address.DoesNotExist:
-            raise KeyError
-
-    def get(self, request, pk):
-        address = self.get_object(pk)
-        serializer = AddressSerializer(address)
-        return Response(serializer.data)
-
-    def put(self, request, pk):
-        address = self.get_object(pk)
-        serializer = AddressSerializer(address, data=request.data, partial=True)
-        if serializer.is_valid():
-            serializer.save(user=request.user)
-            return Response(serializer.data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-    def delete(self, request, pk):
-        address = self.get_object(pk)
-        address.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
-
 
 class MakeDefaultAddressView(APIView):
     permission_classes = [IsAuthenticated]

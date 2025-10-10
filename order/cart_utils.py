@@ -8,6 +8,7 @@ from .models import Cart
 from product.serializers import ProductSerializer, VariantSerializer
 from .serializers import CartItemSerializer
 from core.service import get_exchange_rates
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ def get_authenticated_cart_response(request):
     cart = Cart.objects.get_for_request(request)
     currency = request.headers.get('X-Currency', 'GHS')
     rates = get_exchange_rates()
-    exchange_rate = rates.get(currency, 1)
+    exchange_rate = Decimal(str(rates.get(currency, 1)))
     if not cart:
         return Response(
             {"detail": "Cart not found", "items": [], "total_amount": 0, "packaging_fee": 0, "currency": currency},
@@ -53,7 +54,7 @@ def get_guest_cart_response(request):
     guest_cart_header = request.headers.get('X-Guest-Cart')
     currency = request.headers.get('X-Currency', 'GHS')
     rates = get_exchange_rates()
-    exchange_rate = rates.get(currency, 1)
+    exchange_rate = Decimal(str(rates.get(currency, 1)))
     try:
         guest_cart = json.loads(guest_cart_header) if guest_cart_header else []
     except (json.JSONDecodeError, TypeError):

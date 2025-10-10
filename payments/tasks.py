@@ -5,6 +5,8 @@ from product.models import *
 from django.utils.crypto import get_random_string
 from userauths.models import User
 from celery.utils.log import get_task_logger
+from .payout_service import PayoutService
+from decimal import Decimal
 
 
 logger = get_task_logger(__name__)
@@ -78,3 +80,36 @@ def create_order_task(user_id, payment_data, payment_id, cart_items_data, addres
         logger.error(f"Error creating order for user {user_id}: {e}")
         raise
 
+
+# Payout Task
+@shared_task
+def batch_payouts():
+    """Celery task to process payouts for all vendors every 2 days."""
+    logger.info("Starting batch payout process")
+    vendors = Vendor.objects.filter(payment_methods__payment_method='momo', payment_methods__status='verified').distinct()
+    
+    for vendor in vendors:
+        # Get completed orders (delivered) not yet paid out
+        orders = Order.objects.filter(
+            vendors=vendor,
+            status='delivered',
+            payouts__isnull=True
+        )
+        if not orders.exists():
+            logger.info(f"No eligible orders for vendor {vendor.id}")
+            continue
+
+        # Calculate total amount (80% of vendor's share as an example)
+        total_amount = sum(Decimal(str(order.get_vendor_total(vendor))) * Decimal('0.8') for order in orders)
+        if total_amount <= 0:
+            logger.info(f"No positive amount to pay for vendor {vendor.id}")
+            continue
+
+        logger.info(f"Processing payout of {total_amount} GHS for vendor {vendor.id}")
+        payout_service = PayoutService()
+        result = payout_service.process_vendor_payout(vendor, orders, total_amount)
+        
+        if result["status"] == "success":
+            logger.info(f"Payout successful for vendor {vendor.id}: {result['transaction_id']}")
+        else:
+            logger.error(f"Payout failed for vendor {vendor.id}: {result['message']}")

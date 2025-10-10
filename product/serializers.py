@@ -3,26 +3,29 @@ from product.models import  *
 from order.models import *
 from core.models import *
 from django.contrib.auth import get_user_model
-from django.contrib.auth import authenticate
-from rest_framework.response import Response
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from userauths.utils import send_sms
-from django.utils import timezone
-from datetime import timedelta
-from userauths.tokens import otp_token_generator
 from django.db.models.query_utils import Q
 from address.models import *
 from core.service import get_exchange_rates
-
+from decimal import Decimal
 
 User = get_user_model()
 
 
 
 class UserSerializer(serializers.ModelSerializer):
+    profile = serializers.SerializerMethodField()
+
     class Meta:
         model = User
-        fields = ['id','first_name', 'last_name', 'email', 'phone', 'role']
+        fields = ['id', 'first_name', 'last_name', 'email', 'phone', 'role', 'profile']
+
+    def get_profile(self, obj):
+        request = self.context.get("request")
+        if hasattr(obj, "profile") and obj.profile.profile_image:
+            if request is not None:
+                return request.build_absolute_uri(obj.profile.profile_image.url)
+            return obj.profile.profile_image.url
+        return None
 
 class MainCategorySerializer(serializers.ModelSerializer):
     class Meta:
@@ -84,10 +87,10 @@ class VendorSerializer(serializers.ModelSerializer):
     def get_is_open_now(self, obj):
         return obj.is_open()
 
-class RegionSerializer(serializers.ModelSerializer):
+class CountrySerializer(serializers.ModelSerializer):
     
     class Meta:
-        model = Region
+        model = Country
         fields = '__all__'
 
 class ProductReviewSerializer(serializers.ModelSerializer):
@@ -106,16 +109,20 @@ class ProductReviewSerializer(serializers.ModelSerializer):
         return obj.product.image.url if obj.product.image else None
 
     def create(self, validated_data):
-        # Pop user from context and assign it explicitly
         user = self.context['request'].user
-        review = ProductReview.objects.create(user=user, **validated_data)
-        return review
+        product = validated_data['product']
+
+        # Prevent multiple reviews
+        if ProductReview.objects.filter(user=user, product=product).exists():
+            raise serializers.ValidationError("You have already reviewed this product.")
+
+        return ProductReview.objects.create(user=user, **validated_data)
 
 class ProductSerializer(serializers.ModelSerializer):
     sub_category = SubCategorySerializer()
     vendor = VendorSerializer()
     brand = BrandSerializer()
-    available_in_regions = RegionSerializer(many=True)
+    available_in_regions = CountrySerializer(many=True)
     reviews = ProductReviewSerializer(many=True, read_only=True)
     currency = serializers.SerializerMethodField()
     price = serializers.SerializerMethodField()
@@ -168,7 +175,8 @@ class ProductSerializer(serializers.ModelSerializer):
         currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
         if currency:
             rates = get_exchange_rates()
-            return round(obj.old_price * rates.get(currency, 1), 2)
+            exchange_rate = Decimal(str(rates.get(currency, 1)))
+            return round(obj.old_price * exchange_rate, 2)
         return obj.old_price
     
     def get_price(self, obj):
@@ -176,7 +184,7 @@ class ProductSerializer(serializers.ModelSerializer):
         currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
         rates = get_exchange_rates()  # Make sure this is imported and working
 
-        exchange_rate = rates.get(currency, 1)  # Default to 1 if currency not found
+        exchange_rate = Decimal(str(rates.get(currency, 1)))# Default to 1 if currency not found
         return round(obj.price * exchange_rate, 2)
 
     
@@ -208,7 +216,7 @@ class VariantSerializer(serializers.ModelSerializer):
     class Meta:
         model = Variants
         fields = [
-            "product", "price", "title", "color", "size", "sku",
+            "product", "price", "title", "color", "size",
             "quantity", "image", "currency", "id"
         ]
 
@@ -221,7 +229,7 @@ class VariantSerializer(serializers.ModelSerializer):
         currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
         rates = get_exchange_rates()  # Make sure this is imported and working
 
-        exchange_rate = rates.get(currency, 1)  # Default to 1 if currency not found
+        exchange_rate = Decimal(str(rates.get(currency, 1)))  # Default to 1 if currency not found
         return round(obj.price * exchange_rate, 2)
 
 

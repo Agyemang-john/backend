@@ -2,12 +2,8 @@ from django.core.cache import cache
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from django.contrib.auth import get_user_model
-from django.db import DatabaseError
-from django.utils import timezone
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from .serializers import *
-from userauths.tokens import otp_token_generator
 from userauths.utils import send_sms
 from userauths.models import Profile, User
 from order.service import *
@@ -15,14 +11,35 @@ from order.service import *
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.generics import GenericAPIView
 
+from rest_framework.generics import RetrieveUpdateDestroyAPIView
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework.response import Response
+from rest_framework import status
+from django.db import transaction
+from .serializers import AddressSerializer
+from address.models import Address
+import logging
+from rest_framework.generics import GenericAPIView
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework import status
+from .serializers import AddressSerializer
+from address.models import Address
+
+logger = logging.getLogger(__name__)
 
 class AddressListCreateView(GenericAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = AddressSerializer
 
+    def get_queryset(self):
+        # Return addresses for the authenticated user
+        return Address.objects.filter(user=self.request.user)
+
     def get(self, request):
         # List addresses for the logged-in user
-        addresses = Address.objects.filter(user=request.user)
+        addresses = self.get_queryset()
         serializer = self.serializer_class(addresses, many=True)
         return Response(serializer.data)
 
@@ -30,43 +47,88 @@ class AddressListCreateView(GenericAPIView):
         # Create a new address
         serializer = self.serializer_class(data=request.data)
         if serializer.is_valid():
-            serializer.save(user=request.user)  # Associate address with the user
+            with transaction.atomic():
+                # If status=True, unset other default addresses for the user
+                if serializer.validated_data.get('status'):
+                    Address.objects.filter(user=self.request.user, status=True).update(status=False)
+                serializer.save(user=self.request.user)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-class AddressDetailView(APIView):
+class AddressDetailView(RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated]
-    # Retrieve, update, or delete an address
-    def get_object(self, request, id):
+    serializer_class = AddressSerializer
+    lookup_field = 'id'  # Use 'id' to look up addresses
+
+    def get_queryset(self):
+        # Only return addresses belonging to the authenticated user
+        return Address.objects.filter(user=self.request.user)
+
+    def get_object(self):
+        # Override to add logging and custom error message
         try:
-            return Address.objects.get(id=id, user=request.user)
+            obj = super().get_object()
+            logger.info(f"Retrieved address {obj.id} for user {self.request.user.id}")
+            return obj
         except Address.DoesNotExist:
-            raise KeyError
+            logger.error(f"Address with id {self.kwargs['id']} not found for user {self.request.user.id}")
+            raise NotFound(f"Address with ID {self.kwargs['id']} not found.")
 
-    def get(self, request, id):
-        address = self.get_object(request, id)
-        serializer = AddressSerializer(address)
-        return Response(serializer.data)
+    def perform_update(self, serializer):
+        # Handle the unique_default_address constraint
+        with transaction.atomic():
+            if serializer.validated_data.get('status'):
+                # Unset status=True for other addresses of the user
+                Address.objects.filter(user=self.request.user, status=True).exclude(id=self.get_object().id).update(status=False)
+            serializer.save(user=self.request.user)
+            logger.info(f"Updated address {self.get_object().id} for user {self.request.user.id}")
 
-    def put(self, request, id):
-        address = self.get_object(request, id)
-        serializer = AddressSerializer(address, data=request.data, partial=True)
-        if serializer.is_valid():
-            serializer.save(user=request.user)
-            return Response(serializer.data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    def perform_destroy(self, obj):
+        # Log deletion and perform delete
+        logger.info(f"Deleting address {obj.id} for user {self.request.user.id}")
+        super().perform_destroy(obj)
 
-    def delete(self, request, id):
-        address = self.get_object(request, id)
-        address.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
+    def retrieve(self, request, *args, **kwargs):
+        # Wrap response in a consistent format
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response({
+            'status': 'success',
+            'message': 'Address retrieved successfully.',
+            'data': serializer.data
+        }, status=status.HTTP_200_OK)
+
+    def update(self, request, *args, **kwargs):
+        # Wrap response and handle errors
+        try:
+            response = super().update(request, *args, **kwargs)
+            return Response({
+                'status': 'success',
+                'message': 'Address updated successfully.',
+                'data': response.data
+            }, status=status.HTTP_200_OK)
+        except ValidationError as e:
+            logger.error(f"Validation error updating address {self.kwargs['id']}: {e.detail}")
+            return Response({
+                'status': 'error',
+                'message': 'Failed to update address.',
+                'errors': e.detail
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+    def destroy(self, request, *args, **kwargs):
+        # Wrap response for deletion
+        response = super().destroy(request, *args, **kwargs)
+        return Response({
+            'status': 'success',
+            'message': 'Address deleted successfully.',
+            'data': None
+        }, status=status.HTTP_204_NO_CONTENT)
 
 
 from django.db import transaction
 
 class MakeDefaultAddressView(APIView):
     permission_classes = [IsAuthenticated]
-
     def put(self, request):
         address_id = request.data.get('id')
         if not address_id:

@@ -6,8 +6,7 @@ from userauths.models import Profile
 from .serializers import *
 from product.models import  *
 from order.models import *
-from rest_framework.exceptions import NotFound
-
+from rest_framework.exceptions import NotFound, APIException
 
 class ProfileAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -46,25 +45,44 @@ class ProfileAPIView(APIView):
             return Response({"detail": "Profile not found."}, status=status.HTTP_404_NOT_FOUND)
 
 
-class UserOrdersView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        orders = Order.objects.filter(user=request.user)
-        serializer = OrderSerializer(orders, many=True)
-        return Response(serializer.data)
-
 class OrderDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, id):
         try:
-            order = Order.objects.get(id=id, user=request.user)
+            order = Order.objects.select_related(
+                'user', 'address'
+            ).prefetch_related(
+                'order_products__product',
+                'order_products__variant',
+                'order_products__selected_delivery_option'
+            ).get(id=id, user=request.user)
+            serializer = OrderSerializer(order, context={'request': request})
+            return Response(serializer.data)
         except Order.DoesNotExist:
+            logger.warning(f"Order {id} not found for user {request.user.id}")
             raise NotFound("Order not found.")
+        except Exception as e:
+            logger.error(f"Error fetching Order {id} for user {request.user.id}: {str(e)}")
+            raise APIException("An error occurred while fetching the order.")
 
-        serializer = OrderSerializer(order, context={'request': request})
-        return Response(serializer.data)
+class UserOrdersView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            orders = Order.objects.filter(user=request.user).select_related(
+                'user', 'address'
+            ).prefetch_related(
+                'order_products__product',
+                'order_products__variant',
+                'order_products__selected_delivery_option'
+            )
+            serializer = OrderSerializer(orders, many=True, context={'request': request})
+            return Response(serializer.data)
+        except Exception as e:
+            logger.error(f"Error fetching orders for user {request.user.id}: {str(e)}")
+            raise APIException("An error occurred while fetching orders.")
 
 
 class ChangePasswordView(APIView):

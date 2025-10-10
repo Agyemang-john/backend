@@ -3,11 +3,10 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
-
-from django.http import HttpResponse
+from django.shortcuts import render
 
 def home(request):
-    return HttpResponse("Welcome to Negromart!")
+    return render(request, "home.html")
 
 
 urlpatterns = [
@@ -30,6 +29,6 @@ urlpatterns = [
 
 
 
-if settings.DEVELOPMENT_MODE is True:
+if settings.DEBUG:
     urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

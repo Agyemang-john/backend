@@ -13,3 +13,14 @@ admin.site.register(UserWallet)
 admin.site.register(Subscription)
 admin.site.register(Plan)
 admin.site.register(Feature)
+
+from django_celery_beat.models import PeriodicTask, IntervalSchedule, CrontabSchedule, SolarSchedule, ClockedSchedule
+
+
+@admin.register(Payout)
+class PayoutAdmin(admin.ModelAdmin):
+    list_display = ('vendor', 'amount', 'status', 'transaction_id', 'created_at')
+    list_filter = ('status', 'created_at')
+    search_fields = ('vendor__name', 'transaction_id', 'error_message')
+    readonly_fields = ('created_at', 'updated_at')
+

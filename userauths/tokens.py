@@ -15,20 +15,6 @@ class AccountActivationTokenGenerator(PasswordResetTokenGenerator):
 
 account_activation_token = AccountActivationTokenGenerator()
 
-# tokens.py
-
-
-# class OTPTokenGenerator(PasswordResetTokenGenerator):
-#     def _make_hash_value(self, user, timestamp):
-#         return str(user.pk) + str(timestamp) + str(user.is_active)
-
-#     def generate_otp(self):
-#         # Generate a random 7-digit OTP
-#         otp = random.randint(1000, 9999)
-#         return otp
-
-# otp_token_generator = OTPTokenGenerator()
-
 
 class OTPTokenGenerator(PasswordResetTokenGenerator):
     def _make_hash_value(self, user, timestamp):

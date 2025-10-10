@@ -7,19 +7,19 @@ services:
     environment:
       - DJANGO_SETTINGS_MODULE=ecommerce.settings
     volumes:
-      - .:/app   # Mount local code for hot reload
+      - .:/app
     ports:
       - "8000:8000"
     env_file:
       - .env
     depends_on:
       - redis
-      - elasticsearch
+      - postgres
     restart: always
 
   celery:
     build: .
-    entrypoint: [""]   # override Dockerfile entrypoint
+    entrypoint: [""]
     command: celery -A ecommerce worker --loglevel=info
     restart: always
     env_file:
@@ -28,10 +28,11 @@ services:
       - .:/app
     depends_on:
       - redis
+      - postgres
 
   celery-beat:
     build: .
-    entrypoint: [""]   # override Dockerfile entrypoint
+    entrypoint: [""]
     command: celery -A ecommerce beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     restart: always
     env_file:
@@ -40,13 +41,14 @@ services:
       - .:/app
     depends_on:
       - redis
+      - postgres
 
   redis:
     image: redis:7
     command: [
       "redis-server",
       "--appendonly", "yes",
-      "--appendfsync", "everysec"   # fsync once per second (balance safety + performance)
+      "--appendfsync", "everysec"
     ]
     ports:
       - "6379:6379"
@@ -54,36 +56,19 @@ services:
     volumes:
       - redis_data:/data
 
-
-  flower:
-    build: .
-    command: celery -A ecommerce flower --port=5555 --broker=redis://redis:6379/0
-    ports:
-      - "5555:5555"
-    env_file:
-      - .env
-    volumes:
-      - .:/app
-    depends_on:
-      - redis
-      - web
-    restart: always
-
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+  postgres:
+    image: postgres:17
     environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-    mem_limit: 1g
+      - POSTGRES_DB=negromart
+      - POSTGRES_USER=explorer
+      - POSTGRES_PASSWORD=Explorer@2003
     ports:
-      - "9200:9200"
+      - "5432:5432"
     volumes:
-      - esdata:/usr/share/elasticsearch/data
+      - postgres_data:/var/lib/postgresql/data
+    restart: always
 
 volumes:
   esdata:
   redis_data:
+  postgres_data:

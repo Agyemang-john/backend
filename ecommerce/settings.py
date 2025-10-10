@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 from decouple import config
-
+import dj_database_url
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -36,7 +36,9 @@ INSTALLED_APPS = [
 
     'storages',
     'corsheaders',
+    'django_countries',
     'rest_framework',
+    'django_filters',
     "djoser",
     'social_django',
     'core',
@@ -57,7 +59,6 @@ MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
-    'core.middleware.CurrencyMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
@@ -87,34 +88,27 @@ WSGI_APPLICATION = 'ecommerce.wsgi.application'
 
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
-
-tmpPostgres = urlparse(config("DATABASE_URL"))
+FERNET_KEY = config("FERNET_KEY")
 
 if DEBUG:
     DATABASES = {
         'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': config('DB_NAME'),
+            'USER': config('DB_USER'),
+            'PASSWORD': config('DB_PASSWORD'),
+            'HOST': config('DB_HOST', default='localhost'),
+            'PORT': config('DB_PORT'),
         }
     }
 else:
     DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.postgresql',
-            'NAME': tmpPostgres.path.replace('/', ''),
-            'USER': tmpPostgres.username,
-            'PASSWORD': tmpPostgres.password,
-            'HOST': tmpPostgres.hostname,
-            'PORT': 5432,
-            'CONN_MAX_AGE': 60,  # keep connections open
-            'OPTIONS': {
-                **dict(parse_qsl(tmpPostgres.query)),
-                'connect_timeout': 10,  # fail fast if DNS fails
-            },
-        }
+        'default': dj_database_url.parse(
+            config('DATABASE_URL'),
+            conn_max_age=600,
+            ssl_require=True
+        )
     }
-
-
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
@@ -150,35 +144,94 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
+# Media and Static settings
+STATIC_URL = '/static/'
+
+# Tell Django where to look for static files during development
+STATICFILES_DIRS = [
+    os.path.join(BASE_DIR, "static"),
+]
+
+# Directory where static files will be collected for production
+STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
+
+# Media (user uploads, not static assets)
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
-STATIC_URL = 'static/'
-STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
-# DigitalOcean Spaces configuration
-AWS_ACCESS_KEY_ID = config("AWS_ACCESS_KEY_ID")
-AWS_SECRET_ACCESS_KEY = config("AWS_SECRET_ACCESS_KEY")
-AWS_STORAGE_BUCKET_NAME = "negromart-space"
-AWS_S3_REGION_NAME = "sfo3"
-AWS_S3_ENDPOINT_URL = f"https://{AWS_S3_REGION_NAME}.digitaloceanspaces.com"
+# Storage configuration based on environment
+# if ENV == 'production':
+#     # DigitalOcean Spaces configuration for production
+#     AWS_ACCESS_KEY_ID = config("AWS_ACCESS_KEY_ID")
+#     AWS_SECRET_ACCESS_KEY = config("AWS_SECRET_ACCESS_KEY")
+#     AWS_STORAGE_BUCKET_NAME = "negromart-space"
+#     AWS_S3_REGION_NAME = "sfo3"
+#     AWS_S3_ENDPOINT_URL = f"https://{AWS_S3_REGION_NAME}.digitaloceanspaces.com"
+#     AWS_S3_CUSTOM_DOMAIN = f"{AWS_STORAGE_BUCKET_NAME}.{AWS_S3_REGION_NAME}.cdn.digitaloceanspaces.com"
+#     AWS_LOCATION = 'media'
+#     AWS_DEFAULT_ACL = "public-read"
+#     AWS_QUERYSTRING_AUTH = False
+#     AWS_S3_FILE_OVERWRITE = False
+#     AWS_S3_OBJECT_PARAMETERS = {
+#         'CacheControl': 'max-age=86400'
+#     }
+#     STORAGES = {
+#         "default": {
+#             "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+#         },
+#         "staticfiles": {
+#             "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+#         },
+#     }
+# else:
+#     STORAGES = {
+#         "default": {
+#             "BACKEND": "django.core.files.storage.FileSystemStorage",
+#         },
+#         "staticfiles": {
+#             "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+#         },
+#     }
 
-# # CDN domain for serving public files
-AWS_S3_CUSTOM_DOMAIN = f"{AWS_STORAGE_BUCKET_NAME}.{AWS_S3_REGION_NAME}.cdn.digitaloceanspaces.com"
-AWS_LOCATION = 'media'
+if ENV == 'production':
+    AWS_ACCESS_KEY_ID = config("AWS_ACCESS_KEY_ID")
+    AWS_SECRET_ACCESS_KEY = config("AWS_SECRET_ACCESS_KEY")
+    AWS_STORAGE_BUCKET_NAME = "negromart-space"
+    AWS_S3_REGION_NAME = "sfo3"
+    AWS_S3_ENDPOINT_URL = f"https://{AWS_S3_REGION_NAME}.digitaloceanspaces.com"
+    AWS_S3_CUSTOM_DOMAIN = f"{AWS_STORAGE_BUCKET_NAME}.{AWS_S3_REGION_NAME}.cdn.digitaloceanspaces.com"
+    AWS_DEFAULT_ACL = "public-read"
+    AWS_QUERYSTRING_AUTH = False
+    AWS_S3_FILE_OVERWRITE = False
+    AWS_S3_OBJECT_PARAMETERS = {
+        'CacheControl': 'max-age=86400'
+    }
+    # Static and media files in Spaces
+    STORAGES = {
+        "default": {
+            "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+            "OPTIONS": {
+                "location": "media",  # Media files in media/ directory
+            },
+        },
+        "staticfiles": {
+            "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+            "OPTIONS": {
+                "location": "static",  # Static files in static/ directory
+            },
+        },
+    }
+    STATIC_URL = f"https://{AWS_S3_CUSTOM_DOMAIN}/static/"
+else:
+    STORAGES = {
+        "default": {
+            "BACKEND": "django.core.files.storage.FileSystemStorage",
+        },
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
 
-AWS_DEFAULT_ACL = "public-read"
-AWS_QUERYSTRING_AUTH = False
-AWS_S3_FILE_OVERWRITE = False
-AWS_S3_OBJECT_PARAMETERS = {
-    'CacheControl': 'max-age=86400'
-}
-
-
-STORAGES = {
-    "default": {  # Media files → Spaces
-        "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
-    },
-}
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
@@ -187,9 +240,6 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 CKEDITOR_BASEPATH = 'uploads/'
 
-STORAGES["staticfiles"] = {
-    "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
-}
 
 # Authentication Backends
 AUTHENTICATION_BACKENDS = [
@@ -213,7 +263,7 @@ REST_FRAMEWORK = {
         # Browsing (guests)
         "anon": "2000/day",     # enough for product browsing/search
         # Browsing (logged-in)
-        "user": "5000/day",     # generous since users are trusted
+        "user": "388000/day",     # generous since users are trusted
         "auth_refresh": "60/min",
         "auth_verify": "200/min",
     },
@@ -289,10 +339,12 @@ CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 AUTH_COOKIE = 'access'
 AUTH_ACCESS_MAX_AGE = timedelta(hours=1).total_seconds()
 AUTH_REFRESH_MAX_AGE = timedelta(days=60).total_seconds()
-AUTH_COOKIE_SECURE = not DEBUG 
+VENDOR_AUTH_ACCESS_MAX_AGE = timedelta(hours=1).total_seconds()
+VENDOR_AUTH_REFRESH_MAX_AGE = timedelta(days=15).total_seconds()
+AUTH_COOKIE_SECURE = False if DEBUG else True 
 AUTH_COOKIE_HTTP_ONLY = True
 AUTH_COOKIE_PATH = '/'
-AUTH_COOKIE_SAMESITE = "None" if not DEBUG else "Lax"  
+AUTH_COOKIE_SAMESITE = "Lax" if DEBUG else "None"
 AUTH_COOKIE_DOMAIN = None
 if not DEBUG:
     AUTH_COOKIE_DOMAIN = ".negromart.com"
@@ -317,7 +369,6 @@ SIMPLE_JWT = {
     
     # HTTP Header for token authorization
     'AUTH_HEADER_TYPES': ('Bearer',),
-
     
     # Enabling sliding token lifetimes for smoother sessions
     'SLIDING_TOKEN_LIFETIME': timedelta(hours=1),  # Sliding token lifetime 1 hour
@@ -333,42 +384,71 @@ SIMPLE_JWT = {
     'LEEWAY': 30,  # Allow a 30-second leeway for clock discrepancies
 }
 
+# CORS
 CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_METHODS = ["*"]
 
 CSRF_TRUSTED_ORIGINS = [
     "https://negromart.com",      # frontend domain
+    "https://www.negromart.com",
     "https://api.negromart.com",
+    "https://seller.negromart.com",
     "http://localhost:3000",  
 ]
 
-CORS_ALLOWED_ORIGINS = [
-    "https://negromart.com",
-    "https://www.negromart.com",
-    "http://localhost:3000",  # Next.js frontend URL
-    "http://159.223.143.103",  # Next.js frontend URL
-    "https://frontend-sigma-khaki-70.vercel.app",  # Next.js frontend URL
-    "https://negromart-space.sfo3.cdn.digitaloceanspaces.com",
-    "https://negromart-space.sfo3.digitaloceanspaces.com",
-]
+if DEBUG:
+    CORS_ALLOWED_ORIGINS = [
+        "http://localhost:3000",  # Next.js dev
+        "http://127.0.0.1:3000",
+    ]
+else:
+    CORS_ALLOWED_ORIGINS = [
+        "https://negromart.com",
+        "https://www.negromart.com",
+        "https://seller.negromart.com",
+        "https://frontend-sigma-khaki-70.vercel.app",  # Next.js frontend URL
+        "https://negromart-space.sfo3.cdn.digitaloceanspaces.com",
+        "https://negromart-space.sfo3.digitaloceanspaces.com",
+    ]
 
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://.*\.negromart\.com$",
 ]
 
-
 CORS_ALLOW_HEADERS = list(default_headers) + [
     "x-guest-cart",
     "X-Currency",
+    "X-Device",
     "X-Recently-Viewed",
+    "X-Recently-Viewed-Vendors",
+    "X-Recent-Views",
     "x-ssr-refresh",
-    'cache-control',
-    'access-control-allow-origin',
+    "cache-control",
+    "access-control-allow-origin",
 ]
 
 EXCHANGE_RATE_API_KEY = config('EXCHANGE_RATE_API_KEY')
 
-
+DHL_API_KEY = config('DHL_API_KEY')
+DHL_ACCOUNT_NUMBER = config('DHL_ACCOUNT_NUMBER')
+DHL_API_SECRET = config('DHL_API_SECRET')
+DHL_API_URL = config('DHL_API_URL')
+# HyperVerge Configuration
+HYPERVERGE_APP_ID = 'your_app_id_here'  # From HyperVerge dashboard
+HYPERVERGE_APP_KEY = 'your_app_key_here'  # From dashboard (keep secret!)
+HYPERVERGE_BASE_URL = 'https://global-api.hyperverge.co/v2/'  # Confirm in dashboard; use /ind-docs/ for India-specific if needed
+HYPERVERGE_WORKFLOW_ID = 'kyc_full'  # Optional; e.g., for full ID + liveness workflow
 # CKEDITOR CONFIGURATION
+
+ELASTICSEARCH_URL = config("ELASTICSEARCH_URL", default="http://elasticsearch:9200")
+# ELASTICSEARCH_USER = config("ELASTICSEARCH_USER", default="")
+# ELASTICSEARCH_PASSWORD = config("ELASTICSEARCH_PASSWORD", default="")
+
+LOCATIONIQ_API_KEY = config('LOCATIONIQ_API_KEY')
+
+
+ARKESEL_API_KEY = config('ARKESEL_API_KEY')
+ARKESEL_SENDER = 'Negromart'  # Your sender ID
 
 customColorPalette = [
     {
