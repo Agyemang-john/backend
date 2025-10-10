@@ -5,7 +5,7 @@ services:
     command: gunicorn ecommerce.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 4 --worker-class gthread --timeout 120 --max-requests 1000 --max-requests-jitter 50
     environment:
       - DJANGO_SETTINGS_MODULE=ecommerce.settings
-      - ENV=production
+      - DJANGO_ENV=production
     volumes:
       - .:/app
     expose:
@@ -14,7 +14,6 @@ services:
       - .env
     depends_on:
       - redis
-      # - elasticsearch
     restart: always
 
   nginx:
