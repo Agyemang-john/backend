@@ -245,7 +245,7 @@ class LocationAutocompleteThrottle(UserRateThrottle):
 
 class LocationAutocompleteView(APIView):
     permission_classes = [IsAuthenticated]
-    throttle_classes = [LocationAutocompleteThrottle]
+    # throttle_classes = [LocationAutocompleteThrottle]
 
     def get(self, request):
         query = request.query_params.get('q', '').strip()
