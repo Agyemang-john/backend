@@ -2,7 +2,7 @@ services:
   web:
     build: .
     entrypoint: /entrypoint.sh
-    command: gunicorn ecommerce.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 2 --worker-class gthread --timeout 120 --max-requests 1000 --max-requests-jitter 50
+    command: gunicorn ecommerce.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 4 --worker-class gthread --timeout 120 --max-requests 1000 --max-requests-jitter 50
     environment:
       - DJANGO_SETTINGS_MODULE=ecommerce.settings
       - DJANGO_ENV=production
@@ -17,7 +17,7 @@ services:
     restart: always
 
   nginx:
-    image: nginx:latest
+    image: nginx:1.25
     ports:
       - "80:80"
       - "443:443"
@@ -33,36 +33,38 @@ services:
     volumes:
       - certbot-etc:/etc/letsencrypt
       - certbot-var:/var/lib/letsencrypt
-    entrypoint: /bin/sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/lib/letsencrypt; sleep 12h; done"
+    entrypoint: /bin/sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/lib/letsencrypt --deploy-hook 'nginx -s reload'; sleep 12h; done"
     restart: always
 
   celery:
     build: .
-    command: celery -A ecommerce worker --loglevel=info 
-    restart: always
+    command: celery -A ecommerce worker --loglevel=info --concurrency=2
+    volumes:
+      - .:/app
     env_file:
       - .env
     depends_on:
       - redis
+    restart: always
 
   celery-beat:
     build: .
     command: celery -A ecommerce beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
-    restart: always
+    volumes:
+      - .:/app
     env_file:
       - .env
     depends_on:
       - redis
+    restart: always
 
   redis:
     image: redis:7
     command: [
       "redis-server",
       "--appendonly", "yes",
-      "--appendfsync", "everysec"   # fsync once per second (balance safety + performance)
+      "--appendfsync", "everysec",
     ]
-    expose:
-      - "6379"
     ports:
       - "6379:6379"
     restart: always
@@ -70,7 +72,6 @@ services:
       - redis_data:/data
 
 volumes:
-  esdata:
   redis_data:
   certbot-etc:
   certbot-var:

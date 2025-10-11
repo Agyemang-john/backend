@@ -315,7 +315,7 @@ CACHES = {
         "LOCATION": REDIS_URL,
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
-            "MAX_CONNECTIONS": 50,  # pool size
+            "MAX_CONNECTIONS": 30,  # pool size
             "IGNORE_EXCEPTIONS": True,  # fail silently if Redis is down
         },
     }
