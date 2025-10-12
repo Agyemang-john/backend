@@ -123,10 +123,11 @@ class Cart(models.Model):
     
     def prevent_checkout_unavailable_products(self, user_profile):
         """
-        Prevent checkout if the user's address region is not in the available regions for any product.
-        Raises a ValidationError if any product is unavailable in the user's region.
+        Deletes cart items if the user's address region is not in the available regions for any product.
+        Returns a list of deleted items for frontend notification.
         """
         user_region = user_profile.country
+        deleted_items = []
 
         # Go through each cart item and check the product's available regions
         for item in self.cart_items.all():
@@ -134,9 +135,15 @@ class Cart(models.Model):
 
             # Check if the product has available regions
             if product.available_in_regions.exists():
-                # If the user's region is not in the product's available regions, raise an error
-                if not product.available_in_regions.filter(name=user_region).exists():
-                    raise ValidationError(f"The product '{product.title}' is not available in your region: {user_region}")
+                # If the user's region is not in the product's available regions, mark for deletion
+                if not product.available_in_regions.filter(name__iexact=user_region).exists():
+                    deleted_items.append({
+                        'product_title': product.title,
+                        'region': user_region
+                    })
+                    item.delete()  # Delete the unavailable item from the cart
+
+        return deleted_items
                 
 # CartItem model
 class CartItem(models.Model):

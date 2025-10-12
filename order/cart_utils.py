@@ -14,11 +14,11 @@ logger = logging.getLogger(__name__)
 
 def calculate_packaging_fee(weight, volume):
     # Example rates, adjust as needed
-    weight_rate = 1.0  # Packaging fee per kg
-    volume_rate = 1.0  # Packaging fee per cubic meter
+    weight_rate = Decimal('1.0')  # Packaging fee per kg
+    volume_rate = Decimal('1.0')  # Packaging fee per cubic meter
 
-    weight_fee = weight * weight_rate
-    volume_fee = volume * volume_rate
+    weight_fee = Decimal(str(weight)) * weight_rate
+    volume_fee = Decimal(str(volume)) * volume_rate
 
     # Choose the higher fee or sum both if needed
     # packaging_fee = max(weight_fee, volume_fee)
@@ -61,8 +61,8 @@ def get_guest_cart_response(request):
         guest_cart = []
 
     items = []
-    total_amount = 0
-    packaging_fee = 0
+    total_amount = Decimal(0)
+    packaging_fee = Decimal(0)
 
     for item in guest_cart:
         try:

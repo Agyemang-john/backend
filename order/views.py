@@ -351,12 +351,8 @@ class CheckoutAPIView(APIView):
         buyer_country = default_address.country if default_address and default_address.country else \
                         profile.country if profile and profile.country else 'GH'
 
-        try:
-            # Pass profile to check region compatibility
-            cart.prevent_checkout_unavailable_products(default_address)
-        except ValidationError as e:    
-            logger.error(f"Checkout validation failed: {str(e)}")
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        # Check and delete unavailable products
+        deleted_items = cart.prevent_checkout_unavailable_products(default_address)
 
         cart_items = CartItem.objects.filter(cart=cart).select_related(
             'product__vendor__about', 'product__vendor__shipping_from_country', 'delivery_option'
@@ -452,6 +448,7 @@ class CheckoutAPIView(APIView):
             'clipped_coupons': CouponSerializer(clipped_coupons, many=True).data,
             'applied_coupon': CouponSerializer(applied_coupon).data if applied_coupon else None,
             'discount_amount': discount_amount,
+            'deleted_items': deleted_items,
         }
         return Response(response_data, status=status.HTTP_200_OK)
 
