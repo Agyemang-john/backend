@@ -6,8 +6,6 @@ services:
     environment:
       - DJANGO_SETTINGS_MODULE=ecommerce.settings
       - DJANGO_ENV=production
-    volumes:
-      - .:/app
     expose:
       - "8000"
     env_file:
@@ -42,8 +40,6 @@ services:
   celery:
     build: .
     command: celery -A ecommerce worker --loglevel=info --concurrency=2
-    volumes:
-      - .:/app
     env_file:
       - .env
     depends_on:
@@ -53,8 +49,6 @@ services:
   celery-beat:
     build: .
     command: celery -A ecommerce beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
-    volumes:
-      - .:/app
     env_file:
       - .env
     depends_on:
