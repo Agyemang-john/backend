@@ -384,6 +384,16 @@ SIMPLE_JWT = {
     'LEEWAY': 30,  # Allow a 30-second leeway for clock discrepancies
 }
 
+
+# IP Geolocation and Country/Region Detection
+IS_PRODUCTION = ENV == 'production'
+
+USE_X_FORWARDED_HOST = IS_PRODUCTION
+if IS_PRODUCTION:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+else:
+    SECURE_PROXY_SSL_HEADER = None
+
 # CORS
 CORS_ALLOW_METHODS = [
     'GET',

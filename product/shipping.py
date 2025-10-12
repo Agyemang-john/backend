@@ -63,20 +63,27 @@ def seed_countries():
     logger.info(f"Country seeding complete: {added} added, {skipped} skipped, {errors} errors")
 
 def get_client_ip(request):
-    # First try X-Real-IP (set by your nginx)
+    """Get client IP with Digital Ocean/Nginx support"""
+    # Digital Ocean load balancer headers
+    do_forwarded = request.META.get('HTTP_X_FORWARDED_FOR')
+    if do_forwarded:
+        ip = do_forwarded.split(',')[0].strip()
+        if ip:
+            return ip
+    
+    # Standard headers
+    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if x_forwarded_for:
+        ip = x_forwarded_for.split(',')[0].strip()
+        if ip and ip.lower() != 'unknown':
+            return ip
+    
+    # Fallback headers
     real_ip = request.META.get('HTTP_X_REAL_IP')
     if real_ip:
         return real_ip
     
-    # Then try X-Forwarded-For
-    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
-    if x_forwarded_for:
-        ip = x_forwarded_for.split(',')[0].strip()
-        return ip
-    
-    # Fallback to REMOTE_ADDR
     return request.META.get('REMOTE_ADDR', 'unknown')
-
 
 def get_user_country_region(request):
     if request.user.is_authenticated:
@@ -98,7 +105,7 @@ def get_user_country_region(request):
         if address and address.country:
             try:
                 country_obj = Country.objects.get(
-                    Q(name__iexact=address.country.strip()) | Q(code__iexact=address.country.strip())
+                    Q(name__iexact=address.country.strip()) | Q(code__iexact=address.country.strip()) | Q(name__icontains=address.country.strip())
                 )
                 country = country_obj
             except Country.DoesNotExist:
@@ -154,7 +161,11 @@ def can_product_ship_to_user(request, product):
         country = cache.get(cache_key)
         if not country:
             try:
-                country = Country.objects.get(Q(name__iexact=country_name) | Q(code__iexact=country_name))
+                country = Country.objects.filter(
+                    Q(name__iexact=country_name) | 
+                    Q(code__iexact=country_name) |
+                    Q(name__icontains=country_name)
+                ).first()
                 cache.set(cache_key, country, 24 * 60 * 60)
             except Country.DoesNotExist:
                 logger.warning(f"Country not found in DB: {country_name}")

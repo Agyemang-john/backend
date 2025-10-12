@@ -314,7 +314,7 @@ class ProductDetailAPIView(APIView):
                 'is_following': is_following,
                 'follower_count': follower_count,
                 "user_region": user_region,
-                "can_ship": True,
+                "can_ship": can_ship,
             }
 
             # Create the response object

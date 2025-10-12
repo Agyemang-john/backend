@@ -10,6 +10,7 @@ from django.core.exceptions import ObjectDoesNotExist
 import uuid
 from product.utils import *
 from .service import FeeCalculator, FeeResult
+from django.db.models import Q
 
 
 # Create your models here.
@@ -136,7 +137,7 @@ class Cart(models.Model):
             # Check if the product has available regions
             if product.available_in_regions.exists():
                 # If the user's region is not in the product's available regions, mark for deletion
-                if not product.available_in_regions.filter(name__iexact=user_region).exists():
+                if not product.available_in_regions.filter(Q(name__iexact=user_region) | Q(name__icontains=user_region)).exists():
                     deleted_items.append({
                         'product_title': product.title,
                         'region': user_region
