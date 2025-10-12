@@ -273,14 +273,17 @@ class CustomTokenVerifyView(TokenVerifyView):
 class LogoutView(APIView):
     def post(self, request, *args, **kwargs):
         response = Response(status=status.HTTP_204_NO_CONTENT)
+        
+        # Delete cookies using only supported args
         response.delete_cookie(
             'access',
             path=settings.AUTH_COOKIE_PATH,
-            domain=settings.AUTH_COOKIE_DOMAIN
+            domain=settings.AUTH_COOKIE_DOMAIN,
         )
         response.delete_cookie(
             'refresh',
             path=settings.AUTH_COOKIE_PATH,
-            domain=settings.AUTH_COOKIE_DOMAIN
+            domain=settings.AUTH_COOKIE_DOMAIN,
         )
+
         return response

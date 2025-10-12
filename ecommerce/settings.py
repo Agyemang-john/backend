@@ -433,6 +433,16 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
     "x-ssr-refresh",
     "cache-control",
     "access-control-allow-origin",
+
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
 ]
 
 EXCHANGE_RATE_API_KEY = config('EXCHANGE_RATE_API_KEY')
