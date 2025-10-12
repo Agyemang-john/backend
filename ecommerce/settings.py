@@ -385,8 +385,16 @@ SIMPLE_JWT = {
 }
 
 # CORS
+CORS_ALLOW_METHODS = [
+    'GET',
+    'POST',
+    'PUT',
+    'PATCH',
+    'DELETE',
+    'OPTIONS',
+]
+
 CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOW_METHODS = ["*"]
 
 CSRF_TRUSTED_ORIGINS = [
     "https://negromart.com",      # frontend domain

@@ -64,102 +64,120 @@ def seed_countries():
 
 def get_user_country_region(request):
     """
-    Returns (country, region_name) from user's profile address or geolocation (cached).
-    - country: Country object (authenticated users with valid address) or string name (geolocation).
-    - region_name: String or None (for logging/analytics, not used in shipping).
-    Cache key is based on user ID or IP for anonymous users.
+    Returns (country, region_name):
+      - Authenticated users → (Country object, region string or None)
+      - Anonymous users → (country_name string, region_name string)
+    Caches results for efficiency.
     """
-    # Generate cache key
-    cache_key = f"location:{request.user.id}" if request.user.is_authenticated else f"location:ip:{request.META.get('REMOTE_ADDR', 'unknown')}"
+    # Generate cache key (unique per user or IP)
+    if request.user.is_authenticated:
+        cache_key = f"location:user:{request.user.id}"
+    else:
+        ip = request.META.get('REMOTE_ADDR', 'unknown')
+        cache_key = f"location:ip:{ip}"
+
     cached_location = cache.get(cache_key)
-    
     if cached_location:
         return cached_location
 
-    location = (None, None)  # Default
+    country = None
+    region_name = None
 
-    # Check authenticated user's address first
+    # 1️⃣ Authenticated user → use address
     if request.user.is_authenticated:
-        address = Address.objects.filter(user=request.user, status=True).select_related('user').first()
+        address = (
+            Address.objects.filter(user=request.user, status=True)
+            .select_related('user')
+            .first()
+        )
         if address and address.country:
-            location = (address.country, address.region or None)  # Ensure region is None if empty
-            cache.set(cache_key, location, timeout=12*60*60)  # Cache for 12 hours
+            # Try to match Address.country (char field) to Country model
+            country_name = address.country.strip()
+            try:
+                country_obj = Country.objects.get(
+                    Q(name__iexact=country_name) | Q(code__iexact=country_name)
+                )
+                country = country_obj
+            except Country.DoesNotExist:
+                logger.warning(f"No Country found matching '{country_name}' from address")
+                country = None
+            region_name = address.region.strip() if address.region else None
+
+            location = (country, region_name)
+            cache.set(cache_key, location, 12 * 60 * 60)  # cache 12h
             return location
 
-    # Fallback to IP geolocation API (ip-api.com) for anonymous users or authenticated users without valid address
+    # 2️⃣ Anonymous user or no valid address → fallback to IP geolocation
     try:
-        response = requests.get(f'http://ip-api.com/json', timeout=5)
-        response.raise_for_status()  # Raise for bad status codes
+        response = requests.get("http://ip-api.com/json", timeout=5)
+        response.raise_for_status()
         data = response.json()
-        
-        if data.get('status') == 'success':
-            country_code = data.get('countryCode')
+
+        if data.get("status") == "success":
+            country_code = data.get("countryCode")
+            country_name = data.get("country", "Unknown")
+            region_name = data.get("regionName")
+
             if country_code:
-                # Map country code to name using pycountry
                 country_obj = pycountry.countries.get(alpha_2=country_code)
-                country_name = country_obj.name if country_obj else data.get('country', 'Unknown')
-                region_name = data.get('regionName') or None
-                location = (country_name, region_name)
-                cache.set(cache_key, location, timeout=12*60*60)  # Cache for 12 hours
-                return location
-            else:
-                logger.warning(f"Geolocation API missing countryCode: {data}")
+                country_name = country_obj.name if country_obj else country_name
+
+            location = (country_name, region_name)
+            cache.set(cache_key, location, 12 * 60 * 60)
+            return location
         else:
             logger.warning(f"Geolocation API returned non-success status: {data}")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Geolocation API request failed for IP: {str(e)}")
 
+    except requests.RequestException as e:
+        logger.error(f"Geolocation lookup failed: {str(e)}")
 
-    return location
+    return (None, None)
+
 
 def can_product_ship_to_user(request, product):
     """
-    Checks if a product can ship to the user's country (by address or IP).
-    Assumes available_in_regions is ManyToMany to Country.
-    Returns (can_ship, location_info) where location_info is country name.
+    Checks if product ships to user's country.
+    - Returns (True/False, country_name)
     """
     country_result, region_name = get_user_country_region(request)
 
     if not country_result:
-        user_info = f"user:{request.user.id}" if request.user.is_authenticated else f"ip:{request.META.get('REMOTE_ADDR', 'unknown')}"
+        user_info = (
+            f"user:{request.user.id}"
+            if request.user.is_authenticated
+            else f"ip:{request.META.get('REMOTE_ADDR', 'unknown')}"
+        )
         logger.warning(f"No country identified for shipping check for {user_info}")
         return False, None
 
-    # Resolve to Country object (if string from geolocation, look it up)
-    country = None
-    country_name = None
-    if isinstance(country_result, str):  # From geolocation
-        country_name = country_result
-        cache_key = f"country:{country_name.lower().replace(' ', '_')}"
+    # Resolve to Country object (if geolocation returned string)
+    if isinstance(country_result, str):
+        country_name = country_result.strip()
+        cache_key = f"country_obj:{country_name.lower().replace(' ', '_')}"
+
         country = cache.get(cache_key)
         if not country:
             try:
-                # Try matching by name or official name to handle variations
-                country = Country.objects.get(
-                    Q(name__iexact=country_name)
-                )
-                cache.set(cache_key, country, timeout=24*60*60)  # Cache for 24 hours
+                country = Country.objects.get(Q(name__iexact=country_name) | Q(code__iexact=country_name))
+                cache.set(cache_key, country, 24 * 60 * 60)
             except Country.DoesNotExist:
-                logger.error(f"Country not found in database: {country_name}")
+                logger.warning(f"Country not found in DB: {country_name}")
                 return False, country_name
             except Country.MultipleObjectsReturned:
                 logger.error(f"Multiple countries found for: {country_name}")
                 return False, country_name
-    else:  # Already a Country object from address
-        country = country_result
-        country_name = country
-
-    # Check if product ships to the country
-    if not product.available_in_regions.exists():
-        # Log warning for potential misconfiguration
-        logger.warning(f"No shipping regions specified for product {product.id}; assuming global shipping")
-        if region_name:
-            logger.info(f"Allowing shipping to {country_name}, region: {region_name}")
-        return True, country_name
-    elif product.available_in_regions.filter(id=country.id).exists():
-        if region_name:
-            logger.info(f"Shipping allowed to {country_name}, region: {region_name}")
-        return True, country_name
     else:
-        logger.warning(f"Product {product.id} does not ship to {country_name}")
-        return False, country_name
+        country = country_result
+        country_name = country.name
+
+    # 3️⃣ Check shipping eligibility
+    if not product.available_in_regions.exists():
+        logger.info(f"Product {product.id} has no regions; assuming global shipping.")
+        return True, country_name
+
+    if product.available_in_regions.filter(id=country.id).exists():
+        logger.info(f"Product {product.id} ships to {country_name}.")
+        return True, country_name
+
+    logger.info(f"Product {product.id} does NOT ship to {country_name}.")
+    return False, country_name
