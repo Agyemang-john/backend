@@ -62,18 +62,20 @@ def seed_countries():
 
     logger.info(f"Country seeding complete: {added} added, {skipped} skipped, {errors} errors")
 
+def get_client_ip(request):
+    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if x_forwarded_for:
+        ip = x_forwarded_for.split(',')[0].strip()
+    else:
+        ip = request.META.get('REMOTE_ADDR', 'unknown')
+    return ip
+
+
 def get_user_country_region(request):
-    """
-    Returns (country, region_name):
-      - Authenticated users → (Country object, region string or None)
-      - Anonymous users → (country_name string, region_name string)
-    Caches results for efficiency.
-    """
-    # Generate cache key (unique per user or IP)
     if request.user.is_authenticated:
         cache_key = f"location:user:{request.user.id}"
     else:
-        ip = request.META.get('REMOTE_ADDR', 'unknown')
+        ip = get_client_ip(request)
         cache_key = f"location:ip:{ip}"
 
     cached_location = cache.get(cache_key)
@@ -83,36 +85,27 @@ def get_user_country_region(request):
     country = None
     region_name = None
 
-    # 1️⃣ Authenticated user → use address
+    # Check address for authenticated user
     if request.user.is_authenticated:
-        address = (
-            Address.objects.filter(user=request.user, status=True)
-            .select_related('user')
-            .first()
-        )
+        address = Address.objects.filter(user=request.user, status=True).first()
         if address and address.country:
-            # Try to match Address.country (char field) to Country model
-            country_name = address.country.strip()
             try:
                 country_obj = Country.objects.get(
-                    Q(name__iexact=country_name) | Q(code__iexact=country_name)
+                    Q(name__iexact=address.country.strip()) | Q(code__iexact=address.country.strip())
                 )
                 country = country_obj
             except Country.DoesNotExist:
-                logger.warning(f"No Country found matching '{country_name}' from address")
-                country = None
+                logger.warning(f"Address country not found: {address.country}")
             region_name = address.region.strip() if address.region else None
-
             location = (country, region_name)
-            cache.set(cache_key, location, 12 * 60 * 60)  # cache 12h
+            cache.set(cache_key, location, 12 * 60 * 60)
             return location
 
-    # 2️⃣ Anonymous user or no valid address → fallback to IP geolocation
+    # Fallback to IP-based geolocation
+    ip = get_client_ip(request)
     try:
-        response = requests.get("http://ip-api.com/json", timeout=5)
-        response.raise_for_status()
+        response = requests.get(f"http://ip-api.com/json/{ip}", timeout=5)
         data = response.json()
-
         if data.get("status") == "success":
             country_code = data.get("countryCode")
             country_name = data.get("country", "Unknown")
@@ -125,9 +118,6 @@ def get_user_country_region(request):
             location = (country_name, region_name)
             cache.set(cache_key, location, 12 * 60 * 60)
             return location
-        else:
-            logger.warning(f"Geolocation API returned non-success status: {data}")
-
     except requests.RequestException as e:
         logger.error(f"Geolocation lookup failed: {str(e)}")
 
@@ -140,7 +130,6 @@ def can_product_ship_to_user(request, product):
     - Returns (True/False, country_name)
     """
     country_result, region_name = get_user_country_region(request)
-
     if not country_result:
         user_info = (
             f"user:{request.user.id}"
