@@ -63,12 +63,19 @@ def seed_countries():
     logger.info(f"Country seeding complete: {added} added, {skipped} skipped, {errors} errors")
 
 def get_client_ip(request):
+    # First try X-Real-IP (set by your nginx)
+    real_ip = request.META.get('HTTP_X_REAL_IP')
+    if real_ip:
+        return real_ip
+    
+    # Then try X-Forwarded-For
     x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
     if x_forwarded_for:
         ip = x_forwarded_for.split(',')[0].strip()
-    else:
-        ip = request.META.get('REMOTE_ADDR', 'unknown')
-    return ip
+        return ip
+    
+    # Fallback to REMOTE_ADDR
+    return request.META.get('REMOTE_ADDR', 'unknown')
 
 
 def get_user_country_region(request):
