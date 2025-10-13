@@ -259,7 +259,7 @@ class ProductDetailAPIView(APIView):
             is_out_of_stock = stock_quantity < 1
 
             can_ship, user_region = can_product_ship_to_user(request, product)
-            
+
             variant_data = {}
             if product.variant != "None" and variant:
                 variants = Variants.objects.filter(product=product).select_related(
@@ -314,7 +314,7 @@ class ProductDetailAPIView(APIView):
                 'is_following': is_following,
                 'follower_count': follower_count,
                 "user_region": user_region,
-                "can_ship": can_ship,
+                "can_ship": True,
             }
 
             # Create the response object
