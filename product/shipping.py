@@ -1,12 +1,16 @@
 import requests
 import logging
-import json
+from ipware import get_client_ip as ipware_get_client_ip
 from django.core.cache import cache
 from address.models import Country, Address
 import pycountry
 from django.db.models import Q
 from django.db import IntegrityError
 from django.core.exceptions import ValidationError
+
+from geoip2.errors import AddressNotFoundError
+from django.conf import settings
+import ipaddress    
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -62,38 +66,60 @@ def seed_countries():
 
     logger.info(f"Country seeding complete: {added} added, {skipped} skipped, {errors} errors")
 
-def get_client_ip(request):
-    """Get client IP with Digital Ocean/Nginx support"""
-    # Digital Ocean load balancer headers
-    do_forwarded = request.META.get('HTTP_X_FORWARDED_FOR')
-    if do_forwarded:
-        ip = do_forwarded.split(',')[0].strip()
-        if ip:
-            return ip
-    
-    # Standard headers
-    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
-    if x_forwarded_for:
-        ip = x_forwarded_for.split(',')[0].strip()
-        if ip and ip.lower() != 'unknown':
-            return ip
-    
-    # Fallback headers
-    real_ip = request.META.get('HTTP_X_REAL_IP')
-    if real_ip:
-        return real_ip
-    
-    return request.META.get('REMOTE_ADDR', 'unknown')
+def is_valid_ip(ip):
+    """Validate if the given string is a valid IPv4 or IPv6 address."""
+    try:
+        ipaddress.ip_address(ip)
+        return True
+    except ValueError:
+        return False
+
+def get_ip_address_from_request(request):
+    """Makes the best attempt to get the client's real IP or return the loopback."""
+    PRIVATE_IPS_PREFIX = ('10.', '172.', '192.', '127.')
+    ip_address = ''
+    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR', '')
+    if x_forwarded_for and ',' not in x_forwarded_for:
+        if not x_forwarded_for.startswith(PRIVATE_IPS_PREFIX) and is_valid_ip(x_forwarded_for):
+            ip_address = x_forwarded_for.strip()
+    else:
+        ips = [ip.strip() for ip in x_forwarded_for.split(',')]
+        for ip in ips:
+            if ip.startswith(PRIVATE_IPS_PREFIX):
+                continue
+            elif not is_valid_ip(ip):
+                continue
+            else:
+                ip_address = ip
+                break
+    if not ip_address:
+        x_real_ip = request.META.get('HTTP_X_REAL_IP', '')
+        if x_real_ip:
+            if not x_real_ip.startswith(PRIVATE_IPS_PREFIX) and is_valid_ip(x_real_ip):
+                ip_address = x_real_ip.strip()
+    if not ip_address:
+        remote_addr = request.META.get('REMOTE_ADDR', '')
+        if remote_addr:
+            if not remote_addr.startswith(PRIVATE_IPS_PREFIX) and is_valid_ip(remote_addr):
+                ip_address = remote_addr.strip()
+    if not ip_address:
+        ip_address = '127.0.0.1'
+    logger.debug(f"Resolved IP: {ip_address}, X-Forwarded-For: {x_forwarded_for}, X-Real-IP: {request.META.get('HTTP_X_REAL_IP')}, REMOTE_ADDR: {request.META.get('REMOTE_ADDR')}")
+    return ip_address
 
 def get_user_country_region(request):
+    """Determine the user's country and region based on authentication or IP."""
+    # Determine cache key
     if request.user.is_authenticated:
         cache_key = f"location:user:{request.user.id}"
     else:
-        ip = get_client_ip(request)
+        ip = get_ip_address_from_request(request)
         cache_key = f"location:ip:{ip}"
 
+    # Check cache first
     cached_location = cache.get(cache_key)
     if cached_location:
+        logger.debug(f"Cache hit for {cache_key}: {cached_location}")
         return cached_location
 
     country = None
@@ -105,20 +131,33 @@ def get_user_country_region(request):
         if address and address.country:
             try:
                 country_obj = Country.objects.get(
-                    Q(name__iexact=address.country.strip()) | Q(code__iexact=address.country.strip()) | Q(name__icontains=address.country.strip())
+                    Q(name__iexact=address.country.strip()) | Q(code__iexact=address.country.strip())
                 )
                 country = country_obj
+                region_name = address.region.strip() if address.region else None
+                location = (country, region_name)
+                cache.set(cache_key, location, 12 * 60 * 60)
+                logger.debug(f"Location from address for user {request.user.id}: {location}")
+                return location
             except Country.DoesNotExist:
                 logger.warning(f"Address country not found: {address.country}")
-            region_name = address.region.strip() if address.region else None
-            location = (country, region_name)
-            cache.set(cache_key, location, 12 * 60 * 60)
-            return location
 
-    # Fallback to IP-based geolocation
-    ip = get_client_ip(request)
+    # Fallback to IP-based geolocation for unauthenticated users
+    ip = get_ip_address_from_request(request)
+    if ip.startswith(('10.', '172.', '192.', '127.')):
+        logger.warning(f"Skipping geolocation for private IP: {ip}")
+        if settings.DEBUG:
+            location = ('Ghana', None)  # Default for development
+            cache.set(cache_key, location, 12 * 60 * 60)
+            logger.debug(f"Using default location for private IP in DEBUG mode: {location}")
+            return location
+        location = (None, None)
+        cache.set(cache_key, location, 12 * 60 * 60)
+        return location
+
     try:
         response = requests.get(f"http://ip-api.com/json/{ip}", timeout=5)
+        response.raise_for_status()
         data = response.json()
         if data.get("status") == "success":
             country_code = data.get("countryCode")
@@ -131,12 +170,17 @@ def get_user_country_region(request):
 
             location = (country_name, region_name)
             cache.set(cache_key, location, 12 * 60 * 60)
+            logger.debug(f"Geolocation for IP {ip}: {location}")
             return location
+        else:
+            logger.warning(f"Geolocation API failed for IP {ip}: {data.get('message')}")
     except requests.RequestException as e:
-        logger.error(f"Geolocation lookup failed: {str(e)}")
+        logger.error(f"Geolocation lookup failed for IP {ip}: {str(e)}")
 
-    return (None, None)
-
+    # Cache the failure to avoid repeated lookups
+    location = (None, None)
+    cache.set(cache_key, location, 12 * 60 * 60)
+    return location
 
 def can_product_ship_to_user(request, product):
     """
@@ -144,11 +188,13 @@ def can_product_ship_to_user(request, product):
     - Returns (True/False, country_name)
     """
     country_result, region_name = get_user_country_region(request)
+    logger.debug(f"Country result: {country_result}, Region: {region_name}")
+
     if not country_result:
         user_info = (
             f"user:{request.user.id}"
             if request.user.is_authenticated
-            else f"ip:{request.META.get('REMOTE_ADDR', 'unknown')}"
+            else f"ip:{get_ip_address_from_request(request)}"
         )
         logger.warning(f"No country identified for shipping check for {user_info}")
         return False, None
@@ -157,15 +203,10 @@ def can_product_ship_to_user(request, product):
     if isinstance(country_result, str):
         country_name = country_result.strip()
         cache_key = f"country_obj:{country_name.lower().replace(' ', '_')}"
-
         country = cache.get(cache_key)
         if not country:
             try:
-                country = Country.objects.filter(
-                    Q(name__iexact=country_name) | 
-                    Q(code__iexact=country_name) |
-                    Q(name__icontains=country_name)
-                ).first()
+                country = Country.objects.get(Q(name__iexact=country_name) | Q(code__iexact=country_name))
                 cache.set(cache_key, country, 24 * 60 * 60)
             except Country.DoesNotExist:
                 logger.warning(f"Country not found in DB: {country_name}")
@@ -175,9 +216,13 @@ def can_product_ship_to_user(request, product):
                 return False, country_name
     else:
         country = country_result
-        country_name = country.name
+        country_name = country.name if country else None
 
-    # 3️⃣ Check shipping eligibility
+    # Check shipping eligibility
+    if not country:
+        logger.warning(f"No valid country object for shipping check")
+        return False, country_name
+
     if not product.available_in_regions.exists():
         logger.info(f"Product {product.id} has no regions; assuming global shipping.")
         return True, country_name

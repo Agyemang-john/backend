@@ -59,10 +59,9 @@ services:
     image: redis:7
     command:
       - redis-server
-      - --appendonly
-      - "yes"
-      - --appendfsync
-      - everysec
+      - --appendonly yes
+      - --appendfsync everysec
+      - --requirepass eXplorer200e
     ports:
       - "6379:6379"
     restart: always
