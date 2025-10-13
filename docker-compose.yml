@@ -59,18 +59,15 @@ services:
     image: redis:7
     command:
       - redis-server
-      - --appendonly yes
-      - --appendfsync everysec
-      - --requirepass ${REDIS_PASSWORD}
-    env_file:
-      - .env
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
     ports:
       - "6379:6379"
     restart: always
     volumes:
       - redis_data:/data
-
-
 
 volumes:
   redis_data:

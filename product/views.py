@@ -1,4 +1,4 @@
-from django.shortcuts import render, get_object_or_404
+from django.shortcuts import get_object_or_404
 from rest_framework.response import Response
 from .models import *
 from order.models import *
@@ -14,12 +14,12 @@ from rest_framework import status
 from rest_framework.views import APIView
 from decimal import Decimal
 from order.service import *
-from .service import get_fbt_recommendations, get_cart_product_ids
-from .shipping import can_product_ship_to_user
+from .service import get_fbt_recommendations
+# from .shipping import can_product_ship_to_user
 from copy import deepcopy
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import F
-from uuid import uuid4
+# from uuid import uuid4
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
@@ -106,10 +106,7 @@ class AjaxColorAPIView(APIView):
         # Return the JSON response
         return Response(response_data, status=status.HTTP_200_OK)
 
-from django.db.models import Prefetch, Subquery, OuterRef
-from django.utils.decorators import method_decorator
-from django.views.decorators.cache import cache_page
-
+from django.db.models import Prefetch
 def get_cached_product_data(sku, slug, request):
     cache_key = f"product_detail_cache:{sku}:{slug}"
     cached_data = cache.get(cache_key)
@@ -396,6 +393,7 @@ class SearchSuggestionsAPIView(APIView):
             {
                 "title": product.title,
                 "price": product.price,
+                "link": f"{product.sku}/{product.slug}",
                 "thumbnail": request.build_absolute_uri(product.image.url)
                 if product.image
                 else None,
@@ -674,7 +672,7 @@ class BrandProductListView(APIView):
         }
         return Response(context)
 
-from elasticsearch8 import Elasticsearch
+# from elasticsearch8 import Elasticsearch
 
 import logging
 
