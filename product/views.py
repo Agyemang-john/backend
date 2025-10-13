@@ -258,7 +258,7 @@ class ProductDetailAPIView(APIView):
             stock_quantity = variant.quantity if variant else product.total_quantity
             is_out_of_stock = stock_quantity < 1
 
-            can_ship, user_region = can_product_ship_to_user(request, product)
+            # can_ship, user_region = can_product_ship_to_user(request, product)
 
             variant_data = {}
             if product.variant != "None" and variant:
@@ -313,7 +313,7 @@ class ProductDetailAPIView(APIView):
                 "cart_item_id": cart_data["cart_item_id"],
                 'is_following': is_following,
                 'follower_count': follower_count,
-                "user_region": user_region,
+                # "user_region": user_region,
                 "can_ship": True,
             }
 
