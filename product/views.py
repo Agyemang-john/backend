@@ -393,7 +393,8 @@ class SearchSuggestionsAPIView(APIView):
             {
                 "title": product.title,
                 "price": product.price,
-                "link": f"{product.sku}/{product.slug}",
+                "sku": product.sku,
+                "slug": product.slug,
                 "thumbnail": request.build_absolute_uri(product.image.url)
                 if product.image
                 else None,
