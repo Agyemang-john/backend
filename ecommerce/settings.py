@@ -305,19 +305,9 @@ DJOSER = {
     # },
 }
 
-
-REDIS_HOST = "redis"
-REDIS_PORT = 6379
-REDIS_DB = 0
-REDIS_PASSWORD = config("REDIS_PASSWORD", default=None)
-
 # Redis URL (set in .env)
-if ENV == "production" and REDIS_PASSWORD:
-    REDIS_URL = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
-    REDIS_RESULT_URL = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/1"
-else:
-    REDIS_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
-    REDIS_RESULT_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}/1"
+REDIS_URL = config("REDIS_URL", default="redis://redis:6379/0")
+
 # Caches (Redis as default backend)
 CACHES = {
     "default": {
@@ -325,7 +315,7 @@ CACHES = {
         "LOCATION": REDIS_URL,
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
-            "MAX_CONNECTIONS": 50,  # pool size
+            "MAX_CONNECTIONS": 30,  # pool size
             "IGNORE_EXCEPTIONS": True,  # fail silently if Redis is down
         },
     }
@@ -336,8 +326,8 @@ SESSION_ENGINE = "django.contrib.sessions.backends.cache"
 SESSION_CACHE_ALIAS = "default"
 
 # Celery settings
-CELERY_BROKER_URL = REDIS_URL
-CELERY_RESULT_BACKEND = REDIS_RESULT_URL
+CELERY_BROKER_URL = config("REDIS_URL", default="redis://redis:6379/0")
+CELERY_RESULT_BACKEND = config("REDIS_RESULT_URL", default="redis://redis:6379/1")
 
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
@@ -395,6 +385,7 @@ SIMPLE_JWT = {
 }
 
 # GeoIP
+
 # CORS
 CORS_ALLOW_METHODS = [
     'GET',

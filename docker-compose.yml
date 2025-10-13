@@ -64,13 +64,12 @@ services:
       - --requirepass ${REDIS_PASSWORD}
     env_file:
       - .env
-    environment:
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
     ports:
       - "6379:6379"
     restart: always
     volumes:
       - redis_data:/data
+
 
 
 volumes:
