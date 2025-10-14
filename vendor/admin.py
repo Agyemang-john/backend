@@ -20,7 +20,7 @@ class VendorAdmin(admin.ModelAdmin):
             'fields': ('status', 'is_approved', 'is_suspended', 'is_subscribed', 'subscription_start_date', 'subscription_end_date')
         }),
         ('Analytics', {
-            'fields': ('is_featured', 'is_manufacturer', 'views')
+            'fields': ('followers', 'is_featured', 'is_manufacturer', 'views')
         }),
     )   
 
