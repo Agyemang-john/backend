@@ -10,6 +10,10 @@ from .serializers import CartItemSerializer
 from core.service import get_exchange_rates
 from decimal import Decimal
 
+from decimal import InvalidOperation
+import json
+import logging
+
 logger = logging.getLogger(__name__)
 
 def calculate_packaging_fee(weight, volume):
@@ -17,11 +21,18 @@ def calculate_packaging_fee(weight, volume):
     weight_rate = Decimal('1.0')  # Packaging fee per kg
     volume_rate = Decimal('1.0')  # Packaging fee per cubic meter
 
-    weight_fee = Decimal(str(weight)) * weight_rate
-    volume_fee = Decimal(str(volume)) * volume_rate
+    # Handle None or invalid weight/volume
+    try:
+        weight = Decimal(str(weight)) if weight is not None else Decimal('0')
+        volume = Decimal(str(volume)) if volume is not None else Decimal('0')
+    except (InvalidOperation, TypeError) as e:
+        logger.error(f"Invalid weight or volume: weight={weight}, volume={volume}, error={e}")
+        return Decimal('0')
+
+    weight_fee = weight * weight_rate
+    volume_fee = volume * volume_rate
 
     # Choose the higher fee or sum both if needed
-    # packaging_fee = max(weight_fee, volume_fee)
     packaging_fee = weight_fee + volume_fee
     return packaging_fee
 
@@ -54,21 +65,32 @@ def get_guest_cart_response(request):
     guest_cart_header = request.headers.get('X-Guest-Cart')
     currency = request.headers.get('X-Currency', 'GHS')
     rates = get_exchange_rates()
-    exchange_rate = Decimal(str(rates.get(currency, 1)))
+    
+    # Ensure exchange_rate is Decimal
+    try:
+        exchange_rate = Decimal(str(rates.get(currency, 1)))
+    except (InvalidOperation, TypeError) as e:
+        logger.error(f"Invalid exchange rate for currency {currency}: {e}")
+        exchange_rate = Decimal('1')
+
     try:
         guest_cart = json.loads(guest_cart_header) if guest_cart_header else []
     except (json.JSONDecodeError, TypeError):
         guest_cart = []
 
     items = []
-    total_amount = Decimal(0)
-    packaging_fee = Decimal(0)
+    total_amount = Decimal('0')
+    packaging_fee = Decimal('0')
 
     for item in guest_cart:
         try:
             product_id = item.get("p")
             quantity = int(item.get("q", 0))
             variant_id = item.get("v")
+
+            if quantity <= 0:
+                logger.warning(f"Invalid quantity for product {product_id}: {quantity}")
+                continue
 
             product = Product.objects.get(id=product_id, status="published")
             variant = None
@@ -77,6 +99,13 @@ def get_guest_cart_response(request):
             if variant_id:
                 variant = Variants.objects.get(id=variant_id, product=product)
                 price = variant.price
+
+            # Ensure price is Decimal
+            try:
+                price = Decimal(str(price))
+            except (InvalidOperation, TypeError) as e:
+                logger.error(f"Invalid price for product {product_id}: {e}")
+                continue
 
             item_data = {
                 "product": ProductSerializer(product, context={'request': request}).data,
@@ -92,6 +121,10 @@ def get_guest_cart_response(request):
         except Exception as e:
             logger.warning(f"Error processing guest cart item: {e}")
             continue
+
+    # Log types for debugging
+    logger.debug(f"packaging_fee type: {type(packaging_fee)}, value: {packaging_fee}")
+    logger.debug(f"exchange_rate type: {type(exchange_rate)}, value: {exchange_rate}")
 
     return Response({
         "items": items,

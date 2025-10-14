@@ -241,11 +241,11 @@ class DeliveryPerformanceView(APIView):
 
 import requests
 class LocationAutocompleteThrottle(UserRateThrottle):
-    rate = '10/minute'  # Limit to 10 requests per minute per user
+    rate = '2/second'  # Limit to 10 requests per minute per user
 
 class LocationAutocompleteView(APIView):
     permission_classes = [IsAuthenticated]
-    # throttle_classes = [LocationAutocompleteThrottle]
+    throttle_classes = [LocationAutocompleteThrottle]
 
     def get(self, request):
         query = request.query_params.get('q', '').strip()
