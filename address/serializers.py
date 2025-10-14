@@ -43,7 +43,7 @@ class AddressSerializer(serializers.ModelSerializer):
         required=False,
         allow_blank=True,
         error_messages={
-            'max_length': 'GPS address cannot exceed 10 characters.'
+            'max_length': 'GPS address cannot exceed 19 characters.'
         }
     )
     email = serializers.EmailField(

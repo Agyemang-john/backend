@@ -1,14 +1,11 @@
-from django.core.cache import cache
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import IsAuthenticated
 from .serializers import *
-from userauths.utils import send_sms
-from userauths.models import Profile, User
+from userauths.models import Profile
 from order.service import *
 # User = get_user_model()
-from rest_framework.decorators import api_view, permission_classes
 from rest_framework.generics import GenericAPIView
 
 from rest_framework.generics import RetrieveUpdateDestroyAPIView
@@ -75,13 +72,33 @@ class AddressDetailView(RetrieveUpdateDestroyAPIView):
             raise NotFound(f"Address with ID {self.kwargs['id']} not found.")
 
     def perform_update(self, serializer):
-        # Handle the unique_default_address constraint
-        with transaction.atomic():
-            if serializer.validated_data.get('status'):
-                # Unset status=True for other addresses of the user
-                Address.objects.filter(user=self.request.user, status=True).exclude(id=self.get_object().id).update(status=False)
-            serializer.save(user=self.request.user)
-            logger.info(f"Updated address {self.get_object().id} for user {self.request.user.id}")
+        data = serializer.validated_data
+        if not data.get('latitude') and not data.get('longitude'):
+            query = ', '.join(filter(None, [
+                # data.get('address', ''),
+                data.get('town', ''),
+            ]))
+            try:
+                response = requests.get(
+                    f"https://nominatim.openstreetmap.org/search?format=json&q={query}&addressdetails=1&limit=1"
+                )
+                response.raise_for_status()
+                geocoded = response.json()
+                if geocoded:
+                    data['latitude'] = float(geocoded[0]['lat'])
+                    data['longitude'] = float(geocoded[0]['lon'])
+                    data['address'] = float(geocoded[0]['display_name'])
+            except Exception as e:
+                logger.error(f"Geocoding failed: {e}")
+                # Optionally allow null coordinates
+
+        user = self.request.user
+        status = serializer.validated_data.get('status', False)
+        if status:  # If user sets this address as default
+            Address.objects.filter(user=user, status=True).exclude(pk=self.get_object().pk).update(status=False)
+
+        serializer.save(user=self.request.user)
+        logger.info(f"Updated address {self.get_object().id} for user {self.request.user.id}")
 
     def perform_destroy(self, obj):
         # Log deletion and perform delete

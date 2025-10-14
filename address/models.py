@@ -57,7 +57,7 @@ class Address(models.Model):
     region = models.CharField(max_length=30, null=True,blank=True)
     town = models.CharField(max_length=30, null=True, blank=True)
     address = models.CharField(max_length=300, null=True, blank=True)
-    gps_address = models.CharField(max_length=10, null=True, blank=True)
+    gps_address = models.CharField(max_length=20, null=True, blank=True)
     email = models.EmailField(null=True, blank=True, validators=[EmailValidator()])
     mobile = models.CharField(max_length=15, null=True, blank=True, validators=[RegexValidator(r'^\+?\d{10,15}$', message="Invalid phone number.")])
     status = models.BooleanField(default=False)

@@ -43,8 +43,6 @@ def get_recommended_products(request):
                                         .exclude(id__in=user_products)[:10]
         recommended_ids.update(category_based.values_list('id', flat=True))
 
-        print(f"Recommended IDs after user-based logic: {recommended_ids}")
-
     elif guest_cart_raw:
         try:
             cart_items = json.loads(guest_cart_raw)  # List of {"p": productId, "q": quantity, ...}
