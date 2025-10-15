@@ -500,9 +500,15 @@ class IsVendorOwner(permissions.BasePermission):
 
 
 class ProductListCreateView(generics.ListCreateAPIView):
-    queryset = Product.objects.all()
     serializer_class = ProductSerializer
     permission_classes = [IsVerifiedVendor, IsAuthenticated]
+
+    def get_queryset(self):
+        # Ensure only products belonging to the authenticated vendor are returned
+        vendor = self.request.user.vendor_user
+        if not vendor:
+            raise serializers.ValidationError("Vendor profile is required.")
+        return Product.objects.filter(vendor=vendor)
 
     def perform_create(self, serializer):
         vendor = self.request.user.vendor_user
@@ -516,10 +522,22 @@ class ProductCreateView(generics.CreateAPIView):
     serializer_class = ProductSerializer
     permission_classes = [IsVerifiedVendor, IsAuthenticated]
 
+    def perform_create(self, serializer):
+        vendor = self.request.user.vendor_user
+        if not vendor:
+            raise serializers.ValidationError("Vendor profile is required. Please complete your vendor setup.")
+        serializer.save(vendor=vendor)
+
+
 class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = Product.objects.all()
     serializer_class = ProductSerializer
     permission_classes = [IsVerifiedVendor, IsAuthenticated]
+
+    def get_queryset(self):
+        vendor = self.request.user.vendor_user
+        if not vendor:
+            raise serializers.ValidationError("Vendor profile is required.")
+        return Product.objects.filter(vendor=vendor)
 
 # PAYMENT METHOD VIEWSET
 from .models import VendorPaymentMethod
