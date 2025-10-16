@@ -15,7 +15,7 @@ from rest_framework.views import APIView
 from decimal import Decimal
 from order.service import *
 from .service import get_fbt_recommendations
-# from .shipping import can_product_ship_to_user
+from .shipping import can_product_ship_to_user
 from copy import deepcopy
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import F
@@ -255,7 +255,7 @@ class ProductDetailAPIView(APIView):
             stock_quantity = variant.quantity if variant else product.total_quantity
             is_out_of_stock = stock_quantity < 1
 
-            # can_ship, user_region = can_product_ship_to_user(request, product)
+            can_ship, user_region = can_product_ship_to_user(request, product)
 
             variant_data = {}
             if product.variant != "None" and variant:
@@ -310,8 +310,8 @@ class ProductDetailAPIView(APIView):
                 "cart_item_id": cart_data["cart_item_id"],
                 'is_following': is_following,
                 'follower_count': follower_count,
-                # "user_region": user_region,
-                "can_ship": True
+                "user_region": user_region,
+                "can_ship": can_ship
             }
 
             # Create the response object
