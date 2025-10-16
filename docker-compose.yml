@@ -1,6 +1,10 @@
 services:
   web:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ecommerce_app:latest
+
     entrypoint: /entrypoint.sh
     command: gunicorn ecommerce.wsgi:application --bind 0.0.0.0:8000 --workers 3 --threads 3 --worker-class gthread --timeout 120 --max-requests 1000 --max-requests-jitter 50
     environment:
@@ -38,7 +42,7 @@ services:
     restart: always
 
   celery:
-    build: .
+    image: ecommerce_app:latest
     command: celery -A ecommerce worker --loglevel=info --concurrency=2
     env_file:
       - .env
@@ -47,7 +51,7 @@ services:
     restart: always
 
   celery-beat:
-    build: .
+    image: ecommerce_app:latest
     command: celery -A ecommerce beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     env_file:
       - .env
