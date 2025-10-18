@@ -219,7 +219,7 @@ class Order(models.Model):
     vendors = models.ManyToManyField(Vendor, blank=True)
     order_number = models.CharField(max_length=390, editable=False)
     payment_id = models.CharField(max_length=200, null=True, blank=True, editable=False)
-    address = models.ForeignKey(Address, on_delete=models.CASCADE)
+    address = models.ForeignKey(Address, on_delete=models.PROTECT)
     payment_method = models.CharField(max_length=30, choices=PAYMENT_METHOD, default='paystack')
     total = models.DecimalField(max_digits=10, decimal_places=2)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")

@@ -166,13 +166,13 @@ class RecentlyViewedRelatedProductsAPIView(APIView):
             position = int(request.query_params.get("position", 0))
             product_id = product_ids[position]
 
-            product = Product.objects.select_related("sub_category").get(pk=product_id)
+            product = Product.published.select_related("sub_category").get(pk=product_id)
             sub_category = product.sub_category
 
             if not sub_category:
                 return Response([], status=status.HTTP_200_OK)
 
-            related_products = Product.objects.filter(
+            related_products = Product.published.filter(
                 sub_category=sub_category,
                 status='published'
             ).exclude(id=product.id)[:10]

@@ -72,33 +72,36 @@ class AddressDetailView(RetrieveUpdateDestroyAPIView):
             raise NotFound(f"Address with ID {self.kwargs['id']} not found.")
 
     def perform_update(self, serializer):
+        address_obj = self.get_object()
         data = serializer.validated_data
-        if not data.get('latitude') and not data.get('longitude'):
-            query = ', '.join(filter(None, [
-                # data.get('address', ''),
-                data.get('town', ''),
-            ]))
+        user = self.request.user
+
+        # Auto-geocode if latitude/longitude are missing
+        if not data.get('latitude') or not data.get('longitude'):
+            query = ', '.join(filter(None, [data.get('town', ''), data.get('region', ''), data.get('country', '')]))
             try:
                 response = requests.get(
-                    f"https://nominatim.openstreetmap.org/search?format=json&q={query}&addressdetails=1&limit=1"
+                    "https://nominatim.openstreetmap.org/search",
+                    params={"format": "json", "q": query, "addressdetails": 1, "limit": 1},
+                    headers={"User-Agent": "Negromart (support@negromart.com)"},
+                    timeout=10
                 )
                 response.raise_for_status()
                 geocoded = response.json()
                 if geocoded:
-                    data['latitude'] = float(geocoded[0]['lat'])
-                    data['longitude'] = float(geocoded[0]['lon'])
-                    data['address'] = float(geocoded[0]['display_name'])
+                    lat = float(geocoded[0]['lat'])
+                    lon = float(geocoded[0]['lon'])
+                    serializer.save(user=user, latitude=lat, longitude=lon)
+                    return
             except Exception as e:
                 logger.error(f"Geocoding failed: {e}")
-                # Optionally allow null coordinates
 
-        user = self.request.user
-        status = serializer.validated_data.get('status', False)
-        if status:  # If user sets this address as default
-            Address.objects.filter(user=user, status=True).exclude(pk=self.get_object().pk).update(status=False)
+        # If status is true, reset others
+        if data.get('status', False):
+            Address.objects.filter(user=user, status=True).exclude(pk=address_obj.pk).update(status=False)
 
-        serializer.save(user=self.request.user)
-        logger.info(f"Updated address {self.get_object().id} for user {self.request.user.id}")
+        serializer.save(user=user)
+        logger.info(f"Updated address {address_obj.id} for user {user.id}")
 
     def perform_destroy(self, obj):
         # Log deletion and perform delete

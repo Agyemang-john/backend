@@ -2,6 +2,7 @@ from django.db import models
 from django.utils import timezone
 from django.core.validators import EmailValidator, RegexValidator
 from userauths.models import User
+from .geocode import geocode_address  # import your helper
 
 
 class Country(models.Model):
@@ -75,4 +76,18 @@ class Address(models.Model):
         constraints = [
             models.UniqueConstraint(fields=['user'], condition=models.Q(status=True), name='unique_default_address')
         ]
+
+    def save(self, *args, **kwargs):
+        # Auto-geocode if lat/lon not provided
+        if not self.latitude or not self.longitude:
+            parts = [self.town, self.region, self.country]
+            query = ", ".join([p for p in parts if p])
+            lat, lon = geocode_address(query)
+            if lat and lon:
+                self.latitude = lat
+                self.longitude = lon
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.full_name} - {self.user.email} ({'Default' if self.status else 'Secondary'})"
 
