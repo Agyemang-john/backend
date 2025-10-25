@@ -324,7 +324,7 @@ VENDOR_AUTH_COOKIE_PATH = '/'
 VENDOR_AUTH_COOKIE_SAMESITE = "Lax" if DEBUG else "None"
 VENDOR_AUTH_COOKIE_DOMAIN = None
 if not DEBUG:
-    VENDOR_AUTH_COOKIE_DOMAIN = "seller.negromart.com"
+    VENDOR_AUTH_COOKIE_DOMAIN = ".negromart.com"
 
 
 from datetime import timedelta
@@ -379,7 +379,6 @@ CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = [
     "https://negromart.com",      # frontend domain
     "https://www.negromart.com",
-    "https://api.negromart.com",
     "https://seller.negromart.com",
     "http://localhost:3000",  
 ]
@@ -413,7 +412,6 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
     "x-ssr-refresh",
     "cache-control",
     "access-control-allow-origin",
-
     'accept',
     'accept-encoding',
     'authorization',
