@@ -384,24 +384,18 @@ CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",  
 ]
 
-if DEBUG:
-    CORS_ALLOWED_ORIGINS = [
-        "http://localhost:3000",  # Next.js dev
-        "http://127.0.0.1:3000",
-    ]
-else:
-    CORS_ALLOWED_ORIGINS = [
-        "https://negromart.com",
-        "https://www.negromart.com",
-        "https://seller.negromart.com",
-        "https://frontend-sigma-khaki-70.vercel.app",  # Next.js frontend URL
-        "https://negromart-space.sfo3.cdn.digitaloceanspaces.com",
-        "https://negromart-space.sfo3.digitaloceanspaces.com",
-    ]
 
-CORS_ALLOWED_ORIGIN_REGEXES = [
-    r"^https://.*\.negromart\.com$",
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",  # Next.js dev
+    "http://127.0.0.1:3000",
+    "https://negromart.com",
+    "https://www.negromart.com",
+    "https://seller.negromart.com",
+    "https://frontend-sigma-khaki-70.vercel.app",  # Next.js frontend URL
+    "https://negromart-space.sfo3.cdn.digitaloceanspaces.com",
+    "https://negromart-space.sfo3.digitaloceanspaces.com",
 ]
+
 
 CORS_ALLOW_HEADERS = list(default_headers) + [
     "x-guest-cart",
