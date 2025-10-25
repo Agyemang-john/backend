@@ -377,6 +377,7 @@ CORS_ALLOW_METHODS = [
 CORS_ALLOW_CREDENTIALS = True
 
 CSRF_TRUSTED_ORIGINS = [
+    "https://api.negromart.com",
     "https://negromart.com",      # frontend domain
     "https://www.negromart.com",
     "https://seller.negromart.com",
@@ -396,6 +397,7 @@ else:
         "https://frontend-sigma-khaki-70.vercel.app",  # Next.js frontend URL
         "https://negromart-space.sfo3.cdn.digitaloceanspaces.com",
         "https://negromart-space.sfo3.digitaloceanspaces.com",
+        "https://api.negromart.com",
     ]
 
 CORS_ALLOWED_ORIGIN_REGEXES = [
