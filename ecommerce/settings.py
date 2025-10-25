@@ -159,40 +159,6 @@ STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
-# Storage configuration based on environment
-# if ENV == 'production':
-#     # DigitalOcean Spaces configuration for production
-#     AWS_ACCESS_KEY_ID = config("AWS_ACCESS_KEY_ID")
-#     AWS_SECRET_ACCESS_KEY = config("AWS_SECRET_ACCESS_KEY")
-#     AWS_STORAGE_BUCKET_NAME = "negromart-space"
-#     AWS_S3_REGION_NAME = "sfo3"
-#     AWS_S3_ENDPOINT_URL = f"https://{AWS_S3_REGION_NAME}.digitaloceanspaces.com"
-#     AWS_S3_CUSTOM_DOMAIN = f"{AWS_STORAGE_BUCKET_NAME}.{AWS_S3_REGION_NAME}.cdn.digitaloceanspaces.com"
-#     AWS_LOCATION = 'media'
-#     AWS_DEFAULT_ACL = "public-read"
-#     AWS_QUERYSTRING_AUTH = False
-#     AWS_S3_FILE_OVERWRITE = False
-#     AWS_S3_OBJECT_PARAMETERS = {
-#         'CacheControl': 'max-age=86400'
-#     }
-#     STORAGES = {
-#         "default": {
-#             "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
-#         },
-#         "staticfiles": {
-#             "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
-#         },
-#     }
-# else:
-#     STORAGES = {
-#         "default": {
-#             "BACKEND": "django.core.files.storage.FileSystemStorage",
-#         },
-#         "staticfiles": {
-#             "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
-#         },
-#     }
-
 if ENV == 'production':
     AWS_ACCESS_KEY_ID = config("AWS_ACCESS_KEY_ID")
     AWS_SECRET_ACCESS_KEY = config("AWS_SECRET_ACCESS_KEY")
@@ -271,8 +237,8 @@ REST_FRAMEWORK = {
 
 
 #Paystack configuration
-PAYSTACK_SECRET_KEY = "sk_test_08697652e07898b20f337875bdd241b668a2abaa"
-PAYSTACK_PUBLIC_KEY = "pk_test_1a9405c84346cd5f9b41a65524aa546d859be3d0"
+PAYSTACK_SECRET_KEY = config('PAYSTACK_SECRET_KEY')
+PAYSTACK_PUBLIC_KEY = config('PAYSTACK_PUBLIC_KEY')
 
 # DJOSER CONFIGURATION
 SITE_NAME = "Negromart"
@@ -339,8 +305,6 @@ CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 AUTH_COOKIE = 'access'
 AUTH_ACCESS_MAX_AGE = timedelta(hours=1).total_seconds()
 AUTH_REFRESH_MAX_AGE = timedelta(days=60).total_seconds()
-VENDOR_AUTH_ACCESS_MAX_AGE = timedelta(hours=1).total_seconds()
-VENDOR_AUTH_REFRESH_MAX_AGE = timedelta(days=15).total_seconds()
 AUTH_COOKIE_SECURE = False if DEBUG else True 
 AUTH_COOKIE_HTTP_ONLY = True
 AUTH_COOKIE_PATH = '/'
@@ -348,6 +312,20 @@ AUTH_COOKIE_SAMESITE = "Lax" if DEBUG else "None"
 AUTH_COOKIE_DOMAIN = None
 if not DEBUG:
     AUTH_COOKIE_DOMAIN = ".negromart.com"
+
+# VENDOR SIMPLE JWT CONFIGURATION
+VENDOR_ACCESS_AUTH_COOKIE = 'vendor_access'
+VENDOR_REFRESH_AUTH_COOKIE = 'vendor_refresh'
+VENDOR_AUTH_ACCESS_MAX_AGE = timedelta(hours=1).total_seconds()
+VENDOR_AUTH_REFRESH_MAX_AGE = timedelta(days=12).total_seconds()
+VENDOR_AUTH_COOKIE_SECURE = False if DEBUG else True 
+VENDOR_AUTH_COOKIE_HTTP_ONLY = True
+VENDOR_AUTH_COOKIE_PATH = '/'
+VENDOR_AUTH_COOKIE_SAMESITE = "Lax" if DEBUG else "None"
+VENDOR_AUTH_COOKIE_DOMAIN = None
+if not DEBUG:
+    VENDOR_AUTH_COOKIE_DOMAIN = "seller.negromart.com"
+
 
 from datetime import timedelta
 

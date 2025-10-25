@@ -7,7 +7,7 @@ from userauths.models import Profile
 from order.service import *
 # User = get_user_model()
 from rest_framework.generics import GenericAPIView
-
+from django.db.models.deletion import ProtectedError
 from rest_framework.generics import RetrieveUpdateDestroyAPIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import NotFound, ValidationError
@@ -136,13 +136,27 @@ class AddressDetailView(RetrieveUpdateDestroyAPIView):
             }, status=status.HTTP_400_BAD_REQUEST)
 
     def destroy(self, request, *args, **kwargs):
-        # Wrap response for deletion
-        response = super().destroy(request, *args, **kwargs)
-        return Response({
-            'status': 'success',
-            'message': 'Address deleted successfully.',
-            'data': None
-        }, status=status.HTTP_204_NO_CONTENT)
+        try:
+            response = super().destroy(request, *args, **kwargs)
+            return Response({
+                'status': 'success',
+                'message': 'Address deleted successfully.',
+                'data': None
+            }, status=status.HTTP_204_NO_CONTENT)
+        except ProtectedError as e:
+            logger.error(f"Cannot delete address {self.kwargs['id']} due to associated orders: {e}")
+            return Response({
+                'status': 'error',
+                'message': 'Cannot delete this address because it is associated with one or more orders.',
+                'data': None
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"Error deleting address {self.kwargs['id']}: {e}")
+            return Response({
+                'status': 'error',
+                'message': 'An unexpected error occurred while deleting the address.',
+                'data': None
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 from django.db import transaction

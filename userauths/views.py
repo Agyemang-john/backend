@@ -96,77 +96,79 @@ class CustomTokenRefreshView(TokenRefreshView):
 
         return response
     
-# sellers login
-class CustomVendorTokenRefreshView(TokenRefreshView):
+class CustomTokenVerifyView(TokenVerifyView):
+    permission_classes = [AllowAny]
+    throttle_scope = "auth_verify"
+    
+    def post(self, request, *args, **kwargs):
+        access_token = request.COOKIES.get('access')
+
+        if access_token:
+            request.data['token'] = access_token
+
+        return super().post(request, *args, **kwargs)
+
+class LogoutView(APIView):
+    def post(self, request, *args, **kwargs):
+        response = Response(status=status.HTTP_204_NO_CONTENT)
+        
+        # Delete cookies using only supported args
+        response.delete_cookie(
+            'access',
+            path=settings.AUTH_COOKIE_PATH,
+            domain=settings.AUTH_COOKIE_DOMAIN,
+        )
+        response.delete_cookie(
+            'refresh',
+            path=settings.AUTH_COOKIE_PATH,
+            domain=settings.AUTH_COOKIE_DOMAIN,
+        )
+        return response
+    
+
+# Vendor auth 
+####################################
+class VendorTokenRefreshView(TokenRefreshView):
     serializer_class = CustomTokenRefreshSerializer
     permission_classes = [AllowAny]
-    throttle_scope = "auth_refresh"
+    # throttle_scope = "auth_refresh"
 
     def post(self, request, *args, **kwargs):
-        refresh_token = request.COOKIES.get("refresh")
+        refresh_token = request.COOKIES.get("vendor_refresh")
         if refresh_token:
-            request.data["refresh"] = refresh_token
+            request.data["vendor_refresh"] = refresh_token
 
         response = super().post(request, *args, **kwargs)
 
         if response.status_code == 200:
-            access_token = response.data.get("access")
+            access_token = response.data.get("vendor_access")
 
             response.set_cookie(
-                "access",
+                settings.VENDOR_ACCESS_AUTH_COOKIE,
                 access_token,
                 max_age=settings.VENDOR_AUTH_ACCESS_MAX_AGE,
-                path=settings.AUTH_COOKIE_PATH,
-                secure=settings.AUTH_COOKIE_SECURE,
-                httponly=settings.AUTH_COOKIE_HTTP_ONLY,
-                samesite=settings.AUTH_COOKIE_SAMESITE,
-                domain=settings.AUTH_COOKIE_DOMAIN,
+                path=settings.VENDOR_AUTH_COOKIE_PATH,
+                secure=settings.VENDOR_AUTH_COOKIE_SECURE,
+                httponly=settings.VENDOR_AUTH_COOKIE_HTTP_ONLY,
+                samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
+                domain=settings.VENDOR_AUTH_COOKIE_DOMAIN
             )
 
             if request.headers.get("X-SSR-Refresh") != "true":
-                del response.data["access"]
+                del response.data["vendor_access"]
 
         return response
 
-class CustomVendorTokenObtainPairView(TokenObtainPairView):
-    serializer_class = VendorLoginSerializer
+class VendorTokenObtainPairView(TokenObtainPairView):
     permission_classes = [AllowAny]  # allow guests to login
     # throttle_classes = [LoginThrottle, AnonLoginThrottle]
 
-    def post(self, request, *args, **kwargs):
-        response = super().post(request, *args, **kwargs)
+    def post(self, request):
+        serializer = VendorLoginSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return Response({"detail": "OTP sent. Please verify to continue."}, status=200)
 
-        if response.status_code == 200 and 'access' in response.data:
-            access_token = response.data.get("access")
-            refresh_token = response.data.get("refresh")
-
-            response.set_cookie(
-                "access",
-                access_token,
-                max_age=settings.VENDOR_AUTH_ACCESS_MAX_AGE,
-                path=settings.AUTH_COOKIE_PATH,
-                secure=settings.AUTH_COOKIE_SECURE,
-                httponly=settings.AUTH_COOKIE_HTTP_ONLY,
-                samesite=settings.AUTH_COOKIE_SAMESITE,
-                domain=settings.AUTH_COOKIE_DOMAIN
-            )
-            response.set_cookie(
-                "refresh",
-                refresh_token,
-                max_age=settings.VENDOR_AUTH_REFRESH_MAX_AGE,
-                path=settings.AUTH_COOKIE_PATH,
-                secure=settings.AUTH_COOKIE_SECURE,
-                httponly=settings.AUTH_COOKIE_HTTP_ONLY,
-                samesite=settings.AUTH_COOKIE_SAMESITE,
-                domain=settings.AUTH_COOKIE_DOMAIN
-            )
-
-            del response.data["access"]
-            del response.data["refresh"]
-
-        return response
-
-class OTPVerifyView(APIView):
+class VendorOTPVerifyView(APIView):
     permission_classes = [AllowAny]
     # throttle_classes = [LoginThrottle]
 
@@ -205,25 +207,26 @@ class OTPVerifyView(APIView):
                     refresh_token = str(refresh)
 
                     response = Response({'detail': 'Login successful.'}, status=status.HTTP_200_OK)
+                    # if response.status_code == 200 and 'vendor_access' in response.data:
                     response.set_cookie(
-                        "access",
+                        settings.VENDOR_ACCESS_AUTH_COOKIE,
                         access_token,
                         max_age=settings.VENDOR_AUTH_ACCESS_MAX_AGE,
-                        path=settings.AUTH_COOKIE_PATH,
-                        secure=settings.AUTH_COOKIE_SECURE,
-                        httponly=settings.AUTH_COOKIE_HTTP_ONLY,
-                        samesite=settings.AUTH_COOKIE_SAMESITE,
-                        domain=settings.AUTH_COOKIE_DOMAIN
+                        path=settings.VENDOR_AUTH_COOKIE_PATH,
+                        secure=settings.VENDOR_AUTH_COOKIE_SECURE,
+                        httponly=settings.VENDOR_AUTH_COOKIE_HTTP_ONLY,
+                        samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
+                        domain=settings.VENDOR_AUTH_COOKIE_DOMAIN
                     )
                     response.set_cookie(
-                        "refresh",
+                        settings.VENDOR_REFRESH_AUTH_COOKIE,
                         refresh_token,
                         max_age=settings.VENDOR_AUTH_REFRESH_MAX_AGE,
-                        path=settings.AUTH_COOKIE_PATH,
-                        secure=settings.AUTH_COOKIE_SECURE,
-                        httponly=settings.AUTH_COOKIE_HTTP_ONLY,
-                        samesite=settings.AUTH_COOKIE_SAMESITE,
-                        domain=settings.AUTH_COOKIE_DOMAIN
+                        path=settings.VENDOR_AUTH_COOKIE_PATH,
+                        secure=settings.VENDOR_AUTH_COOKIE_SECURE,
+                        httponly=settings.VENDOR_AUTH_COOKIE_HTTP_ONLY,
+                        samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
+                        domain=settings.VENDOR_AUTH_COOKIE_DOMAIN
                     )
                     return response
                 else:
@@ -232,8 +235,8 @@ class OTPVerifyView(APIView):
                 return Response({'detail': 'Invalid or expired OTP.'}, status=status.HTTP_400_BAD_REQUEST)
         except User.DoesNotExist:
             return Response({'detail': 'User not found.'}, status=status.HTTP_400_BAD_REQUEST)
-        
-class OTPResendView(APIView):
+
+class VendorOTPResendView(APIView):
     permission_classes = [AllowAny]
     throttle_classes = [LoginThrottle]
 
@@ -255,35 +258,32 @@ class OTPResendView(APIView):
         except User.DoesNotExist:
             return Response({'detail': 'User not found.'}, status=status.HTTP_400_BAD_REQUEST)
 
-# Token verification for both
-class CustomTokenVerifyView(TokenVerifyView):
+class VendorTokenVerifyView(TokenVerifyView):
     permission_classes = [AllowAny]
-    throttle_scope = "auth_verify"
+    # throttle_scope = "auth_verify"
     
     def post(self, request, *args, **kwargs):
-        access_token = request.COOKIES.get('access')
+        access_token = request.COOKIES.get('vendor_access')
 
         if access_token:
             request.data['token'] = access_token
 
         return super().post(request, *args, **kwargs)
 
-
-# logout for both
-class LogoutView(APIView):
+class VendorLogoutView(APIView):
     def post(self, request, *args, **kwargs):
         response = Response(status=status.HTTP_204_NO_CONTENT)
         
         # Delete cookies using only supported args
         response.delete_cookie(
-            'access',
-            path=settings.AUTH_COOKIE_PATH,
-            domain=settings.AUTH_COOKIE_DOMAIN,
+            settings.VENDOR_ACCESS_AUTH_COOKIE,
+            path=settings.VENDOR_AUTH_COOKIE_PATH,
+            domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
         )
         response.delete_cookie(
-            'refresh',
-            path=settings.AUTH_COOKIE_PATH,
-            domain=settings.AUTH_COOKIE_DOMAIN,
+            settings.VENDOR_REFRESH_AUTH_COOKIE,
+            path=settings.VENDOR_AUTH_COOKIE_PATH,
+            domain=settings.VENDOR_AUTH_COOKIE_DOMAIN
         )
-
         return response
+

@@ -143,7 +143,7 @@ def calculate_delivery_fee(vendor_lat, vendor_lon, buyer_lat, buyer_lon, deliver
             return float(base_price) + float(delivery_option.cost or 0)
         else:
             extra_distance = float((distance) - float(5))
-            delivery_fee = float(base_price) + (float(extra_distance) * float(rate_per_km)) + float(delivery_option.cost or 0)
+            delivery_fee = (float(extra_distance) * float(rate_per_km)) + float(delivery_option.cost or 0)
             return delivery_fee
     else:
         provider = delivery_option.provider
