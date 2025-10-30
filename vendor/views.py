@@ -304,6 +304,14 @@ class VendorSignupAPIView(APIView):
     parser_classes = [MultiPartParser, FormParser]  # For file uploads
 
     def post(self, request, *args, **kwargs):
+        user = request.user
+
+        if user.role == 'vendor':
+            return Response({'detail': 'You already have a vendor account.'}, status=400)
+
+        if not user.is_active:
+            return Response({'detail': 'Please verify your account before applying.'}, status=400)
+
         serializer = VendorSignupSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             vendor = serializer.save()

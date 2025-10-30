@@ -12,7 +12,7 @@ def home(request):
 urlpatterns = [
     # path('admin/', include('admin_honeypot.urls', namespace='admin_honeypot')),
     path('', home, name='home'),  
-    path('secret/', admin.site.urls),
+    path('dashboard/negromart/', admin.site.urls),
     path("api/v1/auth/user/", include("customer.urls")),
     path("api/v1/vendor/", include("vendor.urls")),
     

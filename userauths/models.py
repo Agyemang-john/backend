@@ -92,10 +92,12 @@ class User(AbstractBaseUser, PermissionsMixin):
         return self.email
 
     def has_perm(self, perm, obj=None):
-        return self.is_superuser
+        # Allow staff or superusers to have permissions
+        return self.is_active and (self.is_staff or self.is_superuser)
 
     def has_module_perms(self, app_label):
-        return True
+        # Allow staff or superusers to access specific apps in admin
+        return self.is_active and (self.is_staff or self.is_superuser)
     
     def tokens(self):
         refresh = RefreshToken.for_user(self)  # Pass the user instance

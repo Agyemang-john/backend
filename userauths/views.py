@@ -136,12 +136,12 @@ class VendorTokenRefreshView(TokenRefreshView):
     def post(self, request, *args, **kwargs):
         refresh_token = request.COOKIES.get("vendor_refresh")
         if refresh_token:
-            request.data["vendor_refresh"] = refresh_token
+            request.data["refresh"] = refresh_token
 
         response = super().post(request, *args, **kwargs)
 
         if response.status_code == 200:
-            access_token = response.data.get("vendor_access")
+            access_token = response.data.get("access")
 
             response.set_cookie(
                 settings.VENDOR_ACCESS_AUTH_COOKIE,
@@ -155,7 +155,7 @@ class VendorTokenRefreshView(TokenRefreshView):
             )
 
             if request.headers.get("X-SSR-Refresh") != "true":
-                del response.data["vendor_access"]
+                del response.data["access"]
 
         return response
 
