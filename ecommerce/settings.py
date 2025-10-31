@@ -373,7 +373,7 @@ CORS_ALLOW_METHODS = [
     'DELETE',
     'OPTIONS',
 ]
-
+CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOW_CREDENTIALS = True
 
 CSRF_TRUSTED_ORIGINS = [
@@ -406,7 +406,7 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
     "X-Recent-Views",
     "X-SSR-Refresh",
     "cache-control",
-    "access-control-allow-origin",
+    "Access-Control-Allow-Origin",
     'accept',
     'accept-encoding',
     'authorization',
