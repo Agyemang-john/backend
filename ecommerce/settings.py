@@ -398,13 +398,13 @@ CORS_ALLOWED_ORIGINS = [
 
 
 CORS_ALLOW_HEADERS = list(default_headers) + [
-    "x-guest-cart",
+    "X-Guest-Cart",
     "X-Currency",
     "X-Device",
     "X-Recently-Viewed",
     "X-Recently-Viewed-Vendors",
     "X-Recent-Views",
-    "x-ssr-refresh",
+    "X-SSR-Refresh",
     "cache-control",
     "access-control-allow-origin",
     'accept',
