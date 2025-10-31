@@ -373,14 +373,14 @@ CORS_ALLOW_METHODS = [
     'DELETE',
     'OPTIONS',
 ]
-CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOW_CREDENTIALS = True
 
 CSRF_TRUSTED_ORIGINS = [
     "https://negromart.com",      # frontend domain
     "https://www.negromart.com",
     "https://seller.negromart.com",
-    "http://localhost:3000",  
+    "http://localhost:3000",
+    "https://api.negromart.com",
 ]
 
 
