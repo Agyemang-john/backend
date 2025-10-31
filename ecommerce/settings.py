@@ -377,7 +377,6 @@ CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOW_CREDENTIALS = True
 
 CSRF_TRUSTED_ORIGINS = [
-    "https://api.negromart.com",
     "https://negromart.com",      # frontend domain
     "https://www.negromart.com",
     "https://seller.negromart.com",
@@ -406,7 +405,6 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
     "X-Recent-Views",
     "X-SSR-Refresh",
     "cache-control",
-    "Access-Control-Allow-Origin",
     'accept',
     'accept-encoding',
     'authorization',

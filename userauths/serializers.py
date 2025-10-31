@@ -4,7 +4,6 @@ import re
 from rest_framework import serializers
 from django.core.exceptions import ValidationError
 from django.contrib.auth.password_validation import validate_password
-from django.core.cache import cache
 from django.contrib.auth import authenticate
 from rest_framework.exceptions import AuthenticationFailed
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
@@ -15,7 +14,6 @@ from django.conf import settings
 from .models import User 
 from .utils import send_password_reset_email
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
-from django.db.models import Q
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
@@ -25,7 +23,6 @@ from djoser.conf import settings as djoser_settings
 from django.utils import timezone
 from datetime import timedelta
 from django.db.models import F
-from .tasks import send_otp
 
 
 class CustomPasswordResetSerializer(serializers.Serializer):

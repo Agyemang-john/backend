@@ -17,13 +17,10 @@ from rest_framework.permissions import AllowAny
 from .tasks import send_otp
 from .vendor_serializers import VendorLoginSerializer
 from django.core.cache import cache
-from rest_framework_simplejwt.tokens import RefreshToken
 from django.conf import settings
 from django.db.models import Q
-from django.core.mail import send_mail
 User = get_user_model()
 import time
-from vendor.models import Vendor
 
 # customers login
 class CustomTokenObtainPairView(TokenObtainPairView):

@@ -1,15 +1,12 @@
-from enum import unique
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
-from django.db.models.signals import post_save
 from django.utils import timezone
 from avatar_generator import Avatar
 from django.utils.translation import gettext_lazy as _
 from django.core.files.base import ContentFile
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 from io import BytesIO
 from rest_framework_simplejwt.tokens import RefreshToken
-import hashlib
 import re
 # from address.models import Country, Region, Town
 

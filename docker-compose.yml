@@ -17,6 +17,8 @@ services:
     depends_on:
       - redis
     restart: always
+    networks:
+      - app-network
 
   nginx:
     image: nginx:1.25
@@ -31,6 +33,8 @@ services:
     depends_on:
       - web
     restart: always
+    networks:
+      - app-network
 
   certbot:
     image: certbot/certbot:latest
@@ -40,6 +44,8 @@ services:
       - certbot-var:/var/lib/letsencrypt
     entrypoint: /bin/sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/lib/letsencrypt --deploy-hook 'nginx -s reload'; sleep 12h; done"
     restart: always
+    networks:
+      - app-network
 
   celery:
     image: ecommerce_app:latest
@@ -49,6 +55,8 @@ services:
     depends_on:
       - redis
     restart: always
+    networks:
+      - app-network
 
   celery-beat:
     image: ecommerce_app:latest
@@ -58,6 +66,8 @@ services:
     depends_on:
       - redis
     restart: always
+    networks:
+      - app-network
 
   redis:
     image: redis:7
@@ -72,7 +82,13 @@ services:
     restart: always
     volumes:
       - redis_data:/data
+    networks:
+      - app-network
 
 volumes:
   redis_data:
   certbot-var:
+
+networks:
+  app-network:
+    driver: bridge

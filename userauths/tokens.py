@@ -2,7 +2,6 @@ from django.contrib.auth.tokens import PasswordResetTokenGenerator
 import six  
 import random
 from django.utils.crypto import constant_time_compare
-from django.utils.http import base36_to_int, int_to_base36
 from django.utils import timezone
 from datetime import timedelta
 from vendor.models import Vendor
