@@ -52,7 +52,6 @@ class UserManager(BaseUserManager):
         user.role = 'admin'  # Assign a default role for superuser, adjust as needed
         user.is_superuser = True
         user.is_active = True
-        user.is_admin = True
         user.is_staff = True
         user.save(using=self._db)
         return user
@@ -74,7 +73,6 @@ class User(AbstractBaseUser, PermissionsMixin):
     modified_date = models.DateTimeField(auto_now=True)
     is_suspended = models.BooleanField(default=False)
     is_active = models.BooleanField(default=False)
-    is_admin = models.BooleanField(default=False)
     is_staff = models.BooleanField(default=False)
     is_superuser = models.BooleanField(default=False)
     failed_login_attempts = models.PositiveIntegerField(default=0)
@@ -91,13 +89,6 @@ class User(AbstractBaseUser, PermissionsMixin):
     def __str__(self):
         return self.email
 
-    def has_perm(self, perm, obj=None):
-        # Allow staff or superusers to have permissions
-        return self.is_active and (self.is_staff or self.is_superuser)
-
-    def has_module_perms(self, app_label):
-        # Allow staff or superusers to access specific apps in admin
-        return self.is_active and (self.is_staff or self.is_superuser)
     
     def tokens(self):
         refresh = RefreshToken.for_user(self)  # Pass the user instance

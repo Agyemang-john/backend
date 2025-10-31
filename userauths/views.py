@@ -1,5 +1,6 @@
 
 from django.conf import settings
+from userauths.tokens import CustomVendorRefreshToken
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -128,21 +129,19 @@ class LogoutView(APIView):
 
 # Vendor auth 
 ####################################
+from userauths.vendor_serializers import CustomTokenRefreshSerializer
 class VendorTokenRefreshView(TokenRefreshView):
     serializer_class = CustomTokenRefreshSerializer
     permission_classes = [AllowAny]
-    # throttle_scope = "auth_refresh"
 
     def post(self, request, *args, **kwargs):
         refresh_token = request.COOKIES.get("vendor_refresh")
         if refresh_token:
-            request.data["refresh"] = refresh_token
+            request.data["refresh"] = refresh_token  # mutable
 
         response = super().post(request, *args, **kwargs)
-
         if response.status_code == 200:
             access_token = response.data.get("access")
-
             response.set_cookie(
                 settings.VENDOR_ACCESS_AUTH_COOKIE,
                 access_token,
@@ -153,10 +152,8 @@ class VendorTokenRefreshView(TokenRefreshView):
                 samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
                 domain=settings.VENDOR_AUTH_COOKIE_DOMAIN
             )
-
             if request.headers.get("X-SSR-Refresh") != "true":
                 del response.data["access"]
-
         return response
 
 class VendorTokenObtainPairView(TokenObtainPairView):
@@ -185,24 +182,7 @@ class VendorOTPVerifyView(APIView):
             if cached_data and 'otp' in cached_data and 'timestamp' in cached_data:
                 if str(cached_data['otp']) == otp and not otp_token_generator._is_token_expired(cached_data['timestamp']):
                     cache.delete(f"otp_{user.id}")
-                    refresh = RefreshToken.for_user(user)
-                    refresh["role"] = user.role
-                    refresh["is_admin"] = user.is_admin
-                    refresh["is_active"] = user.is_active
-                    # Add is_verified_vendor flag
-                    refresh["is_verified_vendor"] = False
-                    if user.role == 'vendor':
-                        try:
-                            vendor = user.vendor_user
-                            refresh["is_verified_vendor"] = (
-                                vendor.status == 'VERIFIED' and
-                                vendor.is_approved and
-                                not vendor.is_suspended
-                                # Optionally: and vendor.has_active_subscription()
-                            )
-                        except Vendor.DoesNotExist:
-                            pass  # Leave as False
-
+                    refresh = CustomVendorRefreshToken.for_user(user)
                     access_token = str(refresh.access_token)
                     refresh_token = str(refresh)
 

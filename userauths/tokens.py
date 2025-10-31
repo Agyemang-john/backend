@@ -5,6 +5,7 @@ from django.utils.crypto import constant_time_compare
 from django.utils.http import base36_to_int, int_to_base36
 from django.utils import timezone
 from datetime import timedelta
+from vendor.models import Vendor
 
 
 class AccountActivationTokenGenerator(PasswordResetTokenGenerator):
@@ -50,3 +51,29 @@ class OTPTokenGenerator(PasswordResetTokenGenerator):
         return td.days * 24 * 60 + td.seconds // 60 + td.microseconds / 60e6
 
 otp_token_generator = OTPTokenGenerator()
+
+
+from rest_framework_simplejwt.tokens import RefreshToken
+
+class CustomVendorRefreshToken(RefreshToken):
+    @classmethod
+    def for_user(cls, user):
+        token = super().for_user(user)
+        token["role"] = user.role
+        token["is_staff"] = user.is_staff
+        token["is_active"] = user.is_active
+
+        # Add is_verified_vendor
+        token["is_verified_vendor"] = False
+        if user.role == 'vendor':
+            try:
+                vendor = user.vendor_user
+                token["is_verified_vendor"] = (
+                    vendor.status == 'VERIFIED' and
+                    vendor.is_approved and
+                    not vendor.is_suspended
+                )
+            except Vendor.DoesNotExist:
+                pass
+
+        return token

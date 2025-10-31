@@ -6,16 +6,6 @@ from django.utils import timezone
 from django.db.models import F
 from django.contrib.auth import authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
-from rest_framework import serializers
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from django.core.cache import cache
-from django.core.mail import send_mail
-from django.conf import settings
-from django.contrib.auth import authenticate
-from django.core.exceptions import ValidationError
-from django.core.validators import validate_email
-from django.utils import timezone
-from django.db.models import F
 from .models import User
 from datetime import timedelta
 import random
@@ -118,3 +108,18 @@ class VendorLoginSerializer(serializers.Serializer):
         send_otp.delay(recipient, otp, is_email)
 
         return {"detail": "OTP sent. Please verify to complete login."}
+
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+from .tokens import CustomVendorRefreshToken
+class CustomTokenRefreshSerializer(TokenRefreshSerializer):
+    def validate(self, attrs):
+        # Get old refresh token
+        old_refresh = RefreshToken(attrs["refresh"])
+        user_id = old_refresh.get("user_id")
+        user = User.objects.get(id=user_id)
+
+        # Generate new access token with custom claims
+        new_token = CustomVendorRefreshToken.for_user(user)
+        access_token = str(new_token.access_token)
+
+        return {"access": access_token}

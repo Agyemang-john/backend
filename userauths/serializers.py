@@ -188,7 +188,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         refresh = RefreshToken.for_user(user)
         refresh["role"] = user.role
         refresh["is_active"] = user.is_active
-        refresh["is_admin"] = user.is_admin
+        refresh["is_staff"] = user.is_staff
         return {
             "refresh": str(refresh),
             "access": str(refresh.access_token),
@@ -209,7 +209,7 @@ class CustomTokenRefreshSerializer(TokenRefreshSerializer):
             new_access = refresh.access_token
             new_access["role"] = user.role
             refresh["is_active"] = user.is_active
-            new_access["is_admin"] = user.is_admin
+            new_access["is_staff"] = user.is_staff
             data["access"] = str(new_access)
 
         return data
