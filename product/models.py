@@ -18,7 +18,7 @@ from django.conf import settings
 from django.contrib.postgres.indexes import GinIndex
 from django.contrib.postgres.search import SearchVectorField
 from django.contrib.postgres.search import SearchVector
-from django.db.models import F
+from django.db.models import F, Sum
    
 ####################### CATEGORIES MODEL ##################
 
@@ -392,6 +392,13 @@ class Product(models.Model):
     def get_percentage(self):
         new_price = (self.price - self.old_price) / (self.price) * 100
         return new_price
+    
+    def get_stock_quantity(self, variant=None):
+        if self.variant in ['Size', 'Color', 'Size-Color']:
+            if variant:
+                return variant.quantity
+            return self.variants.aggregate(total=Sum('quantity'))['total'] or 0
+        return self.total_quantity
     
     @property
     def packaging_fee(self):

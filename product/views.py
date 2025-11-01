@@ -15,7 +15,7 @@ from rest_framework.views import APIView
 from decimal import Decimal
 from order.service import *
 from .service import get_fbt_recommendations
-from .shipping import can_product_ship_to_user
+# from .shipping import can_product_ship_to_user
 from copy import deepcopy
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import F
@@ -23,8 +23,7 @@ from django.db.models import F
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
-from django.db.models import Avg, Count, Q, Max
-from django.db.models import Min
+from django.db.models import Avg, Count, Q, Max, Min, Sum
 
 class AddProductReviewView(APIView):
     permission_classes = [IsAuthenticated]
@@ -252,23 +251,24 @@ class ProductDetailAPIView(APIView):
             if not variant:
                 variant = Variants.objects.filter(product=product).first()
             
-            stock_quantity = variant.quantity if variant else product.total_quantity
-            is_out_of_stock = stock_quantity < 1
+            stock_quantity = product.get_stock_quantity(variant)
+            is_out_of_stock = stock_quantity <= 0
 
-            can_ship, user_region = can_product_ship_to_user(request, product)
+            # can_ship, user_region = can_product_ship_to_user(request, product)
 
             variant_data = {}
             if product.variant != "None" and variant:
                 variants = Variants.objects.filter(product=product).select_related(
                     "size", "color"
                 ).prefetch_related("variantimage_set")
-                
-                size_variant_ids = variants.values("size").annotate(
-                    min_id=Min("id")
-                ).values_list("min_id", flat=True)
-                
+
+                size_variant_ids = (
+                    variants.values("size")
+                    .annotate(min_id=Min("id"))
+                    .values_list("min_id", flat=True)
+                )
                 size_variants = variants.filter(id__in=size_variant_ids)
-                same_size_variants = variants.filter(size_id=variant.size_id)
+                same_size_variants = variants.filter(size_id=variant.size_id).distinct("color_id")
 
                 variant_data = {
                     "variant": VariantSerializer(variant, context={"request": request}).data,
@@ -297,8 +297,8 @@ class ProductDetailAPIView(APIView):
             # Optimize cart data retrieval
             cart_data = self._get_cart_data(request, product, variant, stock_quantity)
 
-            if cart_data["cart_quantity"] >= stock_quantity and stock_quantity != 0:
-                is_out_of_stock = True
+            # if cart_data["cart_quantity"] >= stock_quantity and stock_quantity != 0:
+            #     is_out_of_stock = True
             
             response_data = {
                 **shared_data,
@@ -310,8 +310,8 @@ class ProductDetailAPIView(APIView):
                 "cart_item_id": cart_data["cart_item_id"],
                 'is_following': is_following,
                 'follower_count': follower_count,
-                "user_region": user_region,
-                "can_ship": can_ship
+                "user_region": None,
+                "can_ship": True
             }
 
             # Create the response object

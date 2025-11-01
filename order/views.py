@@ -189,10 +189,9 @@ class CartQuantityView(APIView):
 
     def get(self, request):
         try:
-            if request.auth and request.user.is_authenticated:  # Authenticated user
+            if request.user.is_authenticated:  # Authenticated user
                 cart = Cart.objects.get_for_request(request)
                 total_quantity = cart.total_quantity if cart else 0
-
             else:  # Guest user
                 guest_cart_header = request.headers.get('X-Guest-Cart')
                 try:
