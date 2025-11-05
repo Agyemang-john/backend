@@ -75,32 +75,25 @@ def is_valid_ip(ip):
         return False
 
 def get_ip_address_from_request(request):
-    """Get the client's real IP address for direct droplet access."""
-    PRIVATE_IP_PREFIXES = ('10.', '172.', '192.168.', '169.254.', '127.')
-    
-    # For direct droplet access, REMOTE_ADDR should be the client's real IP
-    remote_addr = request.META.get('REMOTE_ADDR', '')
-    if remote_addr and is_valid_ip(remote_addr) and not remote_addr.startswith(PRIVATE_IP_PREFIXES):
-        logger.debug(f"Using REMOTE_ADDR: {remote_addr}")
-        return remote_addr
-    
-    # Check X-Forwarded-For as fallback (in case you add proxies later)
-    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR', '')
-    if x_forwarded_for:
-        ips = [ip.strip() for ip in x_forwarded_for.split(',')]
+    """Return the REAL client IP — works behind Cloudflare, carriers, hotspots."""
+    xff = request.META.get('HTTP_X_FORWARDED_FOR')
+    if xff:
+        # TAKE THE **FIRST** PUBLIC IP (closest to user)
+        ips = [ip.strip() for ip in xff.split(',')]
         for ip in ips:
-            if is_valid_ip(ip) and not ip.startswith(PRIVATE_IP_PREFIXES):
-                logger.debug(f"Using X-Forwarded-For: {ip}")
+            if is_valid_ip(ip) and not ip.startswith(('10.', '172.', '192.168.', '127.', '169.254.')):
+                logger.debug(f"REAL IP (first public): {ip}")
                 return ip
-    
-    # Check X-Real-IP as fallback
-    x_real_ip = request.META.get('HTTP_X_REAL_IP', '')
-    if x_real_ip and is_valid_ip(x_real_ip) and not x_real_ip.startswith(PRIVATE_IP_PREFIXES):
-        logger.debug(f"Using X-Real-IP: {x_real_ip}")
-        return x_real_ip
-    
-    # Final fallback
-    logger.debug("Using fallback IP: 127.0.0.1")
+
+    # Fallback: X-Real-IP or REMOTE_ADDR
+    x_real = request.META.get('HTTP_X_REAL_IP')
+    if x_real and is_valid_ip(x_real) and not x_real.startswith(('10.', '172.', '192.168.', '127.', '169.254.')):
+        return x_real
+
+    remote = request.META.get('REMOTE_ADDR', '')
+    if remote and is_valid_ip(remote) and not remote.startswith(('10.', '172.', '192.168.', '127.', '169.254.')):
+        return remote
+
     return '127.0.0.1'
 
 def get_user_country_region(request):
