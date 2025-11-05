@@ -7,7 +7,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 from corsheaders.defaults import default_headers
 from datetime import timedelta
-from urllib.parse import urlparse, parse_qsl
+# from urllib.parse import urlparse, parse_qsl
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
@@ -363,8 +363,7 @@ SIMPLE_JWT = {
 }
 
 # GeoIP
-USE_X_FORWARDED_HOST = True
-SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
 # CORS
 CORS_ALLOW_METHODS = [
     'GET',
