@@ -75,24 +75,17 @@ def is_valid_ip(ip):
         return False
 
 def get_ip_address_from_request(request):
-    """Return the REAL client IP — works behind Cloudflare, carriers, hotspots."""
-    xff = request.META.get('HTTP_X_FORWARDED_FOR')
-    if xff:
-        # TAKE THE **FIRST** PUBLIC IP (closest to user)
-        ips = [ip.strip() for ip in xff.split(',')]
-        for ip in ips:
-            if is_valid_ip(ip) and not ip.startswith(('10.', '172.', '192.168.', '127.', '169.254.')):
-                logger.debug(f"REAL IP (first public): {ip}")
-                return ip
-
     # Fallback: X-Real-IP or REMOTE_ADDR
-    x_real = request.META.get('HTTP_X_REAL_IP')
-    if x_real and is_valid_ip(x_real) and not x_real.startswith(('10.', '172.', '192.168.', '127.', '169.254.')):
+    x_real = request.META["HTTP_X_REAL_IP"]
+    if x_real:
         return x_real
 
-    remote = request.META.get('REMOTE_ADDR', '')
-    if remote and is_valid_ip(remote) and not remote.startswith(('10.', '172.', '192.168.', '127.', '169.254.')):
-        return remote
+    ipaddress = request.META['X_FORWADRD_FOR']
+    ipaddress = ipaddress.split(",")
+    ip_address = ipaddress[0]
+
+    if ip_address:
+        return ip_address
 
     return '127.0.0.1'
 
