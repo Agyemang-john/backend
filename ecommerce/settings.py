@@ -404,6 +404,7 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
     "X-Recently-Viewed-Vendors",
     "X-Recent-Views",
     "X-SSR-Refresh",
+    "X-User-Type",
     "cache-control",
     'accept',
     'accept-encoding',
