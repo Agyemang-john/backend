@@ -23,7 +23,7 @@ from django.db.models import F
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
-from django.db.models import Avg, Count, Q, Max, Min, Sum
+from django.db.models import Avg, Count, Q, Max, Min
 
 class AddProductReviewView(APIView):
     permission_classes = [IsAuthenticated]
@@ -211,7 +211,6 @@ def convert_currency(product_data, currency):
 
 
 class ProductDetailAPIView(APIView):
-    authentication_classes = [CustomJWTAuthentication]
     def get(self, request, sku, slug):
         try:
             variant_id = request.GET.get('variantid')
