@@ -21,7 +21,7 @@ class CustomJWTAuthentication(JWTAuthentication):
             if raw_token is None:
                 if user_type == "vendor":
                     raw_token = request.COOKIES.get(
-                        getattr(settings, "VENDOR_AUTH_COOKIE", "vendor_access")
+                        getattr(settings, "VENDOR_ACCESS_AUTH_COOKIE", "vendor_access")
                     )
                 else:
                     raw_token = request.COOKIES.get(
