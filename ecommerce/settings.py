@@ -18,7 +18,10 @@ SECRET_KEY = 'django-insecure-8gpxy)w^wzbxel%al+0+63j_fr*c@16gf*q_y=#&#m_@4%zv@g
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config("DEBUG", default=False, cast=bool)
 
-ALLOWED_HOSTS = config("ALLOWED_HOSTS").split(",")
+ALLOWED_HOSTS = config(
+    "ALLOWED_HOSTS",
+    default="127.0.0.1,localhost"
+).split(",")
 DEVELOPMENT_MODE = config("DEVELOPMENT_MODE")
 ENV = config("DJANGO_ENV", "development")  # "development" or "production"
 
