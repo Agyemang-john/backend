@@ -19,6 +19,13 @@ RUN pip install --upgrade pip && \
 # Copy source code
 COPY . .
 
+
+# Entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+
 # Start the ASGI server
 CMD ["gunicorn", "ecommerce.asgi:application", \
      "--bind", "0.0.0.0:8000", \

@@ -1,11 +1,11 @@
-#!/usr/bin/env bash
-set -e
+#!/bin/sh
+set -e  # exit immediately if a command fails
+
+echo "Applying database migrations..."
+python manage.py migrate --noinput
 
 echo "Collecting static files..."
 python manage.py collectstatic --noinput
 
-echo "Applying migrations..."
-python manage.py migrate --noinput
-
-echo "Starting server..."
-exec "$@"
+echo "Starting Gunicorn..."
+exec "$@"  # run the CMD from Dockerfile
