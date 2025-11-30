@@ -19,10 +19,6 @@ RUN pip install --upgrade pip && \
 # Copy source code
 COPY . .
 
-# Run these at build time (safe in production because they are idempotent)
-RUN python manage.py collectstatic --noinput
-RUN python manage.py migrate --noinput
-
 # Start the ASGI server
 CMD ["gunicorn", "ecommerce.asgi:application", \
      "--bind", "0.0.0.0:8000", \
