@@ -1,4 +1,5 @@
 # tasks.py
+import redis
 from celery import shared_task
 from .models import Product, FrequentlyBoughtTogether, Brand, Category, Sub_Category, ProductView
 from .trending import calculate_trending_score
@@ -7,12 +8,16 @@ from django.db.models import Sum
 from order.models import CartItem
 from django.conf import settings
 from django.utils import timezone
-import pycountry
-from address.models import Country
+from django.db.models import F  
 
 import logging
 
 logger = logging.getLogger(__name__)
+
+@shared_task(ignore_result=True)
+def increment_product_view_count(product_id: int):
+    from .models import Product
+    Product.objects.filter(id=product_id).update(views=F('views') + 1)
 
 @shared_task
 def clear_product_views():

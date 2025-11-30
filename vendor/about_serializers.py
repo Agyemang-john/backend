@@ -2,8 +2,6 @@ from rest_framework import serializers
 from .models import Vendor, About
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
-from django.db.models import Q
-from datetime import time
 
 class AboutSerializer(serializers.ModelSerializer):
     vendor_name = serializers.CharField(source='vendor.name', required=True)

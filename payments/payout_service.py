@@ -2,16 +2,12 @@ import logging
 import requests
 from decimal import Decimal
 from django.conf import settings
-from django.db.models import Sum
-from django.core.validators import RegexValidator
 from celery import shared_task
 from vendor.models import Vendor, VendorPaymentMethod
 from payments.models import Payout
 from order.models import Order
-from userauths.models import User
 import re
 import difflib
-from django.core.exceptions import ValidationError
 
 logger = logging.getLogger('payouts')
 

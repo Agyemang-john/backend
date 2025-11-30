@@ -1,7 +1,6 @@
 import logging
 from decimal import Decimal
 from django.conf import settings
-from django.db.models import Sum
 from cryptography.fernet import Fernet
 import requests
 from celery import shared_task

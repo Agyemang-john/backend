@@ -2,16 +2,9 @@ from django.db import models
 
 # Create your models here.
 from django.db import models
-from shortuuid.django_fields import ShortUUIDField
 from django.utils.html import mark_safe
-from userauths.models import User
-from taggit.managers import TaggableManager
-from django.urls import reverse
-from django.utils.text import slugify
-from django_countries.fields import CountryField
 from vendor.models import *
 from product.models import *
-import math
 
 class CurrencyRate(models.Model):
     currency = models.CharField(max_length=3, unique=True)

@@ -3,8 +3,7 @@ from product.models import  *
 from order.models import *
 from core.models import *
 from django.contrib.auth import get_user_model
-from django.db.models.query_utils import Q
-from address.models import *
+from address.models import Country
 from core.service import get_exchange_rates
 from decimal import Decimal
 
@@ -186,8 +185,7 @@ class ProductSerializer(serializers.ModelSerializer):
 
         exchange_rate = Decimal(str(rates.get(currency, 1)))# Default to 1 if currency not found
         return round(obj.price * exchange_rate, 2)
-
-    
+   
 
 class ProductImageSerializer(serializers.ModelSerializer):
     # product = ProductSerializer()

@@ -27,7 +27,7 @@ def send_order_email_to_sellers(self, order_id):
                 "order": order,
                 "site_name": "Negromart",
                 "site_logo_url": f"{settings.SITE_URL}/favicon.png",
-                "dashboard_url": f"{settings.SITE_URL}/orders",
+                "dashboard_url": f"https://seller.negromart.com/orders",
                 "year": timezone.now().year,
             }
 

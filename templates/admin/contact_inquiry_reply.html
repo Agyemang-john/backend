@@ -1,0 +1,31 @@
+{% extends "admin/change_form.html" %}
+{% load static %}
+
+{% block after_related_objects %}
+
+<hr>
+
+<h2 style="margin-top: 20px;">Reply to Customer</h2>
+
+<div style="padding: 15px 0;">
+    <form method="post">
+        {% csrf_token %}
+
+        <div style="margin-bottom: 15px;">
+            {{ form.message.label_tag }}
+            {{ form.message }}
+            <div style="color: #666; font-size: 12px; margin-top: 5px;">
+                {{ form.message.help_text }}
+            </div>
+        </div>
+
+        <button type="submit" name="send_reply" 
+            class="button default" 
+            style="padding: 8px 20px; font-size: 14px;">
+            Send Reply
+        </button>
+    </form>
+</div>
+
+{% endblock %}
+

@@ -1,8 +1,5 @@
 from rest_framework import serializers
-from .models import Vendor, OpeningHour
-from django_countries.serializers import CountryFieldMixin
-from django.core.exceptions import ValidationError
-from django.db.models import Q
+from .models import OpeningHour
 
 DAYS = [
     (1, 'Monday'),

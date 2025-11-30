@@ -27,6 +27,7 @@ ENV = config("DJANGO_ENV", "development")  # "development" or "production"
 
 INSTALLED_APPS = [
     'jazzmin',
+    'channels',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -42,7 +43,6 @@ INSTALLED_APPS = [
     "djoser",
     'social_django',
     'core',
-    'rest_framework_simplejwt.token_blacklist',
     'userauths',
     'product',
     'vendor',
@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     'newsletter',
     'django_ckeditor_5',
     'django_celery_beat',
+    'notification',
 ]
 
 MIDDLEWARE = [
@@ -84,7 +85,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'ecommerce.wsgi.application'
-
+ASGI_APPLICATION = "ecommerce.asgi.application"
 
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
@@ -227,9 +228,9 @@ REST_FRAMEWORK = {
 
     "DEFAULT_THROTTLE_RATES": {
         # Browsing (guests)
-        "anon": "2000/day",     # enough for product browsing/search
+        "anon": "4000/day",     # enough for product browsing/search
         # Browsing (logged-in)
-        "user": "388000/day",     # generous since users are trusted
+        "user": "588000/day",     # generous since users are trusted
         "auth_refresh": "60/min",
         "auth_verify": "200/min",
     },
@@ -251,11 +252,12 @@ SITE_URL = config('FRONTEND_BASE_URL')   # set correctly in each environment
 EMAIL_TIMEOUT = 30  # seconds
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_HOST = "smtp.sendgrid.net"
-EMAIL_PORT = 2525
+EMAIL_PORT = 2525   #2525
 EMAIL_USE_TLS = True
 EMAIL_HOST_USER = "apikey"   # keep this literal
-EMAIL_HOST_PASSWORD = config("SENDGRID_API_KEY")
+EMAIL_HOST_PASSWORD = config('SENDGRID_API_KEY')
 DEFAULT_FROM_EMAIL = "Negromart <no-reply@negromart.com>"
+
 
 DJOSER = {
     'TOKEN_SERIALIZER': 'userauths.serializers.CustomTokenObtainPairSerializer',
@@ -271,29 +273,52 @@ DJOSER = {
     # },
 }
 
-# Redis URL (set in .env)
-REDIS_URL = config("REDIS_URL", default="redis://redis:6379/0")
+REDIS_URL = config("REDIS_URL")                          # Required in all envs
+REDIS_RESULT_URL = config("REDIS_RESULT_URL", default=REDIS_URL.replace("/0", "/1"))
 
-# Caches (Redis as default backend)
+# Cache (Redis)
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
         "LOCATION": REDIS_URL,
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
-            "MAX_CONNECTIONS": 30,  # pool size
-            "IGNORE_EXCEPTIONS": True,  # fail silently if Redis is down
+            "MAX_CONNECTIONS": 30,
+            "IGNORE_EXCEPTIONS": True,
+            "CONNECTION_POOL_KWARGS": {"retry_on_timeout": True},
         },
     }
 }
 
-# Sessions stored in Redis
+# SESSION CONFIGURATION
+SESSION_COOKIE_AGE = 60 * 60 * 24 * 365  # 1 year
+SESSION_SAVE_EVERY_REQUEST = True
+SESSION_EXPIRE_AT_BROWSER_CLOSE = False
+SESSION_COOKIE_SAMESITE = 'Lax' if DEBUG else 'None'
+SESSION_COOKIE_SECURE = False if DEBUG else True
+
+# Sessions in Redis (fast + shared between workers)
 SESSION_ENGINE = "django.contrib.sessions.backends.cache"
 SESSION_CACHE_ALIAS = "default"
 
-# Celery settings
-CELERY_BROKER_URL = config("REDIS_URL", default="redis://redis:6379/0")
-CELERY_RESULT_BACKEND = config("REDIS_RESULT_URL", default="redis://redis:6379/1")
+# Celery
+CELERY_BROKER_URL = REDIS_URL
+CELERY_RESULT_BACKEND = REDIS_RESULT_URL
+
+REDIS_CHANNELS_URL = config("REDIS_CHANNELS_URL", default=REDIS_URL.replace("/0", "/2"))
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [REDIS_CHANNELS_URL],
+            "capacity": 1500,        # handles 1000+ concurrent users easily
+            "expiry": 10,
+        },
+        "OPTIONS": {
+            "require_valid_group_name": True,
+        },
+    },
+}
 
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
@@ -304,7 +329,7 @@ CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 #SIMPLE JWT CONFIGURATION
 AUTH_COOKIE = 'access'
 AUTH_ACCESS_MAX_AGE = timedelta(hours=1).total_seconds()
-AUTH_REFRESH_MAX_AGE = timedelta(days=60).total_seconds()
+AUTH_REFRESH_MAX_AGE = timedelta(days=30).total_seconds()
 AUTH_COOKIE_SECURE = False if DEBUG else True 
 AUTH_COOKIE_HTTP_ONLY = True
 AUTH_COOKIE_PATH = '/'
@@ -330,36 +355,16 @@ if not DEBUG:
 from datetime import timedelta
 
 SIMPLE_JWT = {
-    # Access Token Lifetime - 1 hour to balance security and UX
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
-    
-    # Refresh Token Lifetime - 60 days, for long-term sessions
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=60),
-    
-    # Enable token rotation for better security
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
     'ROTATE_REFRESH_TOKENS': True,
-    
-    # Blacklist old refresh tokens after they are rotated
+    'SLIDING_TOKEN_LIFETIME': timedelta(days=1),           # access token sliding window
+    'SLIDING_TOKEN_REFRESH_LIFETIME': timedelta(days=30),
     'BLACKLIST_AFTER_ROTATION': False,
-    
-    # Algorithm for signing the JWT
-    'ALGORITHM': 'HS256',
-    
-    # HTTP Header for token authorization
     'AUTH_HEADER_TYPES': ('Bearer',),
-    
-    # Enabling sliding token lifetimes for smoother sessions
-    'SLIDING_TOKEN_LIFETIME': timedelta(hours=1),  # Sliding token lifetime 1 hour
-    'SLIDING_TOKEN_REFRESH_LIFETIME': timedelta(days=60),  # Refresh token sliding window
-    
-    # Token user class (use custom user model if required)
-    'TOKEN_USER_CLASS': 'rest_framework_simplejwt.models.TokenUser',
-    
-    # Enable JTI claim for each token (JWT ID)
+    'TOKEN_USER_CLASS': 'rest_framework_simplejwt.models.TokenUser',  # ← works only if blacklist app is gone
     'JTI_CLAIM': 'jti',
-
-    # Security leeway for potential timing discrepancies
-    'LEEWAY': 30,  # Allow a 30-second leeway for clock discrepancies
+    'ALGORITHM': 'HS256',
 }
 
 # GeoIP

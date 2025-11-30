@@ -1,64 +1,160 @@
+<!-- templates/email/newsletter_confirmation.html -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>Confirm Your Subscription</title>
-  <style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Confirm Your Subscription – Negromart</title>
+  <style type="text/css">
     body {
-      font-family: Arial, sans-serif;
-      background-color: #f9fafb;
-      color: #333;
-      padding: 0;
       margin: 0;
+      padding: 0;
+      background-color: #f5f5f5;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+      color: #1f2937;
     }
-    .container {
+    .email-wrapper {
+      background-color: #f5f5f5;
+      padding: 20px 0;
+    }
+    .email-container {
       max-width: 600px;
-      margin: 30px auto;
-      background: #ffffff;
-      border-radius: 12px;
-      padding: 30px;
+      margin: 0 auto;
+      background-color: #ffffff;
       border: 1px solid #e5e7eb;
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.05);
     }
-    h1 {
-      color: #2563eb;
+    .header {
+      text-align: center;
+      padding: 40px 20px 30px;
+      border-bottom: 1px solid #f0f0f0;
+    }
+    .logo {
+      max-width: 180px;
+      height: auto;
+      margin-bottom: 10px;
+    }
+    .title {
+      font-size: 28px;
+      font-weight: 700;
+      color: #000000;
+      margin: 0 0 12px 0;
+      letter-spacing: -0.5px;
+    }
+    .subtitle {
+      font-size: 17px;
+      color: #4b5563;
+      margin: 0;
+      font-weight: 400;
+    }
+    .content {
+      padding: 40px 50px;
       text-align: center;
     }
-    p {
+    .greeting {
+      font-size: 18px;
+      margin: 0 0 20px 0;
+      color: #111111;
+    }
+    .message {
       font-size: 16px;
-      line-height: 1.6;
+      line-height: 1.7;
+      color: #374151;
+      margin: 0 0 32px 0;
     }
     .btn {
       display: inline-block;
-      margin-top: 20px;
-      padding: 12px 24px;
-      background-color: #2563eb;
-      color: #ffffff;
+      background-color: #000000;
+      color: #ffffff !important;
+      font-size: 17px;
+      font-weight: 600;
       text-decoration: none;
-      border-radius: 8px;
-      font-weight: bold;
+      padding: 16px 36px;
+      border-radius: 12px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      transition: all 0.3s ease;
+    }
+    .btn:hover {
+      background-color: #1a1a1a;
+      transform: translateY(-2px);
+      box-shadow: 0 8px 20px rgba(0,0,0,0.2);
     }
     .footer {
-      margin-top: 30px;
-      font-size: 12px;
-      color: #6b7280;
+      background-color: #fafafa;
+      padding: 30px 50px;
       text-align: center;
+      font-size: 13px;
+      color: #6b7280;
+      border-top: 1px solid #f0f0f0;
+    }
+    .footer a {
+      color: #6b7280;
+      text-decoration: underline;
+    }
+    @media only screen and (max-width: 640px) {
+      .email-container {
+        border-radius: 12px;
+        margin: 10px;
+      }
+      .content, .footer {
+        padding: 30px 30px !important;
+      }
+      .title {
+        font-size: 24px !important;
+      }
     }
   </style>
 </head>
 <body>
-  <div class="container">
-    <h1>Confirm Your Subscription</h1>
-    <p>Hi there!</p>
-    <p>
-      Thank you for subscribing to our newsletter 🎉.  
-      Please confirm your subscription by clicking the button below:
-    </p>
-    <p style="text-align:center;">
-      <a href="{{ confirm_url }}" class="btn">Confirm Subscription</a>
-    </p>
-    <div class="footer">
-      <p>If you didn’t request this, you can safely ignore this email.</p>
-      <p>&copy; {% now 'Y' %} Negromart. All rights reserved.</p>
+  <div class="email-wrapper">
+    <div class="email-container">
+      <!-- Header with Logo -->
+      <div class="header">
+        <img 
+          src="{{ settings.SITE_URL }}/logo-1.png" 
+          alt="Negromart" 
+          class="logo"
+          style="max-width:180px;"
+        />
+        <p class="subtitle">Premium • Timeless • Yours</p>
+      </div>
+
+      <!-- Main Content -->
+      <div class="content">
+        <h1 class="title">One Step Away</h1>
+        <p class="greeting">Hi{% if first_name %} {{ first_name }}{% else %} there{% endif %},</p>
+        <p class="message">
+          Thank you for joining the Negromart newsletter.<br><br>
+          We're excited to keep you updated with exclusive launches, 
+          early access, and curated selections — all in timeless black and white.
+        </p>
+        <p class="message" style="margin: 36px 0 40px;">
+          <strong>Please confirm your subscription to continue.</strong>
+        </p>
+
+        <a href="{{ confirm_url }}" class="btn" target="_blank">
+          Confirm My Subscription
+        </a>
+
+        <p style="margin-top: 40px; font-size: 14px; color: #6b7280;">
+          Button not working? Paste this link into your browser:<br>
+          <a href="{{ confirm_url }}" style="color: #000000; word-break: break-all;">{{ confirm_url }}</a>
+        </p>
+      </div>
+
+      <!-- Footer -->
+      <div class="footer">
+        <p style="margin: 0 0 8px 0;">
+          If you didn’t sign up for Negromart updates, you can safely ignore this email.
+        </p>
+        <p style="margin: 0;">
+          © {% now 'Y' %} <strong>Negromart</strong>. All rights reserved.<br>
+          <a href="https://corporate.negromart.com/privacy-policy">Privacy Policy</a> • 
+          <a href="https://corporate.negromart.com/terms-conditions">Terms of Service</a>
+        </p>
+      </div>
     </div>
   </div>
 </body>

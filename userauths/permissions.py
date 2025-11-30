@@ -7,6 +7,7 @@ class IsVendor(BasePermission):
         return (
             request.user
             and request.user.is_authenticated
+            and request.user.is_active
             and request.user.role == "vendor"
         )
 
@@ -15,6 +16,7 @@ class IsManager(BasePermission):
         return (
             request.user
             and request.user.is_authenticated
+            and request.user.is_active
             and request.user.role == "manager"
         )
 
@@ -28,6 +30,7 @@ class RolePermission(BasePermission):
         return (
             request.user
             and request.user.is_authenticated
+            and request.user.is_active
             and hasattr(view, "allowed_roles")
             and request.user.role in view.allowed_roles
         )

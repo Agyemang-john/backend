@@ -1,19 +1,13 @@
 
-from .models import User
 import re
 from rest_framework import serializers
 from django.core.exceptions import ValidationError
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth import authenticate
-from rest_framework.exceptions import AuthenticationFailed
-from django.contrib.auth.tokens import PasswordResetTokenGenerator
-from django.utils.http import urlsafe_base64_encode
-from django.utils.encoding import smart_str, smart_bytes
 from django.core.mail import send_mail
 from django.conf import settings
 from .models import User 
-from .utils import send_password_reset_email
-from rest_framework_simplejwt.tokens import RefreshToken, TokenError
+from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
@@ -72,9 +66,7 @@ class CustomPasswordResetSerializer(serializers.Serializer):
         send_mail(subject, plain_message, from_email, [to], html_message=html_message)
 
 
-from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from django.core.cache import cache
 from django.core.mail import send_mail
 from django.conf import settings
 from django.contrib.auth import authenticate
@@ -84,9 +76,6 @@ from django.utils import timezone
 from django.db.models import F
 from .models import User
 from datetime import timedelta
-import six
-from django.utils.crypto import constant_time_compare
-from django.utils.http import base36_to_int, int_to_base36
 import random
 
 
@@ -191,198 +180,106 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             "access": str(refresh.access_token),
         }
 
-
+from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 
-class CustomTokenRefreshSerializer(TokenRefreshSerializer):
+class CustomerCustomTokenRefreshSerializer(TokenRefreshSerializer):
+    refresh = serializers.CharField(required=False, write_only=True)
+
     def validate(self, attrs):
+        # 1. Get token from cookie if not in body
+        refresh_token = attrs.get("refresh") or self.context["request"].COOKIES.get("refresh")
+        if not refresh_token:
+            raise serializers.ValidationError("No refresh token found")
+
+        attrs["refresh"] = refresh_token
         data = super().validate(attrs)
 
-        refresh = RefreshToken(attrs["refresh"])
-        user = self.context["request"].user or None
+        refresh = getattr(self, "token", None)
+        if not refresh:
+            from rest_framework_simplejwt.tokens import RefreshToken
+            refresh = RefreshToken(refresh_token)
 
-        if user and user.is_authenticated:
-            # add role claims
-            new_access = refresh.access_token
-            new_access["role"] = user.role
-            refresh["is_active"] = user.is_active
-            new_access["is_staff"] = user.is_staff
-            data["access"] = str(new_access)
+        # use original token as fallback
 
+        access = refresh.access_token
+
+        # 4. Add your custom claims
+        user_id = refresh.payload.get("user_id")
+        if user_id:
+            try:
+                user = User.objects.only("role", "is_active", "is_staff").get(id=user_id)
+                access["role"] = user.role or "customer"
+                access["is_active"] = user.is_active
+                access["is_staff"] = user.is_staff
+            except User.DoesNotExist:
+                pass
+
+        data["access"] = str(access)
         return data
-    
 
-class UserRegisterSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(max_length=70, min_length=8, write_only=True)
+import re
+from django.contrib.auth import get_user_model
+from rest_framework import serializers
+
+User = get_user_model()
+
+class RegisterSerializer(serializers.ModelSerializer):
+    password = serializers.CharField(write_only=True)
 
     class Meta:
         model = User
-        fields = ['email', 'first_name', 'last_name', 'phone', 'password']
-    
-    def validate(self, attrs):
-        password = attrs.get('password')
-        
-        # Custom password rules
-        if not any(char.isupper() for char in password):
+        fields = ["first_name", "last_name", "email", "phone", "password"]
+
+    def validate_email(self, value):
+        if User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError("An account with this email already exists. Login or reset password")
+        return value
+
+    def validate_phone(self, value):
+        if User.objects.filter(phone=value).exists():
+            raise serializers.ValidationError("An account with this phone number already exists. Login or reset password")
+        return value
+
+    def validate_password(self, value):
+        """
+        Strong password validation:
+        - >= 8 chars
+        - uppercase
+        - lowercase
+        - number
+        - special char
+        """
+        if len(value) < 8:
+            raise serializers.ValidationError("Password must be at least 8 characters long.")
+        if not re.search(r"[A-Z]", value):
             raise serializers.ValidationError("Password must contain at least one uppercase letter.")
-        if not any(char.islower() for char in password):
+        if not re.search(r"[a-z]", value):
             raise serializers.ValidationError("Password must contain at least one lowercase letter.")
-        if not any(char.isdigit() for char in password):
+        if not re.search(r"\d", value):
             raise serializers.ValidationError("Password must contain at least one number.")
-        if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
+        if not re.search(r"[!@#$%^&*(),.?\":{}|<>]", value):
             raise serializers.ValidationError("Password must contain at least one special character.")
         
-        # Additional Django password validation (optional)
         try:
-            validate_password(password)
+            validate_password(value)
         except ValidationError as e:
             raise serializers.ValidationError(str(e))
-        
-        # Check for duplicate email or phone number
-        email = attrs.get('email')
-        phone = attrs.get('phone')
-
-        if User.objects.filter(email=email).exists():
-            raise serializers.ValidationError("An account with this email already exists. Login or reset password")
-        
-        if User.objects.filter(phone=phone).exists():
-            raise serializers.ValidationError("An account with this phone number already exists. Login or reset password")
-        
-        return super().validate(attrs)
+        return value
 
     def create(self, validated_data):
-        # Create user and hash the password
-        user = User.objects.create_user(**validated_data)
+        password = validated_data.pop("password")
+
+        # user starts inactive until email is verified
+        user = User.objects.create(
+            is_active=False,
+            **validated_data
+        )
+        user.set_password(password)
+        user.save()
+
+        # send verification email BUT never break request
+        from .utils import send_activation_email_safe
+        send_activation_email_safe(user)
         return user
 
-class LoginSerializer(serializers.ModelSerializer):
-    email = serializers.EmailField(max_length=255, min_length=6)
-    password = serializers.CharField(max_length=68, write_only=True)
-    refresh_token = serializers.CharField(max_length=300, read_only=True)
-    access_token = serializers.CharField(max_length=300, read_only=True)
-    first_name = serializers.CharField(max_length=30, read_only=True)
-
-    class Meta:
-        model = User
-        fields = ['email', 'password', 'access_token', 'refresh_token', 'first_name']
-
-    def validate(self, attrs):
-        email = attrs.get('email')
-        password = attrs.get('password')
-        request = self.context.get('request')
-
-        # Authenticate user
-        user = authenticate(request, email=email, password=password)
-
-        if not user:
-            raise AuthenticationFailed('Invalid credentials, please try again.')
-        if not user.is_active:
-            raise AuthenticationFailed('Account is not active. Please verify your email.')
-
-        # Get tokens for authenticated user
-        user_tokens = user.tokens()
-
-        return {
-            'email': user.email,
-            'first_name': user.first_name,
-            'access_token': user_tokens['access'],
-            'refresh_token': user_tokens['refresh'],
-        }
-
-
-class TokenRefreshSerializer(serializers.Serializer):
-    refresh = serializers.CharField()
-
-    def validate(self, attrs):
-        refresh_token = attrs.get('refresh')
-
-        if not refresh_token:
-            raise serializers.ValidationError("Refresh token is required.")
-
-        try:
-            refresh = RefreshToken(refresh_token)
-            attrs['access'] = str(refresh.access_token)
-        except TokenError as e:
-            raise serializers.ValidationError("Invalid or expired refresh token.")
-        
-        return attrs
-
-
-class PasswordResestRequestSerializer(serializers.ModelSerializer):
-    email = serializers.EmailField(max_length=50)
-
-    class Meta:
-        model = User
-        fields = ['email']
-
-    def validate(self, attrs):
-        email = attrs.get('email')
-
-        try:
-            user = User.objects.get(email=email)
-            uidb64 = urlsafe_base64_encode(smart_bytes(user.id))
-            token = PasswordResetTokenGenerator().make_token(user)
-            request = self.context.get('request')
-            protocol = 'https' if request.is_secure() else 'http'
-
-            # site_domain = '192.168.102.89:5173/'
-            # # site_domain = get_current_site(request).domain
-            # relative_link = reverse('userauths:password-reset-confirm', kwargs={'uidb64': uidb64, 'token': token})
-            # reset_link = f'{protocol}://{site_domain}{relative_link}'
-
-            frontend_reset_url = 'http://192.168.102.89:5173/auth/reset-password'  # Adjust to your actual frontend URL
-            reset_link = f'{frontend_reset_url}?uidb64={uidb64}&token={token}'
-
-            # Send the reset email
-            if not send_password_reset_email(email=email, reset_link=reset_link, user_name=user.first_name):
-                raise serializers.ValidationError("Failed to send the password reset email.")
-
-        except User.DoesNotExist:
-            raise serializers.ValidationError("User with this email does not exist.")
-
-        return super().validate(attrs)
-
-class PasswordResetConfirmSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, min_length=8, max_length=128)
-    confirm_password = serializers.CharField(write_only=True, min_length=8, max_length=128)
-
-    class Meta:
-        model = User
-        fields = ['password', 'confirm_password']
-
-    def validate(self, attrs):
-        password = attrs.get('password')
-        confirm_password = attrs.get('confirm_password')
-
-        try:
-            validate_password(password)
-        except ValidationError as e:
-            raise serializers.ValidationError(str(e))
-
-        if password != confirm_password:
-            raise serializers.ValidationError("Passwords do not match.")
-        return attrs
-
-class LogOutSerializer(serializers.Serializer):
-    refresh_token = serializers.CharField(max_length=300)
-
-    default_error_messages = {
-        'bad_token': "Invalid or expired token.",
-    }
-
-    def validate(self, attrs):
-        # Validate the presence of the refresh token
-        self.token = attrs.get('refresh_token')
-        if not self.token:
-            raise serializers.ValidationError("Refresh token is required.")
-        return attrs
-
-    def save(self, **kwargs):
-        try:
-            # Attempt to blacklist the token
-            token = RefreshToken(self.token)
-            token.blacklist()
-        except TokenError:
-            # Handle invalid or expired token errors
-            self.fail('bad_token')
-        return {"success": "Logged out successfully."}

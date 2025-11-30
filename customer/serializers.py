@@ -2,17 +2,10 @@ from rest_framework import serializers
 from product.models import  *
 from order.models import *
 from django.contrib.auth import get_user_model
-from django.contrib.auth import authenticate
-from rest_framework.response import Response
-from userauths.utils import send_sms
-from django.utils import timezone
-from datetime import timedelta
-from userauths.tokens import otp_token_generator
 from django.db.models.query_utils import Q
 from address.models import *
 from userauths.models import Profile
 from django.contrib.auth.password_validation import validate_password
-from django.contrib.auth import authenticate
 
 
 User = get_user_model()

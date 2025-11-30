@@ -1,8 +1,6 @@
 from django.db.models.signals import post_save, post_delete
-from django.conf import settings
 from django.dispatch import receiver
 from .models import Vendor, About
-from userauths.models import User, Profile
 from product.models import Variants
 from django.core.files.storage import default_storage
 

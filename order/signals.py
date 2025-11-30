@@ -1,7 +1,6 @@
 from django.db.models.signals import pre_save, post_save
 from django.dispatch import receiver
 from product.models import *
-from django.contrib.auth.signals import user_logged_in
 from .tasks import send_order_email_to_sellers, send_order_email_to_customer    
 from .models import Order
 

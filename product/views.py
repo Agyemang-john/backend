@@ -4,12 +4,11 @@ from .models import *
 from order.models import *
 from .serializers import *
 from django.db.models import Avg, Count
-from userauths.authentication import CustomJWTAuthentication
 from address.serializers import AddressSerializer
 from django.http import Http404
 from django.core.cache import cache
 from rest_framework.permissions import AllowAny
-from product.service import get_recommended_products, get_cart_based_recommendations
+from product.service import get_recommended_products, get_cart_based_recommendations, get_cart_product_ids
 from rest_framework import status
 from rest_framework.views import APIView
 from decimal import Decimal
@@ -19,11 +18,12 @@ from .service import get_fbt_recommendations
 from copy import deepcopy
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import F
-# from uuid import uuid4
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Avg, Count, Q, Max, Min
+from .utils import get_recently_viewed_products
+from .tasks import increment_product_view_count
 
 class AddProductReviewView(APIView):
     permission_classes = [IsAuthenticated]
@@ -81,41 +81,97 @@ class SitemapDataAPIView(APIView):
         })
     
 
-class AjaxColorAPIView(APIView):
-    def post(self, request, *args, **kwargs):
-        size_id = request.data.get('size')
-        product_id = request.data.get('productid')
+# class AjaxColorAPIView(APIView):
+#     def post(self, request, *args, **kwargs):
+#         size_id = request.data.get('size')
+#         product_id = request.data.get('productid')
         
-        # Fetch the product by ID
-        product = get_object_or_404(Product, id=product_id)
+#         # Fetch the product by ID
+#         product = get_object_or_404(Product, id=product_id)
         
-        # Fetch variants based on product ID and size ID
-        colors = Variants.objects.filter(product_id=product_id, size_id=size_id)
+#         # Fetch variants based on product ID and size ID
+#         colors = Variants.objects.filter(product_id=product_id, size_id=size_id)
 
-        # Serialize the product and variants data
-        product_data = ProductSerializer(product, context={'request': request}).data
-        colors_data = VariantSerializer(colors, many=True, context={'request': request}).data
+#         # Serialize the product and variants data
+#         product_data = ProductSerializer(product, context={'request': request}).data
+#         colors_data = VariantSerializer(colors, many=True, context={'request': request}).data
         
-        # Prepare the response data
-        response_data = {
-            'product': product_data,
-            'colors': colors_data
+#         # Prepare the response data
+#         response_data = {
+#             'product': product_data,
+#             'colors': colors_data
+#         }
+        
+#         # Return the JSON response
+#         return Response(response_data, status=status.HTTP_200_OK)
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from django.shortcuts import get_object_or_404
+from .models import Product
+from .serializers import ProductSerializer
+
+
+class ProductRecommendationsAPIView(APIView):
+    def get(self, request, sku, slug):
+        # Step 1: Get only the IDs we need — no select_related conflict!
+        product = get_object_or_404(
+            Product.published.only('id', 'sub_category_id', 'vendor_id'),
+            sku=sku,
+            slug=slug
+        )
+
+        # Step 2: Build base queryset WITHOUT select_related on the main product query
+        # We use .only() + select_related only on the final slices
+        base_qs = Product.published.exclude(id=product.id)
+
+        # Related products (same sub_category)
+        related_products = list(
+            base_qs.filter(sub_category_id=product.sub_category_id)
+                   .select_related('vendor', 'sub_category')
+                   .only(
+                       'id', 'title', 'sku', 'slug', 'price', 'old_price', 'image',
+                       'vendor__name', 'vendor__slug', 'sub_category__slug'
+                   )[:12]
+        )
+
+        # Vendor products (same vendor)
+        vendor_products = list(
+            base_qs.filter(vendor_id=product.vendor_id)
+                   .select_related('vendor')
+                   .only(
+                       'id', 'title', 'sku', 'slug', 'price', 'old_price', 'image',
+                       'vendor__name', 'vendor__slug'
+                   )[:12]
+        )
+
+        # Serialize properly
+        serializer = ProductSerializer(many=True, context={'request': request})
+
+        data = {
+            "related_products": serializer.to_representation(related_products),
+            "vendor_products": serializer.to_representation(vendor_products),
         }
-        
-        # Return the JSON response
-        return Response(response_data, status=status.HTTP_200_OK)
+
+        return Response(data)
 
 from django.db.models import Prefetch
-def get_cached_product_data(sku, slug, request):
-    cache_key = f"product_detail_cache:{sku}:{slug}"
-    cached_data = cache.get(cache_key)
+def get_cached_product_data(sku: str, slug: str, request):
+    """
+    Fast cached product detail data — NO related/vendor products
+    """
+    cache_key = f"product_detail_v2:{sku}:{slug}"
+    cached = cache.get(cache_key)
 
-    if cached_data:
-        return deepcopy(cached_data), Product.objects.get(sku=sku, slug=slug)
-    
-    # Optimized query with prefetch_related and select_related
+    if cached:
+        # Still return fresh product instance for view count logic
+        product = Product.objects.only('id').get(sku=sku, slug=slug)
+        return deepcopy(cached), product
+
+    # Main product with optimized prefetching
     product = get_object_or_404(
-        Product.published.select_related('vendor', 'sub_category')
+        Product.published
+        .select_related('vendor', 'sub_category')
         .prefetch_related(
             Prefetch('p_images', queryset=ProductImages.objects.order_by('id')),
             Prefetch('reviews', queryset=ProductReview.objects.filter(status=True))
@@ -124,88 +180,63 @@ def get_cached_product_data(sku, slug, request):
             average_rating=Avg('reviews__rating'),
             review_count=Count('reviews')
         ),
-        slug=slug,
-        sku=sku
+        sku=sku,
+        slug=slug
     )
 
-    # Use more efficient serialization
-    p_images = ProductImageSerializer(product.p_images.all(), many=True, context={'request': request}).data
-    
-    # Optimize related products queries
-    related_products = Product.published.filter(
-        sub_category=product.sub_category
-    ).exclude(id=product.id).select_related('vendor')[:10]
-    
-    vendor_products = Product.published.filter(
-        vendor=product.vendor
-    ).exclude(id=product.id).select_related('vendor')[:10]
-    
-    delivery_options = ProductDeliveryOption.objects.filter(product=product)
-
+    # Serialize efficiently
     shared_data = {
         "product": ProductSerializer(product, context={'request': request}).data,
-        "p_images": p_images,
-        "related_products": ProductSerializer(related_products, many=True, context={'request': request}).data,
-        "vendor_products": ProductSerializer(vendor_products, many=True, context={'request': request}).data,
-        "reviews": ProductReviewSerializer(product.reviews.filter(status=True), many=True, context={'request': request}).data,
-        'average_rating': product.average_rating or 0,
-        'review_count': product.review_count or 0,
-        'delivery_options': ProductDeliveryOptionSerializer(delivery_options, many=True).data
+        "p_images": ProductImageSerializer(
+            product.p_images.all(), many=True, context={'request': request}
+        ).data,
+        "reviews": ProductReviewSerializer(
+            product.reviews.filter(status=True), many=True, context={'request': request}
+        ).data,
+        "average_rating": product.average_rating or 0,
+        "review_count": product.review_count or 0,
+        "delivery_options": ProductDeliveryOptionSerializer(
+            ProductDeliveryOption.objects.filter(product=product), many=True
+        ).data,
     }
 
-    # Remove cached dynamic fields more efficiently
-    dynamic_fields = ['price', 'old_price', 'currency']
-    
-    for field in dynamic_fields:
+    # Remove price fields — will be added dynamically per currency
+    for field in ['price', 'old_price', 'currency']:
         shared_data['product'].pop(field, None)
-        
-        for list_name in ['related_products', 'vendor_products']:
-            for p in shared_data[list_name]:
-                p.pop(field, None)
 
-    cache.set(cache_key, shared_data, timeout=60 * 30)  # Reduced timeout for fresher data
+    # Cache for 30 minutes
+    cache.set(cache_key, shared_data, timeout=60 * 30)
     return deepcopy(shared_data), product
 
 
-def convert_currency(product_data, currency):
+def convert_currency(product_data: dict, currency: str) -> dict:
+    """
+    Convert prices for main product + variant only
+    """
     rates = get_exchange_rates()
     exchange_rate = Decimal(str(rates.get(currency, 1)))
-    
-    # Bulk fetch all product prices to avoid N+1 queries
-    product_ids = [product_data['product']['id']]
-    product_ids.extend(p['id'] for p in product_data['related_products'])
-    product_ids.extend(p['id'] for p in product_data['vendor_products'])
-    
-    products_dict = {
-        p.id: p for p in Product.published.filter(id__in=product_ids).only('id', 'price', 'old_price')
-    }
-    
-    # Update main product
-    main_product = products_dict.get(product_data['product']['id'])
-    if main_product:
-        product_data['product']['price'] = round(main_product.price * exchange_rate, 2)
-        product_data['product']['old_price'] = round(main_product.old_price * exchange_rate, 2)
-        product_data['product']['currency'] = currency
 
-    # Update related and vendor products
-    for list_name in ['related_products', 'vendor_products']:
-        for p in product_data[list_name]:
-            p_obj = products_dict.get(p['id'])
-            if p_obj:
-                p['price'] = round(p_obj.price * exchange_rate, 2)
-                p['old_price'] = round(p_obj.old_price * exchange_rate, 2)
-                p['currency'] = currency
+    # Main product
+    main_product = product_data['product']
+    try:
+        db_product = Product.published.only('price', 'old_price').get(id=main_product['id'])
+        main_product.update({
+            'price': round(db_product.price * exchange_rate, 2),
+            'old_price': round(db_product.old_price * exchange_rate, 2) if db_product.old_price else None,
+            'currency': currency
+        })
+    except Product.DoesNotExist:
+        pass
 
-    # Handle variants more efficiently
-    if 'variant_data' in product_data:
-        variant_info = product_data['variant_data'].get('variant')
-        if variant_info:
-            try:
-                variant_obj = Variants.objects.get(id=variant_info['id'])
-                variant_info['price'] = round(variant_obj.price * exchange_rate, 2)
-                variant_info['currency'] = currency
-            except Variants.DoesNotExist:
-                pass
+    # Variant (if exists)
+    if 'variant_data' in product_data and product_data['variant_data'].get('variant'):
+        variant_info = product_data['variant_data']['variant']
+        try:
+            variant = Variants.objects.only('price').get(id=variant_info['id'])
+            variant_info['price'] = round(variant.price * exchange_rate, 2)
+            variant_info['currency'] = currency
+        except Variants.DoesNotExist:
+            pass
 
     return product_data
 
@@ -222,26 +253,26 @@ class ProductDetailAPIView(APIView):
                 return Response({"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
             
             product_id_str = str(product.id)
-            viewed_cookie = request.headers.get('X-Recent-Views')
+            recently_viewed = request.session.get('recently_viewed', [])
+            recently_viewed = [str(pid) for pid in recently_viewed]
 
-            viewed_ids = []
-            if viewed_cookie:
-                try:
-                    viewed_ids = [id.strip() for id in viewed_cookie.split(',') if id.strip()]
-                except (ValueError, AttributeError):
-                    viewed_ids = []  # Invalid format → treat as empty
-            
-            # Check if already viewed (no increment)
-            increment_views = product_id_str not in viewed_ids
-            # Increment if new view
-            if increment_views:
-                # Atomic update
-                Product.objects.filter(id=product.id).update(views=F('views') + 1)
-                # Refresh for latest count
-                product.refresh_from_db(fields=['views'])
-                # Optional: Log for monitoring
+            # Always add to history (even if already there → move to top)
+            if product_id_str in recently_viewed:
+                recently_viewed.remove(product_id_str)
+            recently_viewed.insert(0, product_id_str)
+            recently_viewed = recently_viewed[:10]  # Keep last 10
+            request.session['recently_viewed'] = recently_viewed
 
-            shared_data = convert_currency(shared_data, currency)
+            # =====================================================
+            # 2. PERMANENT VIEW DEDUPLICATION (never cleared by user)
+            # =====================================================
+            viewed_for_count = request.session.get('viewed_for_count', set())
+            if product_id_str not in viewed_for_count:
+                # First real view → mark it and increment ASYNC
+                viewed_for_count.add(product_id_str)
+                request.session['viewed_for_count'] = viewed_for_count
+                increment_product_view_count.delay(product.id)
+            request.session.modified = True
 
             # Optimize variant queries
             variant = None
@@ -294,7 +325,7 @@ class ProductDetailAPIView(APIView):
                 address = Address.objects.filter(user=request.user, status=True).first()
 
             # Optimize cart data retrieval
-            cart_data = self._get_cart_data(request, product, variant, stock_quantity)
+            cart_data = self._get_cart_data(request, product, variant)
 
             # if cart_data["cart_quantity"] >= stock_quantity and stock_quantity != 0:
             #     is_out_of_stock = True
@@ -317,49 +348,43 @@ class ProductDetailAPIView(APIView):
             return Response(response_data, status=status.HTTP_200_OK)
 
         except Exception as e:
-            logger.error(f"Product detail error: {str(e)}")
             return Response(
                 {"error": "Failed to load product data", "detail": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
-    def _get_cart_data(self, request, product, variant, stock_quantity):
+    def _get_cart_data(self, request, product, variant):
         cart_data = {
             'is_in_cart': False,
             'cart_quantity': 0,
             'cart_item_id': None
         }
-        
-        if request.auth:
+        item_key = f"{product.id}_{variant.id if variant else 'none'}"
+
+        if request.user.is_authenticated:
             try:
-                cart = Cart.objects.get_for_request(request)
+                cart = Cart.objects.get(user=request.user)
                 cart_item = CartItem.objects.filter(
                     cart=cart, product=product, variant=variant
                 ).only('id', 'quantity').first()
-                
+
                 if cart_item:
                     cart_data.update({
                         'is_in_cart': True,
                         'cart_quantity': cart_item.quantity,
                         'cart_item_id': cart_item.id
                     })
-            except Exception:
+            except Cart.DoesNotExist:
                 pass
         else:
-            guest_cart = request.headers.get('X-Guest-Cart')
-            try:
-                guest_cart = json.loads(guest_cart) if guest_cart else []
-                for item in guest_cart:
-                    if (str(item.get('p')) == str(product.id) and 
-                        (not variant or str(item.get('v')) == str(variant.id))):
-                        cart_data.update({
-                            'is_in_cart': True,
-                            'cart_quantity': int(item.get('q', 0)),
-                        })
-                        break
-            except (json.JSONDecodeError, ValueError):
-                pass
-        
+            guest_cart = request.session.get("guest_cart", {})
+            quantity = guest_cart.get(item_key, 0)
+            if quantity > 0:
+                cart_data.update({
+                    'is_in_cart': True,
+                    'cart_quantity': quantity
+                })
+
         return cart_data
 
 
@@ -826,53 +851,78 @@ class ProductSearchAPIView(APIView):
 
 class RecentlyViewedProducts(APIView):
     def get(self, request):
-        ids = request.GET.get("ids", "")
-        id_list = [int(i) for i in ids.split(",") if i.isdigit()]
-        products = Product.published.filter(id__in=id_list)
-        
-        id_order = {id_: idx for idx, id_ in enumerate(id_list)}
-        sorted_products = sorted(products, key=lambda p: id_order.get(p.id, 0))
-        
-        return Response(ProductSerializer(sorted_products, many=True, context={'request': request}).data)
+        products = get_recently_viewed_products(request, limit=10)
+
+        # Optional: If you want to return empty list instead of 404
+        if not products.exists():
+            return Response([], status=status.HTTP_200_OK)
+
+        serializer = ProductSerializer(
+            products,
+            many=True,
+            context={'request': request}
+        )
+        return Response(serializer.data)
+
+class ClearRecentlyViewed(APIView):
+    http_method_names = ['post']
+    def post(self, request):
+        if 'recently_viewed' in request.session:
+            del request.session['recently_viewed']
+            request.session.modified = True
+        return Response({"message": "Recently viewed cleared"}, status=status.HTTP_200_OK)
+
+
+class RemoveRecentlyViewedItem(APIView):
+    http_method_names = ['post']
+    
+    def post(self, request):
+        product_id = request.data.get('product_id')
+        if not product_id:
+            return Response({"error": "product_id required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        recently_viewed = request.session.get('recently_viewed', [])
+        pid_str = str(product_id)
+        if pid_str in recently_viewed:
+            recently_viewed.remove(pid_str)
+            request.session['recently_viewed'] = recently_viewed
+            request.session.modified = True
+
+        return Response({"message": "Item removed", "removed": pid_str})
 
 
 class CartRecommendationsAPIView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        user = request.auth
-        guest_cart_raw = request.headers.get('X-Guest-Cart')
-        
+        # Get current cart product IDs — works for guest (session) AND logged-in (DB)
+        cart_product_ids = get_cart_product_ids(request)
 
-        # Get current cart product IDs
-        if user:
-            cart_product_ids = CartItem.objects.filter(cart__user=request.user).values_list('product_id', flat=True)
-        elif guest_cart_raw:
-            try:
-                guest_items = json.loads(guest_cart_raw)
-                cart_product_ids = [item['p'] for item in guest_items]
-            except json.JSONDecodeError:
-                cart_product_ids = []
-        else:
-            cart_product_ids = []
-
-        # 1. Frequently bought together
+        # 1. Frequently Bought Together (based on cart co-occurrence)
         bought_together_set = set()
         for pid in cart_product_ids:
-            related_products = get_cart_based_recommendations(pid)
-            bought_together_set.update(related_products.values_list('id', flat=True))
+            related = get_cart_based_recommendations(pid)
+            bought_together_set.update(related.values_list('id', flat=True))
 
-        bought_together = Product.objects.filter(id__in=bought_together_set).exclude(id__in=cart_product_ids)[:10]
-        bought_together_serialized = ProductSerializer(bought_together, many=True, context={'request': request}).data
+        bought_together = Product.objects.filter(
+            id__in=bought_together_set
+        ).exclude(id__in=cart_product_ids)[:10]
 
-        # 2. Personalized
+        # 2. Personalized Recommendations (category, FBT, trending)
         personalized = get_recommended_products(request)
-        personalized_serialized = ProductSerializer(personalized, many=True, context={'request': request}).data
 
         return Response({
-            "frequently_bought_together": bought_together_serialized,
-            "recommended_for_you": personalized_serialized,
-        })
+            "frequently_bought_together": ProductSerializer(
+                bought_together,
+                many=True,
+                context={'request': request}
+            ).data,
+            "recommended_for_you": ProductSerializer(
+                personalized,
+                many=True,
+                context={'request': request}
+            ).data,
+        }, status=status.HTTP_200_OK)
     
 
 class FrequentlyBoughtTogetherAPIView(APIView):

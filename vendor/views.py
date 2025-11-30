@@ -1,12 +1,10 @@
-import datetime
 from django.core.cache import cache
 from datetime import date
-from django.shortcuts import get_object_or_404, redirect, render
+from django.shortcuts import get_object_or_404
 from core.models import * 
 from .models import *
 from userauths.models import *
 from order.models import *
-import json
 from product.models import Product, Variants
 # Create your views here.
 #############################################################
@@ -24,24 +22,22 @@ from django.shortcuts import get_object_or_404
 from .models import OpeningHour, Vendor
 from core.serializers import VendorSerializer as VendorDetail, ProductReviewSerializer as ReviewDetail
 from rest_framework.parsers import MultiPartParser, FormParser
-from django.db import transaction
 from rest_framework.exceptions import NotFound
 from django.db.models import Sum
 from vendor.permissions import IsVerifiedVendor
 from rest_framework.throttling import UserRateThrottle
 
-from django.db.models import Sum, Count, Avg, F, Q
-from django.db.models.functions import TruncDay, TruncWeek, TruncMonth, TruncDate
+from django.db.models import Sum, Count, Avg, F
+from django.db.models.functions import TruncWeek, TruncMonth, TruncDate
 from datetime import timedelta
 from django.utils import timezone
 from order.models import OrderProduct, Order
 from vendor.models import Vendor  # Assuming Vendor model
-from product.models import Product, Wishlist, SavedProduct, ProductReview
+from product.models import Wishlist, SavedProduct, ProductReview
 from .analytics_serializers import (
     SalesSummarySerializer, SalesTrendSerializer, TopProductSerializer,
     OrderStatusSerializer, EngagementSerializer, DeliveryPerformanceSerializer
 )
-from vendor.models import Vendor  # Assuming Vendor model
 
 
 class SalesSummaryView(APIView):
@@ -499,7 +495,6 @@ class ProductRelatedDataAPIView(APIView):
 
 
 from rest_framework import generics, permissions
-from product.models import Product
 from .product_serializers import ProductSerializer
 
 class IsVendorOwner(permissions.BasePermission):
@@ -765,7 +760,6 @@ class OpeningHourAPIView(APIView):
 
 
 # ABOUT VIEWSET
-from .models import About
 from .about_serializers import AboutSerializer
 from django.http import Http404
 

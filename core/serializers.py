@@ -3,7 +3,6 @@ from product.models import  *
 from order.models import *
 from .models import *
 from django.contrib.auth import get_user_model
-from django.db.models.query_utils import Q
 from address.models import *
 from .service import get_exchange_rates
 from decimal import Decimal

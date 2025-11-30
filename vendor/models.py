@@ -1,34 +1,18 @@
 from django.db import models
-from userauths.models import User, Profile
-from django.core.mail import EmailMessage
+from userauths.models import User
 from django.utils import timezone
-from datetime import time, date, datetime
-from django.urls import reverse
-from django.db.models.signals import post_save
-from django.template.loader import render_to_string
 from django.utils.text import slugify
 from datetime import timedelta
 from django_countries.fields import CountryField
-from PIL import Image, ImageDraw, ImageFont
-from io import BytesIO
 from django.core.files.base import ContentFile
 from django.core.exceptions import ValidationError
-import requests
-import json
-import exifread
 import logging
 from address.models import Country
-from django.conf import settings
 from avatar_generator import Avatar
-import requests
 from django.conf import settings
 import base64
 from django.core.validators import MinLengthValidator, RegexValidator
-from PIL import Image, ImageEnhance
-import easyocr
-import numpy as np
 from .tasks import send_vendor_approval_email, send_vendor_sms
-_reader = None
 
 logger = logging.getLogger(__name__)
 
@@ -199,9 +183,6 @@ class Vendor(models.Model):
     def __str__(self):
         return self.name
 
-    def get_absolute_url(self):
-        return reverse('core:vendor_detail', args=[self.slug])
-
     def has_active_subscription(self):
         """Check if the vendor has an active subscription."""
         return self.is_subscribed and self.subscription_end_date and self.subscription_end_date >= timezone.now().date()
@@ -264,101 +245,6 @@ class Vendor(models.Model):
             raise ValidationError("Both ID photo and selfie with ID are required for verification.")
         # if self.proof_of_address and not self._is_proof_within_180_days():
         #     raise ValidationError("Proof of address must be dated within the last 180 days.")
-
-
-    def _is_proof_within_180_days(self):
-        """Check if proof of address is within 180 days based on image content."""
-        global _reader
-        if _reader is None:
-            try:
-                _reader = easyocr.Reader(['en'], gpu=False)  # Initialize once
-                logger.debug("EasyOCR reader initialized successfully")
-            except Exception as e:
-                logger.error(f"Failed to initialize EasyOCR reader: {e}")
-                return False
-
-        if not self.proof_of_address:
-            return True  # No proof provided, skip validation (handled by clean())
-
-        current_date = datetime.now().date()
-        max_allowed_date = current_date - timedelta(days=180)
-
-        try:
-            # Restrict to image files only
-            if not self.proof_of_address.name.lower().endswith(('.jpg', '.jpeg', '.png')):
-                logger.error(f"Unsupported file type: {self.proof_of_address.name}")
-                return False
-
-            # Copy file content into memory
-            file_content = BytesIO(self.proof_of_address.read())
-            self.proof_of_address.seek(0)
-
-            # Use EasyOCR to extract text
-            try:
-                image = Image.open(file_content)
-                # Preprocess image
-                if image.mode != 'RGB':
-                    image = image.convert('RGB')
-                # Convert to grayscale
-                image = image.convert('L')  # Grayscale
-                # Enhance contrast
-                image = ImageEnhance.Contrast(image).enhance(3.0)  # Increased contrast
-                # Resize to improve OCR performance
-                image = image.resize((1000, 1000), Image.LANCZOS)
-
-                # Convert PIL image to NumPy array for EasyOCR
-                image_np = np.array(image)
-
-                # Extract text with rotation handling
-                results = _reader.readtext(image_np, detail=0, rotation_info=[90, 180, 270])
-                text = ' '.join(results)  # Combine all text fragments
-                logger.debug(f"OCR extracted text for {self.proof_of_address.name}: {text[:1000]}")  # Log first 1000 chars
-
-                # Search for common date formats
-                date_match = re.search(
-                    r"\d{4}[-/]\d{2}[-/]\d{2}"  # YYYY-MM-DD or YYYY/MM/DD
-                    r"|\d{2}[-/]\d{2}[-/]\d{4}"  # DD-MM-YYYY or DD/MM/YYYY
-                    r"|\d{2}\s+[A-Za-z]{3}\s+\d{4}"  # DD Mon YYYY
-                    r"|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}"  # Month DD, YYYY
-                    r"|\d{2}\.\d{2}\.\d{4}"  # DD.MM.YYYY
-                    r"|\d{2}/\d{2}/\d{2}"  # MM/DD/YY
-                    r"|\d{8}",  # YYYYMMDD
-                    text
-                )
-                if date_match:
-                    date_str = date_match.group(0)
-                    try:
-                        if re.match(r"\d{2}\s+[A-Za-z]{3}\s+\d{4}", date_str):  # DD Mon YYYY
-                            date_obj = datetime.strptime(date_str, "%d %b %Y").date()
-                        elif re.match(r"[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}", date_str):  # Month DD, YYYY
-                            date_str = date_str.replace(',', '')
-                            date_obj = datetime.strptime(date_str, "%B %d %Y").date()
-                        elif re.match(r"\d{2}\.\d{2}\.\d{4}", date_str):  # DD.MM.YYYY
-                            date_obj = datetime.strptime(date_str, "%d.%m.%Y").date()
-                        elif re.match(r"\d{2}/\d{2}/\d{2}", date_str):  # MM/DD/YY
-                            date_obj = datetime.strptime(date_str, "%m/%d/%y").date()
-                        elif re.match(r"\d{8}", date_str):  # YYYYMMDD
-                            date_obj = datetime.strptime(date_str, "%Y%m%d").date()
-                        elif date_str[2] in ['-', '/']:  # DD-MM-YYYY or DD/MM/YYYY
-                            date_obj = datetime.strptime(date_str, "%d-%m-%Y").date()
-                        else:  # YYYY-MM-DD or YYYY/MM/DD
-                            date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
-                        logger.info(f"Extracted valid date: {date_obj} from {self.proof_of_address.name}")
-                        return date_obj >= max_allowed_date
-                    except ValueError:
-                        logger.warning(f"Invalid date format found in OCR: {date_str}")
-                        return False
-                else:
-                    logger.warning(f"No valid date found in OCR text for {self.proof_of_address.name}")
-                    return False
-
-            except Exception as e:
-                logger.error(f"OCR processing failed for {self.proof_of_address.name}: {e}")
-                return False
-
-        except Exception as e:
-            logger.error(f"Error processing proof of address file {self.proof_of_address.name}: {e}")
-            return False
 
     class Meta:
         verbose_name = "Vendor"

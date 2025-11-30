@@ -1,338 +1,304 @@
 from decimal import Decimal
 from django.shortcuts import get_object_or_404
-from rest_framework import status, views
+from rest_framework import status
+from .cart_utils import get_authenticated_cart_response, get_guest_cart_response, handle_authenticated_cart, handle_guest_cart, remove_from_guest_cart
 
 from address.models import Address
 from address.serializers import AddressSerializer
-from order.service import calculate_delivery_fee
-from .models import Cart, CartItem, Order, OrderProduct
-from product.models import Product, Variants
+# from order.service import calculate_delivery_fee
+from .models import Cart, CartItem, Order
+from product.models import Product, Variants, ProductDeliveryOption
 from rest_framework.response import Response
-from django.utils.crypto import get_random_string
-from django.core.exceptions import ObjectDoesNotExist
-from product.models import Product, ProductDeliveryOption
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import *
 from product.utils import *
-from userauths.models import User
 from django.http import HttpResponse
 from reportlab.pdfgen import canvas
 import os
 from django.conf import settings
-
+from userauths.models import Profile
 from order.service import FeeCalculator
-from rest_framework.permissions import IsAuthenticated
-from django.http import JsonResponse
-from rest_framework import status, views
-from rest_framework.response import Response
-from django.shortcuts import get_object_or_404
-from order.models import Cart, CartItem
-from product.models import Product, Variants, ProductDeliveryOption
-from rest_framework.exceptions import NotFound
 from rest_framework.views import APIView
-from .cart_utils import get_authenticated_cart_response, get_guest_cart_response
-
+import logging
 logger = logging.getLogger(__name__)
 
+class AddToCartView(APIView):
+    permission_classes = [AllowAny]
 
-class AddToCartView(views.APIView):
-    permission_classes = [IsAuthenticated]
     def post(self, request):
-        data = request.data
+        product_id = request.data.get("product_id")
+        variant_id = request.data.get("variant_id")
+        quantity_change = int(request.data.get("quantity", 1))
 
-        product_id = data.get("product_id")
-        variant_id = data.get("variant_id")
-        quantity = int(data.get("quantity"))
-        is_in_cart = False
+        if not product_id:
+            return Response({"error": "product_id is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        try:
-            product = Product.objects.get(id=product_id)
-        except Product.DoesNotExist:
-            raise NotFound(detail="Product not found.")
-
-        # Fetch the product
         product = get_object_or_404(Product, id=product_id)
-
-        # Fetch variant (if applicable)
         variant = get_object_or_404(Variants, id=variant_id, product=product) if variant_id else None
-        cart = Cart.objects.get_or_create_for_request(request)
+        item_key = f"{product.id}_{variant.id if variant else 'none'}"
 
-        default_delivery_option = ProductDeliveryOption.objects.filter(
-            product=product, default=True
-        ).first()
-
-        cart_item, created = CartItem.objects.get_or_create(
-            cart=cart,
-            product=product,
-            variant=variant,
-            defaults={
-                "quantity": quantity,
-                "delivery_option": default_delivery_option.delivery_option if default_delivery_option else None,
-            },
-        )
-
-        if not created:
-            # If the item already exists, increase the quantity
-            cart_item.quantity += quantity
-            cart_item.save()
-
-        # should delete the cart item if it gets to 0
-        if cart_item.quantity < 1:
-            cart_item.delete()
-            is_in_cart = False
-            message = "Item removed from cart."
-            res_quantity = 0
+        # Handle cart
+        if request.user.is_authenticated:
+            result = handle_authenticated_cart(request.user, product, variant, quantity_change)
+            cart_item_id = result.get("cart_item_id")
         else:
-            is_in_cart = True
-            res_quantity = cart_item.quantity
-            if created:
-                message = "Item added to cart."
-            elif quantity > 0:
-                message = "Item quantity increased."
-            else:
-                message = "Item quantity decreased."
+            result = handle_guest_cart(request.session, item_key, quantity_change)
+            cart_item_id = None
 
-        variant = Variants.objects.get(id=variant_id) if variant_id else Variants.objects.filter(product=product).first()
-        is_out_of_stock = False
-        stock_quantity = 0
-        if product.variant == 'None':
-            stock_quantity = product.total_quantity
-            is_out_of_stock = stock_quantity < 1
+        # Stock check
+        stock_quantity = product.get_stock_quantity(variant)
+        is_out_of_stock = (result["quantity"] >= stock_quantity > 0) or (stock_quantity <= 0)
+
+        # Total cart items count
+        if request.user.is_authenticated:
+            total_cart_quantity = Cart.objects.get(user=request.user).total_quantity
         else:
-            if variant:
-                stock_quantity = variant.quantity
-                is_out_of_stock = stock_quantity < 1
-            else:
-                # If the product uses variants but no variant is selected
-                is_out_of_stock = True
-
-        if cart_item.quantity >= stock_quantity and stock_quantity != 0:
-                is_out_of_stock = True
+            total_cart_quantity = sum(request.session.get("guest_cart", {}).values())
 
         return Response({
-            "message": message,
-            "quantity": res_quantity,
-            "is_in_cart": is_in_cart,
+            "message": result["message"],
+            "quantity": result["quantity"],           # ← This is the item's current quantity
+            "is_in_cart": result["is_in_cart"],
             "is_out_of_stock": is_out_of_stock,
+            "cart_item_id": cart_item_id,
+            "total_cart_quantity": total_cart_quantity,
         })
 
-class RemoveFromCartView(views.APIView):
-    permission_classes = [IsAuthenticated]
-    def post(self, request):
-        data = request.data
-        # Validate required fields
-        product_id = data.get("product_id")
-        if not product_id:
-            return Response(
-                {"error": "product_id is required"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+class RemoveFromCartView(APIView):
+    permission_classes = [AllowAny]  # Allow guests!
 
-        variant_id = data.get("variant_id", None)
+    def post(self, request):
+        product_id = request.data.get("product_id")
+        variant_id = request.data.get("variant_id")  # Can be None or string
+
+        if not product_id:
+            return Response({"error": "product_id is required"}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            # Get or create the cart (handles both authenticated and guest users)
-            cart = Cart.objects.get_for_request(request)
-
-            # Fetch the product
             product = get_object_or_404(Product, id=product_id)
-
-            # Fetch variant (if applicable)
             variant = None
             if variant_id:
-                variant = get_object_or_404(Variants, id=variant_id)
-                # Verify variant belongs to product
-                if variant.product != product:
-                    return Response(
-                        {"error": "Variant does not belong to product"},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
+                variant = get_object_or_404(Variants, id=variant_id, product=product)
 
-            # Find and remove the cart item
-            cart_item = get_object_or_404(
-                CartItem,
-                cart=cart,
-                product=product,
-                variant=variant
-            )
-            cart_item.delete()
+            item_key = f"{product.id}_{variant.id if variant else 'none'}"
+            removed = False
+            total_cart_quantity = 0
 
-            # Prepare updated cart data for response
-            cart_items = CartItem.objects.filter(cart=cart).select_related('product', 'variant')
-            packaging_fee = sum(item.product.packaging_fee * item.quantity for item in cart_items)
+            # ——————— Logged-in User: Remove from DB ———————
+            if request.user.is_authenticated:
+                cart = Cart.objects.get(user=request.user)  # Must exist
+                cart_item = get_object_or_404(
+                    CartItem,
+                    cart=cart,
+                    product=product,
+                    variant=variant
+                )
+                cart_item.delete()
+                removed = True
 
-            response_data = {
+                # Recalculate totals
+                total_cart_quantity = cart.total_quantity
+                cart_items = cart.cart_items.select_related('product', 'variant')
+                packaging_fee = sum(item.product.packaging_fee * item.quantity for item in cart_items.all())
+
+            # ——————— Guest User: Remove from Session ———————
+            else:
+                removed = remove_from_guest_cart(request.session, item_key)
+                total_cart_quantity = sum(request.session.get("guest_cart", {}).values())
+
+            if not removed:
+                return Response({
+                    "success": False,
+                    "message": "Item not found in cart"
+                }, status=status.HTTP_404_NOT_FOUND)
+
+            # ——————— Common Response ———————
+            if request.user.is_authenticated:
+                cart_items = CartItem.objects.filter(cart__user=request.user).select_related('product', 'variant')
+                packaging_fee = sum(item.product.packaging_fee * item.quantity for item in cart_items)
+                total_amount = Cart.objects.get(user=request.user).total_price
+                items_count = cart_items.count()
+            else:
+                packaging_fee = 0  # You can enhance this later if needed
+                total_amount = 0
+                items_count = len(request.session.get("guest_cart", {}))
+
+            return Response({
                 "success": True,
                 "message": "Item removed from cart",
-                "quantity": cart.total_quantity if cart else 0,
+                "total_cart_quantity": total_cart_quantity,
                 "cart": {
-                    "items_count": cart_items.count(),
-                    "total_amount": cart.total_price if cart else 0,
-                    "packaging_fee": packaging_fee,
+                    "items_count": items_count,
+                    "total_amount": float(total_amount),
+                    "packaging_fee": float(packaging_fee),
                 }
-            }
-
-            return Response(response_data, status=status.HTTP_200_OK)
+            }, status=status.HTTP_200_OK)
 
         except Exception as e:
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            return Response({
+                "success": False,
+                "error": "Something went wrong",
+                "detail": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 ##############################################################################################
 #######################################     CART QUANTITY ####################################
 ##############################################################################################
+
 class CartQuantityView(APIView):
-    """Retrieve the total quantity of items in the user's cart or guest cart."""
+    permission_classes = [AllowAny]
 
     def get(self, request):
         try:
-            if request.user.is_authenticated:  # Authenticated user
-                cart = Cart.objects.get_for_request(request)
-                total_quantity = cart.total_quantity if cart else 0
-            else:  # Guest user
-                guest_cart_header = request.headers.get('X-Guest-Cart')
+            if request.user.is_authenticated:
                 try:
-                    guest_cart = json.loads(guest_cart_header) if guest_cart_header else []
-                except (json.JSONDecodeError, TypeError):
-                    guest_cart = []
+                    cart = Cart.objects.get_for_request(request)
+                    total_quantity = cart.total_quantity if cart else 0
+                except Cart.DoesNotExist:
+                    total_quantity = 0
+            else:
+                # Guest: Use Redis session (exactly like AddToCartView)
+                guest_cart = request.session.get("guest_cart", {})
+                total_quantity = sum(guest_cart.values())  # Sum of all item quantities
 
-                total_quantity = sum(int(item.get("q", 0)) for item in guest_cart)
-
-            return Response({"quantity": total_quantity}, status=status.HTTP_200_OK)
+            return Response({
+                "quantity": total_quantity
+            }, status=status.HTTP_200_OK)
 
         except Exception as e:
-            logger.error(f"Cart quantity view error: {str(e)}", exc_info=True)
-            return Response(
-                {"detail": "Error retrieving cart quantity", "error": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            logger.error(f"CartQuantityView error: {str(e)}", exc_info=True)
+            return Response({
+                "detail": "Error retrieving cart quantity"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 ##############################################################################################
 #######################################     CART QUANTITY ####################################
 ##############################################################################################
 
 class SyncGuestCartView(APIView):
+    """
+    Called automatically after login.
+    Merges the guest session cart (Redis) into the user's database cart.
+    No headers, no cookies, no frontend work needed.
+    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        try:
-            guest_cart = request.headers.get('X-Guest-Cart', '[]')
+        # Get guest cart from Redis session
+        guest_cart = request.session.get("guest_cart", {})
+
+        if not guest_cart:
+            return Response({
+                "message": "No guest cart to sync."
+            }, status=status.HTTP_200_OK)
+
+        # Get or create user's real cart
+        cart = Cart.objects.get_or_create_for_request(request)
+        merged_count = 0
+
+        for item_key, quantity in guest_cart.items():
+            try:
+                # Parse item_key → "123_none" or "456_789"
+                product_id_str, variant_id_str = item_key.split("_", 1)
+                product_id = int(product_id_str)
+                variant_id = int(variant_id_str) if variant_id_str != "none" else None
+            except (ValueError, AttributeError):
+                continue  # Skip malformed keys
 
             try:
-                cart_items = json.loads(guest_cart)
-            except (json.JSONDecodeError, TypeError):
-                cart_items = []
+                product = Product.objects.get(id=product_id)
+                variant = Variants.objects.get(id=variant_id, product=product) if variant_id else None
+            except (Product.DoesNotExist, Variants.DoesNotExist):
+                continue  # Skip invalid products
 
-            if not cart_items:
-                response = Response(
-                    {"message": "No guest cart items to sync."},
-                    status=status.HTTP_200_OK
-                )
-                response.delete_cookie('guest_cart')
-                return response
+            # Set default delivery option
+            default_option = ProductDeliveryOption.objects.filter(
+                product=product, default=True
+            ).first()
 
-            cart = Cart.objects.get_or_create_for_request(request)
-
-            for item in cart_items:
-                product_id = item.get("p")
-                quantity = int(item.get("q", 0))
-                variant_id = item.get("v")
-
-                if not product_id or quantity <= 0:
-                    continue
-
-                try:
-                    product = Product.objects.get(id=product_id)
-                    variant = (
-                        Variants.objects.get(id=variant_id, product=product)
-                        if variant_id else None
-                    )
-                except (Product.DoesNotExist, Variants.DoesNotExist):
-                    continue
-
-                default_delivery_option = ProductDeliveryOption.objects.filter(
-                    product=product, default=True
-                ).first()
-
-                cart_item, created = CartItem.objects.get_or_create(
-                    cart=cart,
-                    product=product,
-                    variant=variant,
-                    defaults={
-                        "quantity": quantity,
-                        "delivery_option": default_delivery_option.delivery_option if default_delivery_option else None,
-                    },
-                )
-
-                if not created:
-                    cart_item.quantity += quantity
-                    cart_item.save()
-
-                if cart_item.quantity < 1:
-                    cart_item.delete()
-
-            response = Response(
-                {"message": "Guest cart synced successfully."},
-                status=status.HTTP_200_OK
+            # Add or update cart item
+            cart_item, created = CartItem.objects.get_or_create(
+                cart=cart,
+                product=product,
+                variant=variant,
+                defaults={
+                    "quantity": quantity,
+                    "delivery_option": default_option.delivery_option if default_option else None,
+                }
             )
-            response.delete_cookie('guest_cart')
-            return response
 
-        except Exception as e:
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            if not created:
+                cart_item.quantity += quantity
+                cart_item.save()
+
+            if cart_item.quantity > 0:
+                merged_count += 1
+
+        # Clear the guest session cart
+        if "guest_cart" in request.session:
+            del request.session["guest_cart"]
+        request.session.modified = True
+
+        return Response({
+            "message": "Guest cart synced successfully.",
+            "merged_items": merged_count,
+            "total_cart_quantity": cart.total_quantity
+        }, status=status.HTTP_200_OK)
 
 
 ##############################################################################################
 #######################################     CART VIEW ########################################
 ##############################################################################################
 class CartView(APIView):
+    permission_classes = [AllowAny]
+
     def get(self, request):
         try:
-            if request.auth and request.user.is_authenticated:
+            if request.user.is_authenticated:
                 return get_authenticated_cart_response(request)
             else:
                 return get_guest_cart_response(request)
-
         except Exception as e:
-            logger.error(f"Cart view error: {str(e)}", exc_info=True)
-            return Response(
-                {"detail": "Error loading cart", "error": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            logger.error(f"CartView error: {str(e)}", exc_info=True)
+            return Response({
+                "detail": "Error loading cart",
+                "error": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 ##############################################################################################
 #######################################     CART VIEW ########################################
 ##############################################################################################
 
 class NavInfo(APIView):
+    """
+    Returns user info + cart quantity for the navigation bar
+    Works perfectly for:
+    - Logged-in users → DB cart
+    - Guest users     → Redis session cart (secure & fast)
+    """
+    permission_classes = [AllowAny]
 
     def get(self, request):
-        user = User.objects.filter(id=request.user.id).first()
         is_authenticated = request.user.is_authenticated
+        user = request.user if is_authenticated else None
+        first_name = user.first_name if is_authenticated and user else None
 
-        # If user is authenticated, you can serialize more info
-        if request.auth:  # Authenticated user
-            cart = Cart.objects.get_for_request(request)
-            total_quantity = cart.total_quantity if cart else 0
-
-        else:  # Guest user
-            guest_cart_header = request.headers.get('X-Guest-Cart')
+        # ——————— Cart Quantity ———————
+        if is_authenticated:
             try:
-                guest_cart = json.loads(guest_cart_header) if guest_cart_header else []
-            except (json.JSONDecodeError, TypeError):
-                guest_cart = []
-
-            total_quantity = sum(int(item.get("q", 0)) for item in guest_cart)
+                cart = Cart.objects.get_for_request(request)
+                cart_quantity = cart.total_quantity if cart else 0
+            except Cart.DoesNotExist:
+                cart_quantity = 0
+        else:
+            # Guest: Use Redis session (same as all other views)
+            guest_cart = request.session.get("guest_cart", {})
+            cart_quantity = sum(guest_cart.values())
 
         return Response({
             "isAuthenticated": is_authenticated,
-            "name": user.first_name if is_authenticated else None,
-            "cartQuantity": total_quantity,
+            "name": first_name,
+            "cartQuantity": cart_quantity,
         })
 
 
@@ -621,7 +587,6 @@ class CartSummaryAPIView(APIView):
             "buyer_country": buyer_country,
             "invalid_items": invalid_items,
         }
-
         return Response(summary, status=status.HTTP_200_OK)
 
 
@@ -648,8 +613,6 @@ class DefaultAddressAPIView(APIView):
 
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
-from reportlab.lib import colors
-from reportlab.lib.units import inch
 
 def truncate(text, max_length=40):
     return text if len(text) <= max_length else text[:max_length - 3] + "..."

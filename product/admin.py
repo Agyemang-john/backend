@@ -4,10 +4,6 @@ from django.contrib import admin
 from . models import *
 from django.contrib import admin
 from product.models import Product
-from product.tasks import index_products_task
-from django.utils import timezone
-from django_celery_beat.models import PeriodicTask, CrontabSchedule
-import json
 
 
 # Register your models here.

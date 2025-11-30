@@ -1,7 +1,7 @@
 
 
 from django.contrib.gis.geoip2 import GeoIP2
-
+from django.db.models import Case, When
 
 def get_region_with_geoip(ip):
     try:
@@ -25,4 +25,25 @@ def calculate_packaging_fee(weight, volume):
     packaging_fee = weight_fee + volume_fee
     return packaging_fee
 
+def get_recently_viewed_products(request, limit=10):
+    from product.models import Product
+    raw_ids = request.session.get('recently_viewed', [])[:limit]
+    if not raw_ids:
+        return Product.objects.none()
+
+    # Safely convert to integers
+    ids = []
+    for pid in raw_ids:
+        try:
+            ids.append(int(pid))
+        except (ValueError, TypeError):
+            continue
+
+    if not ids:
+        return Product.objects.none()
+
+    # Preserve exact order from session
+    preserved_order = Case(*[When(pk=pk, then=pos) for pos, pk in enumerate(ids)])
+
+    return Product.published.filter(pk__in=ids).order_by(preserved_order)
 

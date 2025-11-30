@@ -1,5 +1,4 @@
 from django.db import models
-from userauths.models import User
 from django.utils import timezone
 import secrets
 from vendor.models import *

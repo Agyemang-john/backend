@@ -8,7 +8,6 @@ from decimal import Decimal
 from forex_python.converter import CurrencyRates
 from pycountry import countries
 import logging
-from django.core.exceptions import ValidationError
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)

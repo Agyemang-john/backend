@@ -9,7 +9,7 @@ class CartAdmin(admin.ModelAdmin):
 
 # Register your models here.
 class CartItemAdmin(admin.ModelAdmin):
-    list_display = ['cart','product','variant','quantity','price','amount', 'date']
+    list_display = ['cart','product','variant','quantity','price','amount', 'created_at']
     list_filter = ['cart']
 
 class OrderAdmin(admin.ModelAdmin):

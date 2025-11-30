@@ -1,17 +1,13 @@
 from django.db import models
 from shortuuid.django_fields import ShortUUIDField
 from django.utils.html import mark_safe
-from userauths.models import User
-from taggit.managers import TaggableManager
-from django.urls import reverse
 from django.utils.text import slugify
 from vendor.models import *
 from core.models import *
 from .utils import *
-from datetime import datetime, timedelta
+from datetime import timedelta
 from address.models import Country
 from django_ckeditor_5.fields import CKEditor5Field
-import uuid
 # from order.models import DeliveryType
 # Create your models here.
 from django.conf import settings
@@ -155,71 +151,6 @@ class DeliveryOption(models.Model):
 
     def __str__(self):
         return self.name
-
-    # def get_delivery_date_range(self, reference_date=None):
-    #     """
-    #     Calculate the delivery date range based on the provided reference date or now.
-    #     Returns a formatted string for user display (e.g., 'Today', 'Tomorrow', or 'Sep 25 to Sep 27, 2025').
-    #     """
-    #     # Use provided reference_date or current time
-    #     now = reference_date or timezone.now()
-    #     today = now.date()
-
-    #     # Handle same-day delivery
-    #     if self.name.lower() in ["same-day delivery", "same-day"]:
-    #         cutoff_hour = 10  # Adjust as needed (e.g., 10 AM cutoff)
-    #         if now.hour >= cutoff_hour:
-    #             delivery_date = today + timedelta(days=1)
-    #             return delivery_date.strftime("%b %d, %Y")  # e.g., "Sep 25, 2025"
-    #         return "Today"
-
-    #     # Calculate min and max delivery dates
-    #     min_date = today + timedelta(days=self.min_days)
-    #     max_date = today + timedelta(days=self.max_days)
-
-    #     # Check for overdue delivery
-    #     if max_date < today:
-    #         logger.warning(f"Delivery option {self.name} is overdue (max_date: {max_date})")
-    #         return f"Overdue (expected by {max_date.strftime('%b %d, %Y')})"
-
-    #     # Format dates for user-friendly output
-    #     from_date = "Today" if min_date == today else min_date.strftime("%b %d, %Y")
-    #     to_date = "Today" if max_date == today else max_date.strftime("%b %d, %Y")
-
-    #     if from_date == to_date:
-    #         return f"{from_date}"  # Single day, e.g., "Today" or "Sep 25, 2025"
-    #     return f"{from_date} to {to_date}"  # Range, e.g., "Sep 25 to Sep 27, 2025"
-
-    # def get_delivery_status(self, reference_date=None):
-    #     """
-    #     Determine the delivery status based on the current date and delivery range.
-    #     Returns: 'TODAY', 'TOMORROW', 'IN X DAYS', 'ONGOING', 'OVERDUE', or 'UPCOMING'.
-    #     """
-    #     now = reference_date or timezone.now()
-    #     today = now.date()
-    #     delivery_range = self.get_delivery_date_range(reference_date)
-
-    #     # Handle string-based responses (e.g., "Today", "Overdue")
-    #     if isinstance(delivery_range, str):
-    #         if "Overdue" in delivery_range:
-    #             return "OVERDUE"
-    #         return delivery_range.upper()  # "TODAY" or "TOMORROW"
-
-    #     # Calculate min and max dates
-    #     min_date = today + timedelta(days=self.min_days)
-    #     max_date = today + timedelta(days=self.max_days)
-
-    #     if max_date < today:
-    #         return "OVERDUE"
-    #     elif min_date > today:
-    #         days_until_start = (min_date - today).days
-    #         return "TOMORROW" if days_until_start == 1 else f"IN {days_until_start} DAYS"
-    #     elif min_date <= today <= max_date:
-    #         return "TODAY" if min_date == max_date == today else "ONGOING"
-    #     return "UPCOMING"
-
-    # def __str__(self):
-    #     return self.name
 
     def get_delivery_date_range(self, reference_date=None, dynamic_min_days=None, dynamic_max_days=None):
         """

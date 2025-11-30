@@ -8,7 +8,6 @@ from django.db.models import Q
 from django.db import IntegrityError
 from django.core.exceptions import ValidationError
 
-from geoip2.errors import AddressNotFoundError
 from django.conf import settings
 import ipaddress    
 # Configure logging
@@ -76,18 +75,10 @@ def is_valid_ip(ip):
 
 def get_ip_address_from_request(request):
     # Fallback: X-Real-IP or REMOTE_ADDR
-    x_real = request.META["HTTP_X_REAL_IP"]
-    if x_real:
-        return x_real
-
-    ipaddress = request.META['X_FORWADRD_FOR']
-    ipaddress = ipaddress.split(",")
-    ip_address = ipaddress[0]
-
-    if ip_address:
-        return ip_address
-
-    return '127.0.0.1'
+    ip, _ = ipware_get_client_ip(request)  # Use ipware properly
+    if ip is None:
+        ip = request.META.get('REMOTE_ADDR', '127.0.0.1')
+    return ip
 
 def get_user_country_region(request):
     """Determine the user's country and region based on authentication or IP."""

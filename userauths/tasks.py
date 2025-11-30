@@ -1,5 +1,5 @@
 from celery import shared_task
-from django.core.mail import send_mail
+from django.core.mail import send_mail, EmailMultiAlternatives
 from django.template.loader import render_to_string
 from django.conf import settings
 import logging
@@ -12,12 +12,6 @@ logger = logging.getLogger('otp')
 
 @shared_task(max_retries=3, retry_backoff=True)
 def send_otp(recipient, otp, is_email=True):
-    """
-    Send OTP via email or SMS using Arkesel.
-    :param recipient: Email address or phone number
-    :param otp: One-time password
-    :param is_email: True for email, False for SMS
-    """
     context = {
         'otp': otp,
         'brand_name': 'Negromart',
@@ -57,4 +51,35 @@ def send_otp(recipient, otp, is_email=True):
         except Exception as e:
             logger.error(f"SMS sending failed for {recipient}: {str(e)}")
             raise
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def send_activation_email_task(self, user_data, activation_link):
+    subject = "Activate Your Account"
+    from_email = settings.DEFAULT_FROM_EMAIL
+    to_email = user_data["email"]
+
+    # Render the HTML template
+    html_content = render_to_string("emails/activation_email.html", {
+        "first_name": user_data["first_name"],
+        "activation_link": activation_link,
+    })
+
+    # Fallback plain text
+    text_content = f"""
+    Hello {user_data['first_name']},
+
+    Please activate your account by clicking the link below:
+    {activation_link}
+
+    If you did not register, ignore this message.
+    """
+
+    try:
+        msg = EmailMultiAlternatives(subject, text_content, from_email, [to_email])
+        msg.attach_alternative(html_content, "text/html")
+        msg.send(fail_silently=False)
+    except Exception as exc:
+        return self.retry(exc=exc)
+
 

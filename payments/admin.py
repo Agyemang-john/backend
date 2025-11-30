@@ -14,8 +14,6 @@ admin.site.register(Subscription)
 admin.site.register(Plan)
 admin.site.register(Feature)
 
-from django_celery_beat.models import PeriodicTask, IntervalSchedule, CrontabSchedule, SolarSchedule, ClockedSchedule
-
 
 @admin.register(Payout)
 class PayoutAdmin(admin.ModelAdmin):

@@ -1,16 +1,14 @@
 from django.db import models
-from django.forms import ModelForm
 from product.models import *
 from django.utils.html import mark_safe
 from address.models import *
 from vendor.models import *
 from decimal import Decimal
 from django.contrib.auth import get_user_model
-from django.core.exceptions import ObjectDoesNotExist
-import uuid
 from product.utils import *
 from .service import FeeCalculator, FeeResult
 from django.db.models import Q
+from userauths.models import Profile
 
 
 # Create your models here.
@@ -142,7 +140,7 @@ class Cart(models.Model):
                         'product_title': product.title,
                         'region': user_region
                     })
-                    item.delete()  # Delete the unavailable item from the cart
+                    item.delete() 
 
         return deleted_items
                 
@@ -154,7 +152,7 @@ class CartItem(models.Model):
     quantity = models.IntegerField(default=1)
     url = models.CharField(max_length=200, null=True, blank=True)
     added = models.BooleanField(default=True)
-    date = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
     delivery_option = models.ForeignKey(
         DeliveryOption, on_delete=models.SET_NULL, null=True, blank=True
     )
@@ -162,6 +160,9 @@ class CartItem(models.Model):
     def __str__(self):
         if self.cart.user:
             return f"CartItem for {self.cart.user.email} - Product: {self.product.title}"
+        
+    class Meta:
+        ordering = ('-created_at',)
 
     @property
     def price(self):
@@ -275,7 +276,7 @@ class Order(models.Model):
 
             # Parse the delivery range string to extract dates
             if delivery_range == "Today":
-                delivery_date = timezone.now().date()
+                delivery_date = timezone.now().created_at()
                 min_date = min_date or delivery_date
                 max_date = max_date or delivery_date
                 min_date = min(min_date, delivery_date)
@@ -384,6 +385,38 @@ class Order(models.Model):
         vendor_delivery_fee = self.calculate_vendor_delivery_fee(vendor)
         return vendor_total + vendor_delivery_fee.total
 
+    # def get_shipments(self):
+    #     return self.shipments.all().prefetch_related('tracking_events', 'items__product')
+
+    # def get_overall_status(self):
+    #     shipments = self.shipments.all()
+    #     if not shipments:
+    #         return "Pending"
+    #     if all(s.status == 'delivered' for s in shipments):
+    #         return "Delivered"
+    #     if any(s.status == 'delivered' for s in shipments):
+    #         return "Partially Delivered"
+    #     if any(s.status in ['in_transit', 'out_for_delivery'] for s in shipments):
+    #         return "Shipped"
+    #     return "Processing"
+
+    # def get_tracking_summary(self):
+    #     return [
+    #         {
+    #             'shipment_id': s.shipment_id,
+    #             'vendor': s.vendor.name,
+    #             'carrier': s.carrier,
+    #             'tracking_number': s.tracking_number,
+    #             'tracking_url': s.tracking_url,
+    #             'status': s.get_status_display(),
+    #             'estimated_delivery': s.estimated_delivery_date,
+    #             'progress': s.progress_percentage,
+    #             'latest_event': s.latest_event.description if s.latest_event else None,
+    #             'items': [op.product.title for op in s.items.all()]
+    #         }
+    #         for s in self.shipments.all()
+    #     ]
+
 class OrderProduct(models.Model):
     order = models.ForeignKey(Order, related_name='order_products', on_delete=models.CASCADE)
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
@@ -391,6 +424,7 @@ class OrderProduct(models.Model):
     quantity = models.PositiveIntegerField()
     price = models.DecimalField(max_digits=10, decimal_places=2)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
+    tracking_number = models.CharField(max_length=100, null=True, blank=True, editable=False)
     status = models.CharField(max_length=20, choices=[
         ('pending', 'Pending'),
         ('processing', 'Processing'),
@@ -408,7 +442,6 @@ class OrderProduct(models.Model):
     )
     shipped_date = models.DateTimeField(null=True, blank=True)
     delivered_date = models.DateTimeField(null=True, blank=True)
-    tracking_number = models.CharField(max_length=100, null=True, blank=True)
     refund_reason = models.CharField(max_length=200, null=True, blank=True)
 
     date_created = models.DateTimeField(auto_now_add=True)
@@ -463,3 +496,111 @@ class Refund(models.Model):
     amount = models.FloatField()
     reason = models.TextField()
     date = models.DateTimeField(auto_now_add=True)
+
+from django.utils import timezone
+import uuid
+
+class Shipment(models.Model):
+    """
+    One shipment = All items from one vendor going to one address
+    This is what gets a tracking number and carrier
+    """
+    shipment_id = models.CharField(max_length=50, unique=True, editable=False)
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='shipments')
+    vendor = models.ForeignKey(Vendor, on_delete=models.CASCADE)
+    
+    # Which OrderProducts are in this shipment
+    items = models.ManyToManyField('OrderProduct', related_name='shipments')
+
+    # Carrier & Tracking
+    carrier = models.CharField(max_length=100, blank=True)  # e.g., "DHL", "FedEx", "Aramex"
+    carrier_code = models.CharField(max_length=20, blank=True)  # for API: "dhl", "fedex"
+    tracking_number = models.CharField(max_length=100, blank=True, null=True)
+    tracking_url = models.URLField(blank=True, null=True)
+
+    # Status (mirrors carrier status when synced)
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('label_created', 'Label Created'),
+        ('in_transit', 'In Transit'),
+        ('out_for_delivery', 'Out for Delivery'),
+        ('delivered', 'Delivered'),
+        ('failed', 'Delivery Failed'),
+        ('canceled', 'Canceled'),
+        ('returned', 'Returned'),
+    ]
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+
+    # Dates
+    shipped_at = models.DateTimeField(null=True, blank=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    estimated_delivery_date = models.DateField(null=True, blank=True)
+
+    # International?
+    is_international = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        if not self.shipment_id:
+            self.shipment_id = f"SH-{uuid.uuid4().hex[:10].upper()}"
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.shipment_id} - {self.vendor} - {self.tracking_number or 'No tracking'}"
+
+    @property
+    def latest_event(self):
+        return self.tracking_events.order_by('-event_date').first()
+
+    @property
+    def progress_percentage(self):
+        # Simple progress estimation
+        events = self.tracking_events.order_by('event_date')
+        total = len(events)
+        if total == 0:
+            return 0
+        # Very rough: delivered = 100%, in transit = 60%, etc.
+        latest = events.last()
+        mapping = {
+            'delivered': 100,
+            'out_for_delivery': 90,
+            'in_transit': 60,
+            'label_created': 30,
+            'pending': 10,
+        }
+        return mapping.get(latest.status, 20)
+
+
+class TrackingEvent(models.Model):
+    """
+    Real-time events from carrier (via webhook or polling)
+    Like Amazon's timeline
+    """
+    shipment = models.ForeignKey(Shipment, on_delete=models.CASCADE, related_name='tracking_events')
+    
+    STATUS_CHOICES = [
+        ('info', 'Info Received'),
+        ('in_transit', 'In Transit'),
+        ('out_for_delivery', 'Out for Delivery'),
+        ('delivered', 'Delivered'),
+        ('exception', 'Delivery Exception'),
+        ('failed_attempt', 'Failed Delivery Attempt'),
+        ('returned_to_sender', 'Returned to Sender'),
+    ]
+    
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES)
+    description = models.CharField(max_length=500)
+    location = models.CharField(max_length=200, blank=True)
+    city = models.CharField(max_length=100, blank=True)
+    country = models.CharField(max_length=100, blank=True)
+    
+    event_date = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-event_date']
+
+    def __str__(self):
+        return f"{self.get_status_display()} - {self.event_date.strftime('%b %d, %Y %H:%M')}"

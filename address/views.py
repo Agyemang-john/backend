@@ -1,27 +1,18 @@
 from rest_framework import status
-from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from .serializers import *
 from userauths.models import Profile
 from order.service import *
 # User = get_user_model()
-from rest_framework.generics import GenericAPIView
 from django.db.models.deletion import ProtectedError
 from rest_framework.generics import RetrieveUpdateDestroyAPIView
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import NotFound, ValidationError
-from rest_framework.response import Response
-from rest_framework import status
 from django.db import transaction
 from .serializers import AddressSerializer
-from address.models import Address
 import logging
 from rest_framework.generics import GenericAPIView
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from rest_framework import status
-from .serializers import AddressSerializer
 from address.models import Address
 
 logger = logging.getLogger(__name__)

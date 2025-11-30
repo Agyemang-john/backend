@@ -1,10 +1,9 @@
 from django.shortcuts import get_object_or_404
-from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from .models import *
 from order.models import *
 from .serializers import *
-from product.serializers import ProductSerializer, VariantSerializer
+from product.serializers import ProductSerializer
 from django.db.models import Avg, Count
 import random
 import json
@@ -181,7 +180,6 @@ class RecentlyViewedRelatedProductsAPIView(APIView):
             return Response(serializer.data)
 
         except Exception as e:
-            print("Error parsing cookie or accessing product:", e)
             return Response([], status=status.HTTP_200_OK)
 
 

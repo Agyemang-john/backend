@@ -4,25 +4,63 @@ from userauths.tokens import CustomVendorRefreshToken
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from djoser.social.views import ProviderAuthView
 from rest_framework_simplejwt.views import (
     TokenObtainPairView,
     TokenRefreshView,
     TokenVerifyView
 )
-from .serializers import CustomTokenObtainPairSerializer, CustomTokenRefreshSerializer, otp_token_generator
+from .serializers import CustomTokenObtainPairSerializer, otp_token_generator
 from django.contrib.auth import get_user_model
-from .custom_throttles import LoginThrottle, AnonLoginThrottle, CheckoutThrottle, PasswordResetThrottle
+from .custom_throttles import LoginThrottle
 from rest_framework.permissions import AllowAny
 from .tasks import send_otp
 from .vendor_serializers import VendorLoginSerializer
 from django.core.cache import cache
-from django.conf import settings
 from django.db.models import Q
 User = get_user_model()
 import time
+from rest_framework import generics
+from userauths.serializers import RegisterSerializer
+from django.utils.http import urlsafe_base64_decode
+from django.contrib.auth.tokens import default_token_generator
+
+class RegisterView(generics.CreateAPIView):
+    serializer_class = RegisterSerializer
+    queryset = User.objects.all()
+    permission_classes = [AllowAny]
+
+
+class ActivateEmailView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        uidb64 = request.data.get('uid')
+        token = request.data.get('token')
+        try:
+            uid = urlsafe_base64_decode(uidb64).decode()
+            user = User.objects.get(pk=uid)
+        except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+            return Response({
+                "success": False,
+                "message": "Invalid activation link."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if not default_token_generator.check_token(user, token):
+            return Response({
+                "success": False,
+                "message": "Activation link is invalid or expired."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user.is_active = True
+        user.save()
+
+        return Response({
+            "success": True,
+            "message": "Email verified successfully. You can now log in."
+        }, status=status.HTTP_200_OK)
 
 # customers login
+
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
     permission_classes = [AllowAny]  # allow guests to login
@@ -63,34 +101,29 @@ class CustomTokenObtainPairView(TokenObtainPairView):
 
         return response
 
+from .serializers import CustomerCustomTokenRefreshSerializer
 class CustomTokenRefreshView(TokenRefreshView):
-    serializer_class = CustomTokenRefreshSerializer
+    serializer_class = CustomerCustomTokenRefreshSerializer
     permission_classes = [AllowAny]
-    # throttle_scope = "auth_refresh"
 
     def post(self, request, *args, **kwargs):
-        refresh_token = request.COOKIES.get("refresh")
-        if refresh_token:
-            request.data["refresh"] = refresh_token
-
         response = super().post(request, *args, **kwargs)
 
         if response.status_code == 200:
             access_token = response.data.get("access")
 
+            # Set new access cookie
             response.set_cookie(
-                "access",
-                access_token,
+                "access", access_token,
                 max_age=settings.AUTH_ACCESS_MAX_AGE,
                 path=settings.AUTH_COOKIE_PATH,
                 secure=settings.AUTH_COOKIE_SECURE,
-                httponly=settings.AUTH_COOKIE_HTTP_ONLY,
+                httponly=True,
                 samesite=settings.AUTH_COOKIE_SAMESITE,
                 domain=settings.AUTH_COOKIE_DOMAIN,
             )
-
             if request.headers.get("X-SSR-Refresh") != "true":
-                del response.data["access"]
+                response.data = {}
 
         return response
     

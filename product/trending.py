@@ -2,7 +2,6 @@
 
 from django.utils import timezone
 from datetime import timedelta
-from .models import Product
 from order.models import CartItem, OrderProduct
 
 def calculate_trending_score(product):

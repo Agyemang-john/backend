@@ -1,4 +1,4 @@
-from django.urls import path, re_path
+from django.urls import path
 from .views import (
     CustomTokenObtainPairView,
     CustomTokenRefreshView,
@@ -11,10 +11,15 @@ from .views import (
     VendorOTPResendView,
     VendorLogoutView,
     VendorTokenVerifyView,
+    RegisterView,
+    ActivateEmailView,
 )
 
 
 urlpatterns = [
+    path("register/", RegisterView.as_view(), name="register"),
+    path('activate/', ActivateEmailView.as_view(), name='activate'),
+
     path('jwt/create/', CustomTokenObtainPairView.as_view()),
     path('jwt/refresh/', CustomTokenRefreshView.as_view()),
     path('jwt/verify/', CustomTokenVerifyView.as_view()),

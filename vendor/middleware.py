@@ -1,8 +1,6 @@
 from django.shortcuts import redirect
 from django.utils.deprecation import MiddlewareMixin
 from .models import Vendor
-from django.contrib.auth.decorators import login_required, user_passes_test
-from userauths.utils import is_vendor
 
 
 # @user_passes_test(is_vendor)

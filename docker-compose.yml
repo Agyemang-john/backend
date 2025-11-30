@@ -6,7 +6,13 @@ services:
     image: ecommerce_app:latest
 
     entrypoint: /entrypoint.sh
-    command: gunicorn ecommerce.wsgi:application --bind 0.0.0.0:8000 --workers 3 --threads 3 --worker-class gthread --timeout 120 --max-requests 1000 --max-requests-jitter 50
+    # command: gunicorn ecommerce.wsgi:application --bind 0.0.0.0:8000 --workers 3 --threads 3 --worker-class gthread --timeout 120 --max-requests 1000 --max-requests-jitter 50
+    command: gunicorn ecommerce.asgi:application --bind 0.0.0.0:8000 \
+             --worker-class uvicorn.workers.UvicornWorker \
+             --workers 4 \
+             --timeout 120 \
+             --max-requests 1000 \
+             --max-requests-jitter 50
     environment:
       - DJANGO_SETTINGS_MODULE=ecommerce.settings
       - DJANGO_ENV=production
@@ -70,15 +76,17 @@ services:
       - app-network
 
   redis:
-    image: redis:7
+    image: redis:7-alpine
     command:
       - redis-server
       - --appendonly
       - "yes"
       - --appendfsync
       - everysec
-    ports:
-      - "6379:6379"
+      - --requirepass
+      - ${REDIS_PASSWORD:-}
+    env_file:
+      - .env
     restart: always
     volumes:
       - redis_data:/data

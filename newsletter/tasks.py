@@ -1,10 +1,13 @@
 # apps/newsletters/tasks.py
 from celery import shared_task
-from django.db.models import Q
 from django.utils import timezone
 from django.template import Template, Context
 from django.core.mail import EmailMultiAlternatives
 from django.conf import settings
+from django.template.loader import render_to_string
+from django.utils.html import strip_tags
+import logging
+logger = logging.getLogger(__name__)
 
 from .models import Campaign, CampaignRecipient, Subscriber
 
@@ -110,3 +113,47 @@ def finalize_campaign(campaign_id: int):
         campaign.status = "sent"
         campaign.finished_at = timezone.now()
         campaign.save(update_fields=["status","finished_at"])
+
+
+@shared_task(bind=True, max_retries=5, default_retry_delay=300)  # 5 min retry
+def send_subscription_confirmation_email(self, subscriber_id: int, token: str = None):
+    """
+    Sends double opt-in confirmation email.
+    Uses subscriber_id instead of email+token to avoid token leakage in logs.
+    """
+    from .models import Subscriber  # import here to avoid AppRegistryNotReady
+
+    try:
+        subscriber = Subscriber.objects.get(id=subscriber_id, is_active=False)
+
+        confirm_url = f"{settings.SITE_URL}/newsletter/confirm/{token}/"
+
+        context = {
+            "first_name": subscriber.first_name if subscriber.first_name else "there",
+            "confirm_url": confirm_url,
+        }
+
+        html_content = render_to_string("email/newsletter_confirmation.html", context)
+        text_content = strip_tags(html_content)  # fallback for email clients
+
+        msg = EmailMultiAlternatives(
+            subject="Confirm your subscription to Our Store",
+            body=text_content,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to=[subscriber.email],
+            headers={
+                "List-Unsubscribe": f"<{confirm_url}>, <mailto:unsubscribe@negromart>",
+                "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+                "X-Entity-ID": f"sub-{subscriber.id}",
+            },
+        )
+        msg.attach_alternative(html_content, "text/html")
+        msg.send()
+
+        logger.info(f"Confirmation email sent to {subscriber.email}")
+    except Subscriber.DoesNotExist:
+        logger.warning(f"Subscriber {subscriber_id} not found or already active")
+    except Exception as exc:
+        logger.error(f"Failed to send confirmation email to subscriber {subscriber_id}: {exc}")
+        # Exponential backoff retry
+        raise self.retry(exc=exc)
