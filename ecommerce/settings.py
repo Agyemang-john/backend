@@ -234,9 +234,9 @@ REST_FRAMEWORK = {
         # Browsing (guests)
         "anon": "4000/day",     # enough for product browsing/search
         # Browsing (logged-in)
-        "user": "588000/day",     # generous since users are trusted
-        "auth_refresh": "60/min",
-        "auth_verify": "200/min",
+        "user": "100000/day",     # generous since users are trusted
+        "auth_refresh": "30/min",
+        "auth_verify": "100/min",
     },
 }
 
@@ -388,6 +388,7 @@ CSRF_TRUSTED_ORIGINS = [
     "https://negromart.com",      # frontend domain
     "https://www.negromart.com",
     "https://seller.negromart.com",
+    "https://corporate.negromart.com",
     "http://localhost:3000",
     "https://api.negromart.com",
 ]
@@ -399,6 +400,7 @@ CORS_ALLOWED_ORIGINS = [
     "https://negromart.com",
     "https://www.negromart.com",
     "https://seller.negromart.com",
+    "https://corporate.negromart.com",
     "https://frontend-sigma-khaki-70.vercel.app",  # Next.js frontend URL
     "https://negromart-space.sfo3.cdn.digitaloceanspaces.com",
     "https://negromart-space.sfo3.digitaloceanspaces.com",
