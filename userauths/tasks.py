@@ -76,15 +76,9 @@ def send_activation_email_task(self, user_data, activation_link):
     """
 
     try:
-        # Using send_mail with html_message parameter
-        send_mail(
-            subject=subject,
-            message=text_content,
-            from_email=from_email,
-            recipient_list=[to_email],
-            fail_silently=False,
-            html_message=html_content,
-        )
+        msg = EmailMultiAlternatives(subject, text_content, from_email, [to_email])
+        msg.attach_alternative(html_content, "text/html")
+        msg.send(fail_silently=False)
     except Exception as exc:
         return self.retry(exc=exc)
 
