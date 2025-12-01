@@ -43,22 +43,35 @@
       color: #4f46e5;
     }
     .footer {
-      margin-top: 30px;
+      margin-top: 35px;
+      padding-top: 20px;
+      border-top: 1px solid #e5e5e5;
       font-size: 12px;
       color: #999999;
       text-align: center;
+      line-height: 1.6;
     }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>Hello {{ first_name }},</h1>
+
     <p>Thank you for registering! Please click the button below to activate your account:</p>
+
     <a href="{{ activation_link }}" class="button">Activate Account</a>
-    <p>If the button doesn’t work, you can copy and paste the following link into your browser:</p>
+
+    <p>If the button doesn’t work, you can copy and paste this link into your browser:</p>
+
     <p class="fallback-link">{{ activation_link }}</p>
+
     <div class="footer">
       <p>If you did not register for this account, please ignore this email.</p>
+      <p><strong>Negromart</strong> — Your trusted online marketplace.</p>
+      <p>Website: <a href="https://negromart.com" style="color:#999;">negromart.com</a></p>
+      <p>Support: <a href="mailto:support@negromart.com" style="color:#999;">support@negromart.com</a></p>
+      <p>Accra, Ghana</p>
+      <p>&copy; {% now 'Y' %} Negromart. All rights reserved.</p>
     </div>
   </div>
 </body>
