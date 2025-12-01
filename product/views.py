@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from .models import *
 from order.models import *
 from .serializers import *
-from django.db.models import Avg, Count
+from django.db.models import Avg, Count, Q, Max, Min
 from address.serializers import AddressSerializer
 from django.http import Http404
 from django.core.cache import cache
@@ -18,10 +18,8 @@ from .service import get_fbt_recommendations
 from copy import deepcopy
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import F
-from rest_framework.views import APIView
-from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
-from django.db.models import Avg, Count, Q, Max, Min
+
 from .utils import get_recently_viewed_products
 from .tasks import increment_product_view_count
 
@@ -105,9 +103,7 @@ class SitemapDataAPIView(APIView):
 #         # Return the JSON response
 #         return Response(response_data, status=status.HTTP_200_OK)
 
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from django.shortcuts import get_object_or_404
+
 from .models import Product
 from .serializers import ProductSerializer
 
@@ -256,12 +252,10 @@ class ProductDetailAPIView(APIView):
             recently_viewed = request.session.get('recently_viewed', [])
             recently_viewed = [str(pid) for pid in recently_viewed]
 
-            # Always add to history (even if already there → move to top)
             if product_id_str in recently_viewed:
                 recently_viewed.remove(product_id_str)
             recently_viewed.insert(0, product_id_str)
-            recently_viewed = recently_viewed[:10]  # Keep last 10
-            request.session['recently_viewed'] = recently_viewed
+            request.session['recently_viewed'] = recently_viewed[:10]
 
             # =====================================================
             # 2. PERMANENT VIEW DEDUPLICATION (never cleared by user)

@@ -320,6 +320,7 @@ CHANNEL_LAYERS = {
         },
         "OPTIONS": {
             "require_valid_group_name": True,
+            "require_valid_channel_name": True,
         },
     },
 }
