@@ -23,7 +23,7 @@ COPY . .
 CMD ["gunicorn", "ecommerce.asgi:application", \
      "--bind", "0.0.0.0:8000", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
-     "--workers", "4", \
+     "--workers", "3", \
      "--timeout", "120", \
      "--max-requests", "1000", \
      "--max-requests-jitter", "50"]
