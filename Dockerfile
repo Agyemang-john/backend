@@ -21,4 +21,4 @@ COPY . .
 
 # Start the ASGI server
 # 
-CMD ["daphne", "-b", "0.0.0.0", "-p", "8000", "ecommerce.asgi:application"]
+CMD ["daphne", "-b", "0.0.0.0", "-p", "8000", "ecommerce.asgi:application", "--workers", "2", "--access-log", "-", "--proxy-headers"]
