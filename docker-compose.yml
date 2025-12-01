@@ -4,6 +4,8 @@ services:
       context: .
       dockerfile: Dockerfile
     image: ecommerce_app:latest
+    deploy:
+      replicas: 4
     environment:
       - DJANGO_SETTINGS_MODULE=ecommerce.settings
       - DJANGO_ENV=production
@@ -71,6 +73,18 @@ services:
     restart: always
     volumes:
       - redis_data:/data
+  migrate:
+    image: ecommerce_app:latest
+    command: >
+      sh -c "
+        python manage.py migrate &&
+        python manage.py collectstatic --noinput
+      "
+    env_file:
+      - .env
+    depends_on:
+      - web
+    restart: "no"
 
 volumes:
   redis_data:
