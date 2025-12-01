@@ -300,6 +300,9 @@ SESSION_SAVE_EVERY_REQUEST = True
 SESSION_EXPIRE_AT_BROWSER_CLOSE = False
 SESSION_COOKIE_SAMESITE = 'Lax' if DEBUG else 'None'
 SESSION_COOKIE_SECURE = False if DEBUG else True
+SESSION_COOKIE_NAME = "sessionid"
+SESSION_COOKIE_HTTPONLY = False
+SESSION_COOKIE_DOMAIN = ".negromart.com" if not DEBUG else None
 
 # Sessions in Redis (fast + shared between workers)
 SESSION_ENGINE = "django.contrib.sessions.backends.cache"
