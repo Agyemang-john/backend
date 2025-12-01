@@ -67,7 +67,6 @@ def send_activation_email_safe(user):
         "email": user.email,
     }
 
-    # Try sending email asynchronously (safe)
     try:
         send_activation_email_task.delay(user_data, activation_link)
     except:
