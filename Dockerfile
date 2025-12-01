@@ -21,4 +21,5 @@ COPY . .
 
 # Start the ASGI server
 # 
-CMD ["daphne", "-b", "0.0.0.0", "-p", "8000", "ecommerce.asgi:application", "--access-log", "-", "--proxy-headers"]
+# CMD ["daphne", "-b", "0.0.0.0", "-p", "8000", "ecommerce.asgi:application", "--access-log", "-", "--proxy-headers"]
+CMD ["gunicorn", "ecommerce.asgi:application", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--workers", "3", "--timeout", "300"]
