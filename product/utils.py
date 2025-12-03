@@ -2,6 +2,7 @@
 
 from django.contrib.gis.geoip2 import GeoIP2
 from django.db.models import Case, When
+from functools import lru_cache
 
 def get_region_with_geoip(ip):
     try:
@@ -25,25 +26,39 @@ def calculate_packaging_fee(weight, volume):
     packaging_fee = weight_fee + volume_fee
     return packaging_fee
 
+@lru_cache(maxsize=128)
+def _preserve_order(ids):
+    """Cache the Case/When objects – huge speedup!"""
+    return Case(*[When(pk=pk, then=pos) for pos, pk in enumerate(ids)])
+
 def get_recently_viewed_products(request, limit=10):
     from product.models import Product
     raw_ids = request.session.get('recently_viewed', [])[:limit]
     if not raw_ids:
         return Product.objects.none()
 
-    # Safely convert to integers
-    ids = []
-    for pid in raw_ids:
-        try:
-            ids.append(int(pid))
-        except (ValueError, TypeError):
-            continue
+    # Convert once and safely
+    try:
+        ids = [int(pid) for pid in raw_ids if str(pid).isdigit()]
+    except (ValueError, TypeError):
+        ids = []
 
     if not ids:
         return Product.objects.none()
 
-    # Preserve exact order from session
-    preserved_order = Case(*[When(pk=pk, then=pos) for pos, pk in enumerate(ids)])
+    # This is now cached per unique list of IDs!
+    order = _preserve_order(tuple(ids))  # tuple for hashability
 
-    return Product.published.filter(pk__in=ids).order_by(preserved_order)
+    return Product.published.filter(pk__in=ids).order_by(order)
+
+def update_recently_viewed(session, product_id, limit=10):
+    pid = str(product_id)
+    viewed = session.get('recently_viewed', [])
+    
+    if pid in viewed:
+        viewed.remove(pid)        # O(n) but n ≤ 10 → negligible
+    viewed.insert(0, pid)
+    
+    session['recently_viewed'] = viewed[:limit]
+    session.modified = True
 

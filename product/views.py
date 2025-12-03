@@ -20,7 +20,7 @@ from rest_framework.permissions import IsAuthenticated
 from django.db.models import F
 from rest_framework.pagination import PageNumberPagination
 
-from .utils import get_recently_viewed_products
+from .utils import get_recently_viewed_products, update_recently_viewed
 from .tasks import increment_product_view_count
 
 class AddProductReviewView(APIView):
@@ -162,7 +162,7 @@ def get_cached_product_data(sku: str, slug: str, request):
     if cached:
         # Still return fresh product instance for view count logic
         product = Product.objects.only('id').get(sku=sku, slug=slug)
-        return deepcopy(cached), product
+        return cached, product
 
     # Main product with optimized prefetching
     product = get_object_or_404(
@@ -201,9 +201,8 @@ def get_cached_product_data(sku: str, slug: str, request):
         shared_data['product'].pop(field, None)
 
     # Cache for 30 minutes
-    cache.set(cache_key, shared_data, timeout=60 * 30)
-    return deepcopy(shared_data), product
-
+    cache.set(cache_key, shared_data, timeout=60 * 60)
+    return shared_data, product
 
 def convert_currency(product_data: dict, currency: str) -> dict:
     """
@@ -248,18 +247,9 @@ class ProductDetailAPIView(APIView):
             except Http404:
                 return Response({"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
             
+            update_recently_viewed(request.session, product.id)
+
             product_id_str = str(product.id)
-            recently_viewed = request.session.get('recently_viewed', [])
-            recently_viewed = [str(pid) for pid in recently_viewed]
-
-            if product_id_str in recently_viewed:
-                recently_viewed.remove(product_id_str)
-            recently_viewed.insert(0, product_id_str)
-            request.session['recently_viewed'] = recently_viewed[:10]
-
-            # =====================================================
-            # 2. PERMANENT VIEW DEDUPLICATION (never cleared by user)
-            # =====================================================
             viewed_for_count = request.session.get('viewed_for_count', set())
             if product_id_str not in viewed_for_count:
                 # First real view → mark it and increment ASYNC
@@ -845,18 +835,26 @@ class ProductSearchAPIView(APIView):
 
 class RecentlyViewedProducts(APIView):
     def get(self, request):
+        cache_key = f"recently_viewed_api:{request.session.session_key or 'anon'}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
+
         products = get_recently_viewed_products(request, limit=10)
 
-        # Optional: If you want to return empty list instead of 404
-        if not products.exists():
-            return Response([], status=status.HTTP_200_OK)
+        if not products:
+            data = []
+        else:
+            serializer = ProductSerializer(  # ← Use a LIGHT serializer!
+                products,
+                many=True,
+                context={'request': request}
+            )
+            data = serializer.data
 
-        serializer = ProductSerializer(
-            products,
-            many=True,
-            context={'request': request}
-        )
-        return Response(serializer.data)
+        # Cache for 5–15 minutes (user won't notice)
+        cache.set(cache_key, data, timeout=60 * 5)
+        return Response(data)
 
 class ClearRecentlyViewed(APIView):
     http_method_names = ['post']

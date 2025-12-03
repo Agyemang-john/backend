@@ -32,7 +32,7 @@ class HomeSliderView(APIView):
             sliders = HomeSlider.objects.all()
             # Cache the queryset as serialized JSON to avoid pickling issues
             cached_data = json.loads(serialize('json', sliders))
-            cache.set(cache_key, cached_data, timeout=60 * 30)  # Cache for 30 minutes
+            cache.set(cache_key, cached_data, timeout=60 * 60)  # Cache for 60 minutes
         
         # Convert cached JSON back to queryset-like structure for serialization
         sliders = HomeSlider.objects.filter(pk__in=[item['pk'] for item in cached_data])
@@ -52,7 +52,7 @@ class BannersView(APIView):
             banners = Banners.objects.all()
             serializer = BannersSerializer(banners, many=True, context={'request': request})
             cached_data = serializer.data
-            cache.set(cache_key, cached_data, timeout=60 * 30)  # Cache for 15 minutes
+            cache.set(cache_key, cached_data, timeout=60 * 60)  # Cache for 60 minutes
         
         return Response(cached_data, status=status.HTTP_200_OK)
 
