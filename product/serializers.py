@@ -185,6 +185,45 @@ class ProductSerializer(serializers.ModelSerializer):
 
         exchange_rate = Decimal(str(rates.get(currency, 1)))# Default to 1 if currency not found
         return round(obj.price * exchange_rate, 2)
+    
+class LightProductSerializer(serializers.ModelSerializer):
+    currency = serializers.SerializerMethodField()
+    price = serializers.SerializerMethodField()
+    old_price = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = [
+            "id",
+            "slug",
+            "title",
+            "image",
+            "price",
+            "old_price",         
+            "sku",
+            "currency",
+        ]
+
+    def get_currency(self, obj):
+        request = self.context.get('request')
+        return request.headers.get('X-Currency', 'GHS') if request else 'GHS'
+
+    def get_old_price(self, obj):
+        request = self.context.get('request')
+        currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
+        if currency:
+            rates = get_exchange_rates()
+            exchange_rate = Decimal(str(rates.get(currency, 1)))
+            return round(obj.old_price * exchange_rate, 2)
+        return obj.old_price
+    
+    def get_price(self, obj):
+        request = self.context.get('request')
+        currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
+        rates = get_exchange_rates()  # Make sure this is imported and working
+
+        exchange_rate = Decimal(str(rates.get(currency, 1)))# Default to 1 if currency not found
+        return round(obj.price * exchange_rate, 2)
    
 
 class ProductImageSerializer(serializers.ModelSerializer):

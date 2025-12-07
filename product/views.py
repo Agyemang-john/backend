@@ -14,8 +14,6 @@ from rest_framework.views import APIView
 from decimal import Decimal
 from order.service import *
 from .service import get_fbt_recommendations
-# from .shipping import can_product_ship_to_user
-from copy import deepcopy
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import F
 from rest_framework.pagination import PageNumberPagination
@@ -252,7 +250,6 @@ class ProductDetailAPIView(APIView):
             product_id_str = str(product.id)
             viewed_for_count = request.session.get('viewed_for_count', set())
             if product_id_str not in viewed_for_count:
-                # First real view → mark it and increment ASYNC
                 viewed_for_count.add(product_id_str)
                 request.session['viewed_for_count'] = viewed_for_count
                 increment_product_view_count.delay(product.id)
@@ -835,25 +832,16 @@ class ProductSearchAPIView(APIView):
 
 class RecentlyViewedProducts(APIView):
     def get(self, request):
-        cache_key = f"recently_viewed_api:{request.session.session_key or 'anon'}"
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return Response(cached)
-
         products = get_recently_viewed_products(request, limit=10)
-
         if not products:
             data = []
         else:
-            serializer = ProductSerializer(  # ← Use a LIGHT serializer!
+            serializer = LightProductSerializer(  # ← Use a LIGHT serializer!
                 products,
                 many=True,
                 context={'request': request}
             )
             data = serializer.data
-
-        # Cache for 5–15 minutes (user won't notice)
-        cache.set(cache_key, data, timeout=60 * 5)
         return Response(data)
 
 class ClearRecentlyViewed(APIView):
