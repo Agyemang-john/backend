@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
     image: ecommerce_app:latest
     deploy:
-      replicas: 4
+      replicas: 2
     environment:
       - DJANGO_SETTINGS_MODULE=ecommerce.settings
       - DJANGO_ENV=production
@@ -14,6 +14,7 @@ services:
     env_file:
       - .env
     depends_on:
+      - migrate
       - redis
     restart: always
 
@@ -46,6 +47,7 @@ services:
     env_file:
       - .env
     depends_on:
+      - migrate
       - redis
     restart: always
 
@@ -55,6 +57,7 @@ services:
     env_file:
       - .env
     depends_on:
+      - migrate
       - redis
     restart: always
 
@@ -77,15 +80,16 @@ services:
     image: ecommerce_app:latest
     command: >
       sh -c "
-        python manage.py migrate &&
+        echo 'Running DB checks...' &&
+        python manage.py check --database default &&
+        echo 'Running migrations...' &&
+        python manage.py migrate --noinput &&
+        echo 'Collecting static files...' &&
         python manage.py collectstatic --noinput
       "
     env_file:
       - .env
-    depends_on:
-      - web
     restart: "no"
-
 volumes:
   redis_data:
   certbot-var:

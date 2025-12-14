@@ -109,7 +109,7 @@ else:
     DATABASES = {
         'default': dj_database_url.parse(
             config('DATABASE_URL'),
-            conn_max_age=0,
+            conn_max_age=600,
             ssl_require=True,
             conn_health_checks=True,
         )
@@ -167,7 +167,7 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 if ENV == 'production':
     AWS_ACCESS_KEY_ID = config("AWS_ACCESS_KEY_ID")
     AWS_SECRET_ACCESS_KEY = config("AWS_SECRET_ACCESS_KEY")
-    AWS_STORAGE_BUCKET_NAME = "negromart-storage"
+    AWS_STORAGE_BUCKET_NAME = "negromart-spaces"
     AWS_S3_REGION_NAME = "nyc3"
     AWS_S3_ENDPOINT_URL = f"https://{AWS_S3_REGION_NAME}.digitaloceanspaces.com"
     AWS_S3_CUSTOM_DOMAIN = f"{AWS_STORAGE_BUCKET_NAME}.{AWS_S3_REGION_NAME}.cdn.digitaloceanspaces.com"
@@ -408,6 +408,7 @@ CORS_ALLOWED_ORIGINS = [
     "https://frontend-sigma-khaki-70.vercel.app",  # Next.js frontend URL
     "https://negromart-space.sfo3.cdn.digitaloceanspaces.com",
     "https://negromart-space.sfo3.digitaloceanspaces.com",
+    "exp://192.168.1.100:19000",
 ]
 
 

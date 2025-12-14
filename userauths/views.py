@@ -23,10 +23,10 @@ from rest_framework import generics
 from userauths.serializers import RegisterSerializer
 from django.utils.http import urlsafe_base64_decode
 from django.contrib.auth.tokens import default_token_generator
+from django.utils import timezone
 
 class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
-    queryset = User.objects.all()
     permission_classes = [AllowAny]
 
 
@@ -42,7 +42,13 @@ class ActivateEmailView(APIView):
         except (TypeError, ValueError, OverflowError, User.DoesNotExist):
             return Response({
                 "success": False,
-                "message": "Invalid activation link."
+                "message": "Activation link is invalid or expired."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if user.is_active:
+            return Response({
+                "success": False,
+                "message": "Account is already activated."
             }, status=status.HTTP_400_BAD_REQUEST)
 
         if not default_token_generator.check_token(user, token):
@@ -53,13 +59,10 @@ class ActivateEmailView(APIView):
 
         user.is_active = True
         user.save()
-
         return Response({
             "success": True,
             "message": "Email verified successfully. You can now log in."
         }, status=status.HTTP_200_OK)
-
-# customers login
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer

@@ -1,6 +1,7 @@
 from django.contrib import admin
 from userauths.models import MailMessage, User, ContactUs, Profile, SubscribedUsers
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
+from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
 
 
 from django.utils.translation import gettext_lazy as _

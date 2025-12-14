@@ -39,6 +39,8 @@ class UserManager(BaseUserManager):
         return user
 
     def create_superuser(self, first_name, last_name, email, phone, password=None):
+        if not password:
+            raise ValueError("Superuser must have a password")
         user = self.create_user(
             email=self.normalize_email(email),
             phone=phone,
@@ -85,6 +87,12 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return self.email
+    
+    class Meta:
+        indexes = [
+            models.Index(fields=['email']),
+            models.Index(fields=['phone']),
+        ]
 
     
     def tokens(self):
