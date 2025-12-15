@@ -41,8 +41,8 @@ class CartManager(models.Manager):
     
     def get_or_create_for_request(self, request):
         if request.user.is_authenticated:
-            cart, created = self.get_or_create(user=request.user)
-            cart = cart.prefetch_related('cart_items__product', 'cart_items__variant')
+            cart_qs = self.prefetch_related('cart_items__product', 'cart_items__variant')
+            cart, created = cart_qs.get_or_create(user=request.user)
             return cart
         return None
 
