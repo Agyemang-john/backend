@@ -35,7 +35,7 @@ def calculate_packaging_fee(weight, volume):
 
 
 def get_authenticated_cart_response(request):
-    cart = Cart.objects.prefetch_related('cart_items__product', 'cart_items__variant').get_or_create(user=request.user)
+    cart = Cart.objects.get_or_create_for_request(request)
     currency = request.headers.get('X-Currency', 'GHS')
     exchange_rate = Decimal(str(get_exchange_rates().get(currency, 1)))
 

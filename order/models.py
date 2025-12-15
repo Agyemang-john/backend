@@ -40,9 +40,9 @@ class CartManager(models.Manager):
         return cart
     
     def get_or_create_for_request(self, request):
-        """Get or create a cart for the request."""
         if request.user.is_authenticated:
             cart, created = self.get_or_create(user=request.user)
+            cart = cart.prefetch_related('cart_items__product', 'cart_items__variant')
             return cart
         return None
 
