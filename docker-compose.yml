@@ -41,7 +41,7 @@ services:
 
   celery:
     image: ecommerce_app:latest
-    command: celery -A ecommerce worker --loglevel=info --concurrency=2
+    command: celery -A ecommerce worker --loglevel=info --concurrency=1
     env_file:
       - .env
     depends_on:
