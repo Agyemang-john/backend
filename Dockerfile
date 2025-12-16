@@ -19,6 +19,8 @@ RUN pip install --upgrade pip && \
 # Copy source code
 COPY . .
 
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+
 # 
 # CMD ["daphne", "-b", "0.0.0.0", "-p", "8000", "ecommerce.asgi:application", "--access-log", "-", "--proxy-headers"]
 CMD ["gunicorn", "ecommerce.asgi:application", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--workers", "2", "--timeout", "300"]
