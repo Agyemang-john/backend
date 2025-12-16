@@ -75,6 +75,10 @@ class HomeSlider(models.Model):
 
     class Meta:
         ordering = ['order']
+        indexes = [
+            models.Index(fields=["is_active"]),
+            models.Index(fields=["order"]),
+        ]
 
     def slider_image(self):
         return mark_safe('<img src="%s" width="50" height="50" />' % (self.image_desktop.url))
@@ -96,18 +100,26 @@ class Banners(models.Model):
         ('Featured', 'Featured'),
         ('Custom', 'Custom'),
     ]
-    image = models.ImageField(upload_to='banners', blank=True, null=True)
+    title = models.CharField(max_length=100, unique=True, default="Food")
+    image = models.ImageField(upload_to='banners/', blank=True, null=True)
     deal_type = models.CharField(max_length=20, choices=DEAL_TYPES, default='custom')
     link = models.CharField(max_length=200)
-    title = models.CharField(max_length=100, unique=True, default="Food")
+
+    is_active = models.BooleanField(default=True)
+    order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ['order']
+        indexes = [
+            models.Index(fields=['is_active']),
+            models.Index(fields=['order']),
+        ]
 
     def banner_image(self):
         return mark_safe('<img src="%s" width="50" height="50" />' % (self.image.url))
 
-
     def __str__(self):
         return self.title
-
 ############################################################
 ####################### IMAGE MODEL ##################
 ############################################################

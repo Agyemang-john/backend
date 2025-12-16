@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     image: ecommerce_app:latest
+    entrypoint: /app/entrypoint.sh
     environment:
       - DJANGO_SETTINGS_MODULE=ecommerce.settings
       - DJANGO_ENV=production

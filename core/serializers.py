@@ -195,7 +195,7 @@ class ProductReviewSerializer(serializers.ModelSerializer):
 
 
 class HomeSliderSerializer(serializers.ModelSerializer):
-    price = serializers.SerializerMethodField()
+    price = serializers.DecimalField(max_digits=10, decimal_places=2)
     currency = serializers.SerializerMethodField()
 
     class Meta:
@@ -204,8 +204,8 @@ class HomeSliderSerializer(serializers.ModelSerializer):
             'id',
             'title',
             'deal_type',
-            'price',         # Converted price
-            'currency',      # Added currency
+            'price',          # BASE price (GHS)
+            'currency',       # injected later
             'price_prefix',
             'link_url',
             'image_mobile',
@@ -215,17 +215,8 @@ class HomeSliderSerializer(serializers.ModelSerializer):
         ]
 
     def get_currency(self, obj):
-        request = self.context.get('request')
-        return request.headers.get('X-Currency', 'GHS') if request else 'GHS'
-
-    def get_price(self, obj):
-        request = self.context.get('request')
-        currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
-        rates = get_exchange_rates()
-
-        exchange_rate = Decimal(str(rates.get(currency, 1)))  # Safely convert float to Decimal
-        return round(obj.price * exchange_rate, 2)
-
+        # Static serializer does not compute currency
+        return None
 
 class BannersSerializer(serializers.ModelSerializer):
     class Meta:

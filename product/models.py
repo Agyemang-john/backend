@@ -307,8 +307,14 @@ class Product(models.Model):
 
     class Meta:
         ordering = ('-date',)
-        verbose_name_plural = "products"
         indexes = [
+            models.Index(fields=["status"]),
+            models.Index(fields=["product_type"]),
+            models.Index(fields=["views"]),
+            models.Index(fields=["date"]),
+            models.Index(fields=["vendor"]),
+            models.Index(fields=["sub_category"]),
+            models.Index(fields=["brand"]),
             GinIndex(fields=["search_vector"]),
         ]
 

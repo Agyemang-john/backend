@@ -5,8 +5,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ecommerce_app:latest
-    command: daphne -b 0.0.0.0 -p 8000 ecommerce.asgi:application
+    image: ecommerce_app:dev
+    entrypoint: /app/entrypoint.dev.sh
     environment:
       - DJANGO_SETTINGS_MODULE=ecommerce.settings
     volumes:
@@ -21,11 +21,10 @@ services:
     restart: always
 
   celery:
-    image: ecommerce_app:latest
+    image: ecommerce_app:dev
     command: celery -A ecommerce worker --loglevel=info
     env_file:
       - .env
-    restart: always
     environment:
       - DJANGO_SETTINGS_MODULE=ecommerce.settings
       - SENDGRID_API_KEY=${SENDGRID_API_KEY}
@@ -34,11 +33,11 @@ services:
     depends_on:
       - redis
       - postgres
+    restart: always
 
   celery-beat:
-    image: ecommerce_app:latest
+    image: ecommerce_app:dev
     command: celery -A ecommerce beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
-    restart: always
     env_file:
       - .env
     volumes:
@@ -46,6 +45,7 @@ services:
     depends_on:
       - redis
       - postgres
+    restart: always
 
   redis:
     image: redis:7-alpine
@@ -62,7 +62,6 @@ services:
     restart: always
     volumes:
       - redis_data:/data
-
 
   postgres:
     image: postgres:17

@@ -19,26 +19,46 @@ from django.core.serializers import serialize
 
 
 class HomeSliderView(APIView):
-    """
-    API View to retrieve all sliders with caching for static fields
-    """
+
     def get(self, request):
-        # Include currency in cache key to support different currencies
+        cache_key = 'home_sliders_static_v1'
+
+        static_data = cache.get(cache_key)
+        if static_data is None:
+            sliders = (
+                HomeSlider.objects
+                .filter(is_active=True)
+                .only(
+                    'id', 'title', 'deal_type', 'price',
+                    'price_prefix', 'link_url',
+                    'image_mobile', 'image_desktop',
+                    'order'
+                )
+                .order_by('order')
+            )
+
+            # Serialize WITHOUT request/currency
+            static_data = HomeSliderSerializer(
+                sliders,
+                many=True,
+                context={'static': True}
+            ).data
+
+            cache.set(cache_key, static_data, 60 * 60)  # 1 hour
+
+        # Always fresh currency & rates
         currency = request.headers.get('X-Currency', 'GHS')
-        cache_key = f'home_sliders_{currency}'
-        cached_data = cache.get(cache_key)
-        
-        if cached_data is None:
-            sliders = HomeSlider.objects.all()
-            # Cache the queryset as serialized JSON to avoid pickling issues
-            cached_data = json.loads(serialize('json', sliders))
-            cache.set(cache_key, cached_data, timeout=60 * 60)  # Cache for 60 minutes
-        
-        # Convert cached JSON back to queryset-like structure for serialization
-        sliders = HomeSlider.objects.filter(pk__in=[item['pk'] for item in cached_data])
-        serializer = HomeSliderSerializer(sliders, many=True, context={'request': request})
-        
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        rates = get_exchange_rates()  # fresh or redis-cached
+
+        # Inject dynamic data
+        for item in static_data:
+            base_price = item.get('price')
+            if base_price is not None:
+                exchange_rate = Decimal(str(rates.get(currency, 1)))
+                item['price'] = round(Decimal(base_price) * exchange_rate, 2)
+            item['currency'] = currency
+
+        return Response(static_data, status=status.HTTP_200_OK)
 
 class BannersView(APIView):
     """
