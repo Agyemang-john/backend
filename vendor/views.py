@@ -322,111 +322,62 @@ class VendorSignupAPIView(APIView):
 from .serializers import CachedProductSerializer
 class VendorDetailView(APIView):
     def get(self, request, slug):
-        try:
-            cache_key = f'vendor_detail_cache:{slug}'
-            cached_data = cache.get(cache_key)
+        vendor = get_object_or_404(Vendor, slug=slug)
 
-            if cached_data:
-                shared_data = cached_data
-            else:
-                vendor = Vendor.objects.get(slug=slug)
-                # Fetch published products with rating annotations
-                products = Product.objects.filter(vendor=vendor, status='published').annotate(
-                    average_rating=Avg('reviews__rating'),
-                    review_count=Count('reviews')
-                )
+        cache_key = f"vendor_metadata:{slug}"
+        cached_data = cache.get(cache_key)
 
-                # Build product details for caching
-                products_with_details = []
-                for product in products:
-                    product_variants = Variants.objects.filter(product=product)
-                    product_colors = product_variants.values('color__name', 'color__code', 'id').distinct()
-                    product_data = {
-                        'product': CachedProductSerializer(product, context={'request': request}).data,
-                        'average_rating': product.average_rating or 0,
-                        'review_count': product.review_count or 0,
-                        'variants': VariantsSerializer(product_variants, many=True, context={'request': request}).data,
-                        'colors': list(product_colors),
-                    }
-                    products_with_details.append(product_data)
+        if not cached_data:
+            opening_hours = OpeningHour.objects.filter(vendor=vendor).order_by('day')
+            today = date.today().isoweekday()
+            today_operating_hours = OpeningHour.objects.filter(vendor=vendor, day=today).first()
 
-                # Vendor info, reviews, and opening hours
-                vendor_serializer = VendorDetail(vendor, context={'request': request})
-                reviews = ProductReview.objects.filter(product__in=products, status=True).order_by("-date")
-                opening_hours = OpeningHour.objects.filter(vendor=vendor).order_by('day')
-                today = date.today().isoweekday()
-                today_operating_hours = OpeningHour.objects.filter(vendor=vendor, day=today).first()
+            reviews_qs = ProductReview.objects.filter(vendor=vendor, status=True)
+            avg_rating = reviews_qs.aggregate(avg=Avg('rating'))['avg'] or 0.0
+            review_count = reviews_qs.count()
 
-                shared_data = {
-                    'vendor': vendor_serializer.data,
-                    'products': products_with_details,
-                    'average_rating': reviews.aggregate(Avg('rating'))['rating__avg'],
-                    'opening_hours': OpeningHourSerializer(opening_hours, many=True, context={'request': request}).data,
-                    'reviews': ReviewDetail(reviews, many=True, context={'request': request}).data,
-                    'today_operating_hours': OpeningHourSerializer(today_operating_hours, context={'request': request}).data,
-                    'followers_count': vendor.followers.count(),
-                }
-
-                # Cache shared data for 1 hour
-                cache.set(cache_key, shared_data, timeout=60 * 60)
-
-            # Compute fresh product details with price, old_price, and currency
-            fresh_products = []
-            for cached_product in shared_data['products']:
-                product = Product.objects.get(id=cached_product['product']['id'])
-                from .serializers import ProductSerializer
-
-                fresh_product_data = {
-                    'product': ProductSerializer(product, context={'request': request}).data,
-                    'average_rating': cached_product['average_rating'],
-                    'review_count': cached_product['review_count'],
-                    'variants': cached_product['variants'],
-                    'colors': cached_product['colors'],
-                }
-                fresh_products.append(fresh_product_data)
-
-            vendor = Vendor.objects.get(slug=slug)
-            vendor_id_str = str(vendor.id)
-            viewed_cookie = request.headers.get('X-Recently-Viewed-Vendors')
-            viewed_ids = []
-            if viewed_cookie:
-                try:
-                    viewed_ids = [id.strip() for id in viewed_cookie.split(',') if id.strip()]
-                except (ValueError, AttributeError):
-                    viewed_ids = []  # Invalid format → treat as empty
-            
-            # Check if already viewed (no increment)
-            increment_views = vendor_id_str not in viewed_ids
-            # Increment if new view
-            if increment_views:
-                # Atomic update
-                Vendor.objects.filter(id=vendor.id).update(views=F('views') + 1)
-                # Refresh for latest count
-                vendor.refresh_from_db(fields=['views'])
-                # Optional: Log for monitoring
-            # Build response with fresh is_following
-            response_data = {
-                **shared_data,
-                'products': fresh_products,
-                'is_following': Vendor.objects.filter(slug=slug, followers__id=request.user.id).exists() if request.user.is_authenticated else False,
+            data = {
+                'vendor': VendorDetail(vendor, context={'request': request}).data,
+                'average_rating': round(avg_rating, 2),
+                'review_count': review_count,
+                'opening_hours': OpeningHourSerializer(opening_hours, many=True).data,
+                'today_operating_hours': OpeningHourSerializer(today_operating_hours).data,
             }
+            cache.set(cache_key, data, timeout=60 * 60)
+            cached_data = data
 
-            return Response(response_data, status=status.HTTP_200_OK)
+        # Always get fresh followers count (very cheap query)
+        fresh_followers_count = vendor.followers.count()
 
-        except Vendor.DoesNotExist:
-            return Response({'error': 'Vendor not found'}, status=status.HTTP_404_NOT_FOUND)
+        # View counting
+        self._increment_view_if_needed(request, vendor)
 
-    
+        # Fresh follow status
+        is_following = (
+            vendor.followers.filter(id=request.user.id).exists()
+            if request.user.is_authenticated
+            else False
+        )
+
+        response_data = {
+            **cached_data,
+            'followers_count': fresh_followers_count,  # ← Always fresh!
+            'is_following': is_following,
+            'views': vendor.views,
+        }
+
+        return Response(response_data, status=status.HTTP_200_OK)
+
     def post(self, request, slug):
+        """Toggle follow/unfollow"""
         if not request.user.is_authenticated:
-            return Response({'error': 'Please login to follow this vendor'}, status=status.HTTP_403_FORBIDDEN)
+            return Response(
+                {'error': 'Please login to follow this vendor'},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
-        try:
-            vendor = Vendor.objects.get(slug=slug)
-        except Vendor.DoesNotExist:
-            return Response({'error': 'Vendor not found'}, status=status.HTTP_404_NOT_FOUND)
+        vendor = get_object_or_404(Vendor, slug=slug)
 
-        # Toggle follow/unfollow
         if vendor.followers.filter(id=request.user.id).exists():
             vendor.followers.remove(request.user)
             is_following = False
@@ -434,32 +385,108 @@ class VendorDetailView(APIView):
             vendor.followers.add(request.user)
             is_following = True
 
-        response_data = {
+        return Response({
             'is_following': is_following,
             'followers_count': vendor.followers.count(),
-        }
+        }, status=status.HTTP_200_OK)
 
-        return Response(response_data, status=status.HTTP_200_OK)
+    def _increment_view_if_needed(self, request, vendor):
+        """Increment view count only once per session (via custom header/cookie)"""
+        viewed_cookie = request.headers.get('X-Recently-Viewed-Vendors')
+        viewed_ids = [vid.strip() for vid in (viewed_cookie or '').split(',') if vid.strip()]
 
-class VendorProducts(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+        vendor_id_str = str(vendor.id)
+        if vendor_id_str not in viewed_ids:
+            Vendor.objects.filter(id=vendor.id).update(views=F('views') + 1)
+            vendor.refresh_from_db(fields=['views'])
 
-    def get_vendor(self, request):
-        """Retrieve the vendor associated with the current user, if exists."""
-        return get_object_or_404(Vendor, user=request.user)
-    
-    def get(self, request, *args, **kwargs):
-        vendor = self.get_vendor(request)
-        # Retrieve the product associated with the vendor
-        products = Product.objects.filter(vendor=vendor)      
-        # Serialize each queryset
-        products_serializer = ProductSerializer(products, many=True, context={'request': request})
-        # Combine all serialized data into a single response
-        data = {
-            "products": products_serializer.data,
-        }
+class VendorProductsView(APIView):
 
-        return Response(data)
+    def get(self, request, slug):
+        vendor = get_object_or_404(Vendor, slug=slug)
+
+        cache_key = f"vendor_products:{slug}"
+        products_data = cache.get(cache_key)
+
+        if not products_data:
+            products = Product.objects.filter(
+                vendor=vendor,
+                status='published'
+            ).annotate(
+                average_rating=Avg('reviews__rating'),
+                review_count=Count('reviews')
+            )
+
+            products_data = []
+            for product in products:
+                product_variants = Variants.objects.filter(product=product)
+                product_colors = product_variants.values(
+                    'color__name', 'color__code', 'id'
+                ).distinct()
+
+                products_data.append({
+                    'product': CachedProductSerializer(
+                        product, context={'request': request}
+                    ).data,
+                    'average_rating': product.average_rating or 0,
+                    'review_count': product.review_count or 0,
+                    'variants': VariantsSerializer(
+                        product_variants, many=True, context={'request': request}
+                    ).data,
+                    'colors': list(product_colors),
+                })
+
+            cache.set(cache_key, products_data, timeout=60 * 30)  # 30 minutes
+
+        # Add fresh price data (which may change more frequently)
+        fresh_products = []
+        for item in products_data:
+            product_id = item['product']['id']
+            product = Product.objects.get(id=product_id)
+
+            fresh_products.append({
+                'product': ProductSerializer(product, context={'request': request}).data,
+                'average_rating': item['average_rating'],
+                'review_count': item['review_count'],
+                'variants': item['variants'],
+                'colors': item['colors'],
+            })
+
+        return Response({'products': fresh_products}, status=status.HTTP_200_OK)
+
+
+class VendorReviewsView(APIView):
+    def get(self, request, slug):
+        vendor = get_object_or_404(Vendor, slug=slug)
+
+        cache_key = f"vendor_reviews:{slug}"
+        cached = cache.get(cache_key)
+
+        if not cached:
+            # Get all published products first to scope reviews
+            product_ids = Product.objects.filter(
+                vendor=vendor, status='published'
+            ).values_list('id', flat=True)
+
+            reviews = ProductReview.objects.filter(
+                product__id__in=product_ids,
+                status=True
+            ).order_by('-date')
+
+            serialized_reviews = ReviewDetail(
+                reviews, many=True, context={'request': request}
+            ).data
+
+            overall_avg = reviews.aggregate(Avg('rating'))['rating__avg'] or 0
+
+            cached = {
+                'reviews': serialized_reviews,
+                'average_rating': round(overall_avg, 2),
+                'review_count': reviews.count(),
+            }
+            cache.set(cache_key, cached, timeout=60 * 15)  # 15 minutes
+
+        return Response(cached, status=status.HTTP_200_OK)
     
 class ProductRelatedDataAPIView(APIView):
     permission_classes = [IsAuthenticated, IsVerifiedVendor]

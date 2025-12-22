@@ -2,6 +2,8 @@ from django.urls import path
 from .views import (
     VendorSignupAPIView,
     VendorDetailView,
+    VendorProductsView,
+    VendorReviewsView,
     VendorOrderDetailView,
     UpdateOrderStatusAPIView,
     ProductRelatedDataAPIView,
@@ -29,7 +31,6 @@ urlpatterns = [
     # Vendor Routes
     path('location/autocomplete/', LocationAutocompleteView.as_view(), name='location-autocomplete'),
     path('register/', VendorSignupAPIView.as_view(), name='vendor-register'),
-    path('seller-detail/<slug>/', VendorDetailView.as_view(), name='vendor-detail'),
     path('product-related-data/', ProductRelatedDataAPIView.as_view(), name='product-related-data'),
 
     # Product Routes
@@ -62,6 +63,10 @@ urlpatterns = [
     path('order-status/', OrderStatusView.as_view(), name='order-status'),
     path('engagement/', EngagementView.as_view(), name='engagement'),
     path('delivery-performance/', DeliveryPerformanceView.as_view(), name='delivery-performance'),
+
+    path('seller-detail/<slug:slug>/', VendorDetailView.as_view(), name='vendor-detail'),
+    path('seller-detail/<slug:slug>/products/', VendorProductsView.as_view(), name='vendor-products'),
+    path('seller-detail/<slug:slug>/reviews/', VendorReviewsView.as_view(), name='vendor-reviews'),
 ]
 
 # Note: Removed router.urls since payment-method now uses APIView
