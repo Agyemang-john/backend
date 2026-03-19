@@ -17,14 +17,38 @@ def create_vendor_profile(sender, instance, created, **kwargs):
 
 from payments.models import *
 
-@receiver(post_save, sender=Subscription)
-def update_vendor_subscription(sender, instance, created, **kwargs):
-    if created:
-        vendor = instance.vendor
-        vendor.is_subscribed = True
-        vendor.subscription_end_date = instance.end_date  # Assuming Subscription model has 'end_date' field
-        vendor.save()
+@receiver(post_save, sender=VendorSubscription)
+def sync_vendor_subscription(sender, instance, **kwargs):
+    """
+    Keep Vendor subscription fields in sync with the latest subscription record.
+    Handles active, trial, expired, and cancelled states properly.
+    """
 
+    vendor = instance.vendor
+
+    # Determine if subscription is valid
+    is_active = instance.is_active()
+    is_trial = instance.is_on_trial()
+
+    # Decide overall subscription state
+    vendor.is_subscribed = is_active or is_trial
+
+    # Set appropriate end date
+    if is_active:
+        vendor.subscription_end_date = instance.end_date
+    elif is_trial:
+        vendor.subscription_end_date = instance.trial_end_date
+    else:
+        # Only clear if this is the latest subscription
+        latest = vendor.subscriptions.order_by('-created_at').first()
+        if latest and latest.id == instance.id:
+            vendor.subscription_end_date = None
+            vendor.is_subscribed = False
+
+    # Save only changed fields (efficient)
+    vendor.save(update_fields=["is_subscribed", "subscription_end_date"])
+
+    
 @receiver(post_delete, sender=Variants)
 def delete_variant_image(sender, instance, **kwargs):
     if instance.image:

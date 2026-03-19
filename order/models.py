@@ -604,3 +604,26 @@ class TrackingEvent(models.Model):
 
     def __str__(self):
         return f"{self.get_status_display()} - {self.event_date.strftime('%b %d, %Y %H:%M')}"
+
+
+# class CityDeliveryRate(models.Model):
+#     from_city = models.CharField(max_length=100)
+#     to_city   = models.CharField(max_length=100)
+#     flat_fee  = models.DecimalField(max_digits=10, decimal_places=2)
+
+#     class Meta:
+#         unique_together = ('from_city', 'to_city')
+
+
+class CampusZone(models.Model):
+    name         = models.CharField(max_length=100)       # e.g. "KNUST"
+    center_lat   = models.FloatField()
+    center_lon   = models.FloatField()
+    radius_km    = models.FloatField(default=2.0)         # campus boundary radius
+    flat_fee     = models.DecimalField(max_digits=8, decimal_places=2, default=5.00)
+    free_delivery_threshold = models.DecimalField(        # free delivery if order total >= this
+        max_digits=10, decimal_places=2, null=True, blank=True
+    )
+
+    def __str__(self):
+        return self.name

@@ -24,7 +24,8 @@ from .views import (
     DeliveryPerformanceView,
     LocationAutocompleteView,
     BankValidationView,
-    PayoutListView
+    PayoutListView,
+    ProductAnalyticsDetailView
 )
 
 urlpatterns = [
@@ -67,6 +68,8 @@ urlpatterns = [
     path('seller-detail/<slug:slug>/', VendorDetailView.as_view(), name='vendor-detail'),
     path('seller-detail/<slug:slug>/products/', VendorProductsView.as_view(), name='vendor-products'),
     path('seller-detail/<slug:slug>/reviews/', VendorReviewsView.as_view(), name='vendor-reviews'),
+
+    path('products/<int:pk>/analytics/', ProductAnalyticsDetailView.as_view(), name='product-analytics-detail'),
 ]
 
 # Note: Removed router.urls since payment-method now uses APIView

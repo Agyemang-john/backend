@@ -308,13 +308,14 @@ class Product(models.Model):
     class Meta:
         ordering = ('-date',)
         indexes = [
+            models.Index(fields=["sub_category", "status", "id"]),
+            models.Index(fields=["sub_category", "status", "price"]),
+            models.Index(fields=["brand", "status"]),
+            models.Index(fields=["vendor", "status"]),
             models.Index(fields=["status"]),
             models.Index(fields=["product_type"]),
             models.Index(fields=["views"]),
             models.Index(fields=["date"]),
-            models.Index(fields=["vendor"]),
-            models.Index(fields=["sub_category"]),
-            models.Index(fields=["brand"]),
             GinIndex(fields=["search_vector"]),
         ]
 
@@ -385,6 +386,16 @@ class Variants(models.Model):
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     date = models.DateTimeField(auto_now_add=True)
     updated = models.DateTimeField(auto_now=True)
+
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['product', 'color']),
+            models.Index(fields=['product', 'size']),
+            models.Index(fields=['product', 'color', 'size']),
+            models.Index(fields=['color']),
+            models.Index(fields=['size']),
+        ]
 
     def get_combined_title(self):
         """
@@ -476,6 +487,10 @@ class ProductReview(models.Model):
     class Meta:
         verbose_name_plural = "Product Reviews"
         ordering = ['-date']
+        indexes = [
+            models.Index(fields=['product', 'status']),
+            models.Index(fields=['product', 'rating', 'status']),
+        ]
 
     def __str__(self):
         return f"Review for {self.product.title if self.product else 'Deleted Product'} by {self.user.email if self.user else 'Anonymous'}"

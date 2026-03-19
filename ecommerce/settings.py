@@ -601,3 +601,20 @@ Ckeditor5_filetype_whitelist = [
     "application/vnd.ms-excel",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 ]
+
+
+IPWARE_META_PRECEDENCE_ORDER = (
+    'HTTP_X_FORWARDED_FOR',
+    'X_FORWARDED_FOR',
+    'HTTP_X_REAL_IP',
+    'HTTP_CLIENT_IP',
+    'REMOTE_ADDR',
+)
+
+IPWARE_TRUSTED_PROXY_LIST = ['127.0.0.1'] 
+
+IPWARE_TRUSTED_PROXY_COUNT = 1
+
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+USE_X_FORWARDED_HOST = True
+USE_X_FORWARDED_PORT = True

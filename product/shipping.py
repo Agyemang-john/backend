@@ -74,31 +74,30 @@ def is_valid_ip(ip):
         return False
 
 def get_ip_address_from_request(request):
-    # Fallback: X-Real-IP or REMOTE_ADDR
-    ip, _ = ipware_get_client_ip(request)  # Use ipware properly
-    if ip is None:
-        ip = request.META.get('REMOTE_ADDR', '127.0.0.1')
+    ip, is_routable = ipware_get_client_ip(
+        request,
+        proxy_trusted_ips=None,   # uses settings
+        proxy_count=1,            # 1 proxy (Nginx) sits in front
+    )
+    
+    if ip is None or not is_routable:
+        ip = request.META.get('HTTP_X_REAL_IP') or request.META.get('REMOTE_ADDR', '127.0.0.1')
     return ip
 
 def get_user_country_region(request):
-    """Determine the user's country and region based on authentication or IP."""
-    # Determine cache key
     if request.user.is_authenticated:
         cache_key = f"location:user:{request.user.id}"
     else:
         ip = get_ip_address_from_request(request)
         cache_key = f"location:ip:{ip}"
 
-    # Check cache first
     cached_location = cache.get(cache_key)
     if cached_location:
-        logger.debug(f"Cache hit for {cache_key}: {cached_location}")
         return cached_location
 
     country = None
     region_name = None
 
-    # Check address for authenticated user
     if request.user.is_authenticated:
         address = Address.objects.filter(user=request.user, status=True).first()
         if address and address.country:
@@ -106,27 +105,27 @@ def get_user_country_region(request):
                 country_obj = Country.objects.get(
                     Q(name__iexact=address.country.strip()) | Q(code__iexact=address.country.strip())
                 )
-                country = country_obj
-                region_name = address.region.strip() if address.region else None
-                location = (country, region_name)
+                location = (country_obj, address.region.strip() if address.region else None)
                 cache.set(cache_key, location, 12 * 60 * 60)
-                logger.debug(f"Location from address for user {request.user.id}: {location}")
                 return location
             except Country.DoesNotExist:
                 logger.warning(f"Address country not found: {address.country}")
 
-    # Fallback to IP-based geolocation for unauthenticated users
     ip = get_ip_address_from_request(request)
-    if ip.startswith(('10.', '172.', '192.', '127.')):
-        logger.warning(f"Skipping geolocation for private IP: {ip}")
+    
+    try:
+        ip_obj = ipaddress.ip_address(ip)
+        is_private = ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local
+    except ValueError:
+        is_private = True
+
+    if is_private:
+        logger.warning(f"Skipping geolocation for private/invalid IP: {ip}")
         if settings.DEBUG:
-            location = ('Ghana', None)  # Default for development
+            location = ('Ghana', None)
             cache.set(cache_key, location, 12 * 60 * 60)
-            logger.debug(f"Using default location for private IP in DEBUG mode: {location}")
             return location
-        location = (None, None)
-        cache.set(cache_key, location, 12 * 60 * 60)
-        return location
+        return (None, None)
 
     try:
         response = requests.get(f"http://ip-api.com/json/{ip}", timeout=5)
@@ -150,9 +149,8 @@ def get_user_country_region(request):
     except requests.RequestException as e:
         logger.error(f"Geolocation lookup failed for IP {ip}: {str(e)}")
 
-    # Cache the failure to avoid repeated lookups
     location = (None, None)
-    cache.set(cache_key, location, 12 * 60 * 60)
+    cache.set(cache_key, location, 60 * 60)
     return location
 
 def can_product_ship_to_user(request, product):
