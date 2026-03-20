@@ -1,0 +1,35 @@
+{% extends "subscriptions/base_email.html" %}
+{% block title %}Subscription Renewed — Negromart{% endblock %}
+
+{% block hero %}
+  <div style="width:52px;height:52px;background:#eff6ff;border:1px solid #93c5fd;border-radius:50%;display:flex;align-items:center;justify-content:center;margin-bottom:20px">
+    <span style="font-size:24px">🔄</span>
+  </div>
+  <h1 class="hero-title">Renewed successfully.</h1>
+  <p class="hero-sub">Hi {{ vendor_name }}, your <strong>{{ plan_name }}</strong> subscription has been renewed. No interruption to your service.</p>
+{% endblock %}
+
+{% block body %}
+  <div class="info-box">
+    <div class="info-row">
+      <span class="info-label">Plan</span>
+      <span class="info-value">{{ plan_name }}</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">Amount charged</span>
+      <span class="info-value">{{ amount }}</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">Next renewal</span>
+      <span class="info-value">{{ end_date }}</span>
+    </div>
+  </div>
+
+  <p style="font-size:14px;color:#475569;line-height:1.7;margin-bottom:24px">
+    The charge was applied to your saved payment method. Your subscription continues uninterrupted. View your billing history from your dashboard.
+  </p>
+
+  <div class="cta-wrap">
+    <a href="{{ frontend_url }}/billing/" class="cta">View Billing</a>
+  </div>
+{% endblock %}

@@ -1,0 +1,42 @@
+{% extends "subscriptions/base_email.html" %}
+{% block title %}Your subscription has expired — Negromart{% endblock %}
+
+{% block hero %}
+  <div style="width:52px;height:52px;background:#fef2f2;border:1px solid #fca5a5;border-radius:50%;display:flex;align-items:center;justify-content:center;margin-bottom:20px">
+    <span style="font-size:24px">📭</span>
+  </div>
+  <h1 class="hero-title">Your subscription has expired.</h1>
+  <p class="hero-sub">Hi {{ vendor_name }}, your subscription has ended and your store has moved to the Free plan. Your products and data are safe.</p>
+{% endblock %}
+
+{% block body %}
+  <div class="alert alert-error" style="display:flex;align-items:flex-start;gap:10px">
+    <span style="font-size:18px;flex-shrink:0">🔒</span>
+    <span>
+      Some features have been <strong>temporarily restricted</strong>. Listings above the Free plan limit have been hidden from buyers until you resubscribe.
+    </span>
+  </div>
+
+  <p style="font-size:14px;color:#475569;line-height:1.7;margin:20px 0;">
+    Resubscribing takes less than a minute. Your store will be restored immediately after payment — no data loss, no setup needed.
+  </p>
+
+  <div class="info-box">
+    <div class="info-row">
+      <span class="info-label">Status</span>
+      <span class="info-value" style="color:#dc2626">Expired</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">Current plan</span>
+      <span class="info-value">Free</span>
+    </div>
+  </div>
+
+  <div class="cta-wrap">
+    <a href="{{ subscribe_url }}" class="cta">Resubscribe Now →</a>
+  </div>
+
+  <p style="text-align:center;font-size:13px;color:#64748b;margin-top:16px">
+    Questions? <a href="{{ support_url }}" style="text-decoration:underline">Contact our support team</a>.
+  </p>
+{% endblock %}

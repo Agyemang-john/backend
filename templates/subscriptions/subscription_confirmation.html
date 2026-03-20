@@ -1,0 +1,40 @@
+{% extends "subscriptions/base_email.html" %}
+{% block title %}Your {{ plan_name }} Plan is Active — Negromart{% endblock %}
+
+{% block hero %}
+  <div style="width:52px;height:52px;background:#f0fdf4;border:1px solid #86efac;border-radius:50%;display:flex;align-items:center;justify-content:center;margin-bottom:20px">
+    <span style="font-size:24px">✓</span>
+  </div>
+  <h1 class="hero-title">You're live, {{ vendor_name }}.</h1>
+  <p class="hero-sub">Your <strong>{{ plan_name }} Plan</strong> is now active. Your store features have been unlocked and you're ready to start selling.</p>
+{% endblock %}
+
+{% block body %}
+  <div class="info-box">
+    <div class="info-row">
+      <span class="info-label">Plan</span>
+      <span class="info-value">{{ plan_name }}</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">Amount charged</span>
+      <span class="info-value">{{ amount }}</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">Renews on</span>
+      <span class="info-value">{{ end_date }}</span>
+    </div>
+  </div>
+
+  <div class="alert alert-success" style="display:flex;align-items:flex-start;gap:10px">
+    <span style="font-size:18px;flex-shrink:0">🔄</span>
+    <span>Your plan renews automatically. You'll receive a reminder email before each charge. Cancel anytime from your <a href="{{ frontend_url }}/billing/" style="text-decoration:underline;color:inherit">billing dashboard</a>.</span>
+  </div>
+
+  <p style="font-size:14px;color:#475569;line-height:1.7;margin-bottom:24px">
+    Your store is now powered by the <strong>{{ plan_name }}</strong> plan. Head to your dashboard to manage your products, track orders, and view your analytics.
+  </p>
+
+  <div class="cta-wrap">
+    <a href="{{ frontend_url }}/dashboard/" class="cta">Go to my Dashboard →</a>
+  </div>
+{% endblock %}

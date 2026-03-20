@@ -1,0 +1,55 @@
+{% extends "subscriptions/base_email.html" %}
+{% block title %}Your subscription expires in {{ days_left }} day{{ days_left|pluralize }} — Negromart{% endblock %}
+
+{% block hero %}
+  <div style="width:52px;height:52px;background:#fffbeb;border:1px solid #fcd34d;border-radius:50%;display:flex;align-items:center;justify-content:center;margin-bottom:20px">
+    <span style="font-size:24px">⏳</span>
+  </div>
+  <h1 class="hero-title">
+    {% if days_left == 1 %}
+      Expires tomorrow.
+    {% else %}
+      {{ days_left }} days left.
+    {% endif %}
+  </h1>
+  <p class="hero-sub">Hi {{ vendor_name }}, your <strong>{{ plan_name }}</strong> subscription expires on <strong>{{ end_date }}</strong>. Renew now to avoid any interruption.</p>
+{% endblock %}
+
+{% block body %}
+  <div class="alert alert-warning" style="display:flex;align-items:flex-start;gap:10px">
+    <span style="font-size:18px;flex-shrink:0">⚠️</span>
+    <span>
+      Auto-renewal is <strong>off</strong> for your account. Your subscription will <strong>not</strong> renew automatically on {{ end_date }}.
+      After expiry your store will be moved to the Free plan and certain features will be restricted.
+    </span>
+  </div>
+
+  <div class="info-box">
+    <div class="info-row">
+      <span class="info-label">Current plan</span>
+      <span class="info-value">{{ plan_name }}</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">Expires on</span>
+      <span class="info-value">{{ end_date }}</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">Days remaining</span>
+      <span class="info-value" style="color:{% if days_left <= 3 %}#dc2626{% else %}#d97706{% endif %};">
+        {{ days_left }} day{{ days_left|pluralize }}
+      </span>
+    </div>
+  </div>
+
+  <p style="font-size:14px;color:#475569;line-height:1.7;margin-bottom:24px">
+    Keep your store running at full speed. Renewing takes less than a minute and your products and data stay exactly as they are.
+  </p>
+
+  <div class="cta-wrap">
+    <a href="{{ subscribe_url }}" class="cta">Renew Now →</a>
+  </div>
+
+  <p style="text-align:center;font-size:12px;color:#94a3b8;margin-top:12px">
+    Already renewed? You can safely ignore this email.
+  </p>
+{% endblock %}

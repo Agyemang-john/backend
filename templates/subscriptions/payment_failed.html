@@ -1,0 +1,37 @@
+{% extends "subscriptions/base_email.html" %}
+{% block title %}Action required: Update your payment method — Negromart{% endblock %}
+
+{% block hero %}
+  <div style="width:52px;height:52px;background:#fef2f2;border:1px solid #fca5a5;border-radius:50%;display:flex;align-items:center;justify-content:center;margin-bottom:20px">
+    <span style="font-size:24px">💳</span>
+  </div>
+  <h1 class="hero-title">Payment failed.</h1>
+  <p class="hero-sub">Hi {{ vendor_name }}, we couldn't renew your subscription because your payment method was declined or missing. Please update it to restore full access.</p>
+{% endblock %}
+
+{% block body %}
+  <div class="alert alert-error" style="display:flex;align-items:flex-start;gap:10px">
+    <span style="font-size:18px;flex-shrink:0">⚡</span>
+    <span>
+      <strong>Action required.</strong> Your subscription has been paused. We will retry the charge automatically once you update your payment method.
+    </span>
+  </div>
+
+  <p style="font-size:14px;color:#475569;line-height:1.7;margin:20px 0;">
+    Add a valid card or Mobile Money number to your billing page. Once updated, we'll automatically retry the renewal charge and restore your plan.
+  </p>
+
+  <div class="cta-wrap">
+    <a href="{{ billing_url }}" class="cta">Update Payment Method →</a>
+  </div>
+
+  <div style="margin:24px 0;padding:16px 20px;border-radius:10px;background:#f8fafc;border:1px solid #e2e8f0">
+    <p style="font-size:13px;color:#64748b;line-height:1.65">
+      <strong>Accepted methods:</strong> Visa, Mastercard, Verve (card), MTN Mobile Money, Vodafone Cash, AirtelTigo Money.
+    </p>
+  </div>
+
+  <p style="text-align:center;font-size:13px;color:#64748b">
+    Need help? <a href="{{ support_url }}" style="text-decoration:underline">Contact support</a>.
+  </p>
+{% endblock %}

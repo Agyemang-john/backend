@@ -355,3 +355,7 @@ class PaymentTransaction(models.Model):
     def __str__(self):
         return f"{self.vendor.name} - {self.amount} {self.currency} ({self.status})"
 
+from .email_models import EmailTemplate, SubscriptionEmailConfig
+
+EmailTemplate
+SubscriptionEmailConfig

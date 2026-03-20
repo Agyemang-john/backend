@@ -1,0 +1,47 @@
+{% extends "subscriptions/base_email.html" %}
+{% block title %}Subscription cancelled — Negromart{% endblock %}
+
+{% block hero %}
+  <div style="width:52px;height:52px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:50%;display:flex;align-items:center;justify-content:center;margin-bottom:20px">
+    <span style="font-size:24px">👋</span>
+  </div>
+  <h1 class="hero-title">Subscription cancelled.</h1>
+  <p class="hero-sub">Hi {{ vendor_name }}, your <strong>{{ plan_name }}</strong> subscription has been cancelled. You'll retain full access until your billing period ends.</p>
+{% endblock %}
+
+{% block body %}
+  <div class="alert" style="background:#f0fdf4;border:1px solid #86efac;color:#166534;display:flex;align-items:flex-start;gap:10px">
+    <span style="font-size:18px;flex-shrink:0">✅</span>
+    <span>
+      <strong>Your access continues until {{ end_date }}.</strong> No immediate changes to your store.
+      After that date your account moves to the Free plan.
+    </span>
+  </div>
+
+  <div class="info-box">
+    <div class="info-row">
+      <span class="info-label">Plan</span>
+      <span class="info-value">{{ plan_name }}</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">Access until</span>
+      <span class="info-value">{{ end_date }}</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">Auto-renewal</span>
+      <span class="info-value" style="color:#dc2626">Off</span>
+    </div>
+  </div>
+
+  <p style="font-size:14px;color:#475569;line-height:1.7;margin-bottom:24px">
+    Changed your mind? You can resubscribe at any time before your access ends — your store and data will remain exactly as they are.
+  </p>
+
+  <div class="cta-wrap">
+    <a href="{{ subscribe_url }}" class="cta">Resubscribe</a>
+  </div>
+
+  <p style="text-align:center;font-size:12px;color:#94a3b8;margin-top:16px">
+    If you didn't cancel this subscription, <a href="{{ support_url }}" style="text-decoration:underline;color:#64748b">contact support immediately</a>.
+  </p>
+{% endblock %}

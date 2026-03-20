@@ -14,7 +14,7 @@ from .models import (
     VendorSubscription, PaymentTransaction,
     SubscriptionPlan, SubscriptionUsage,
 )
-from .momo_models import MomoAccount, BillingProfile
+from .momo_models import BillingProfile, MomoAccount
 
 logger = logging.getLogger(__name__)
 
@@ -158,15 +158,14 @@ def _activate_momo_subscription(reference, intent):
     """
     Activate a subscription after MoMo payment confirmation.
 
-    `intent` is the dict stored in cache at key momo_charge:{reference}:
-        { vendor_id, plan_id, billing, phone, provider, save }
+    IDEMPOTENT: If this reference has already been processed (e.g. poll called
+    twice before cache clears), returns the existing subscription immediately.
 
-    This mirrors the logic in services.verify_and_activate() but:
-    - Skips the Paystack API call (already confirmed)
-    - Reads vendor_id + plan_id from our cache (not Paystack metadata)
-    - Does not save a card authorization (MoMo has no auth code)
+    RACE-SAFE: Uses select_for_update on the vendor row to ensure only one
+    concurrent activation can proceed at a time.
     """
     from vendor.models import Vendor
+    from django.db import IntegrityError
 
     vendor_id = intent['vendor_id']
     plan_id   = intent['plan_id']
@@ -177,36 +176,62 @@ def _activate_momo_subscription(reference, intent):
     days   = BILLING_DAYS.get(billing, 30)
 
     with db_transaction.atomic():
-        # Cancel any existing active subscriptions
-        VendorSubscription.objects.filter(
-            vendor=vendor, status='active'
+        # ── Idempotency: if this reference is already activated, return early ──
+        existing_txn = PaymentTransaction.objects.filter(
+            paystack_reference=reference, status='success'
+        ).select_related('subscription').first()
+        if existing_txn and existing_txn.subscription and existing_txn.subscription.status == 'active':
+            logger.info(f'MoMo ref={reference} already activated — returning existing sub')
+            return existing_txn.subscription
+
+        # ── Row-level lock on vendor to prevent concurrent activations ─────────
+        # select_for_update blocks until any other transaction holding this lock
+        # completes, so two simultaneous poll hits queue up rather than racing.
+        Vendor.objects.select_for_update().get(pk=vendor_id)
+
+        # ── Cancel all existing active/trial subscriptions ────────────────────
+        cancelled = VendorSubscription.objects.filter(
+            vendor=vendor, status__in=['active', 'trial']
         ).update(status='cancelled')
+        if cancelled:
+            logger.info(f'Cancelled {cancelled} existing subscription(s) for vendor {vendor_id}')
 
-        # Create the new active subscription
-        sub = VendorSubscription.objects.create(
-            vendor=vendor,
-            plan=plan,
-            status='active',
-            start_date=timezone.now(),
-            end_date=timezone.now() + timedelta(days=days),
-            auto_renew=True,
-            payment_reference=reference,
-        )
+        # ── Create the new active subscription ────────────────────────────────
+        try:
+            sub = VendorSubscription.objects.create(
+                vendor=vendor,
+                plan=plan,
+                status='active',
+                start_date=timezone.now(),
+                end_date=timezone.now() + timedelta(days=days),
+                auto_renew=True,
+                payment_reference=reference,
+            )
+        except IntegrityError:
+            # Partial unique index fired — another concurrent activation won the race.
+            # Find the subscription it created and return it.
+            logger.warning(f'IntegrityError creating sub for vendor {vendor_id} ref={reference} — returning concurrent sub')
+            sub = VendorSubscription.objects.filter(
+                vendor=vendor, status='active'
+            ).select_related('plan').first()
+            if not sub:
+                raise  # Unexpected — re-raise so the error surfaces
+            return sub
 
-        # Update/create usage tracker
+        # ── Update/create usage tracker ───────────────────────────────────────
         usage, created = SubscriptionUsage.objects.get_or_create(
             vendor=vendor,
             defaults={
-                'subscription': sub,
+                'subscription':        sub,
                 'active_products_count': 0,
-                'period_start': timezone.now(),
+                'period_start':        timezone.now(),
             },
         )
         if not created:
             usage.subscription = sub
             usage.reset_for_new_cycle()
 
-        # Update the transaction record
+        # ── Mark transaction as success ───────────────────────────────────────
         PaymentTransaction.objects.filter(
             paystack_reference=reference
         ).update(
@@ -215,15 +240,15 @@ def _activate_momo_subscription(reference, intent):
             paid_at=timezone.now(),
         )
 
-        # Sync vendor model flags
-        vendor.is_subscribed = True
-        vendor.subscription_start_date = sub.start_date.date()
-        vendor.subscription_end_date   = sub.end_date.date()
+        # ── Sync denormalised vendor flags ────────────────────────────────────
+        vendor.is_subscribed            = True
+        vendor.subscription_start_date  = sub.start_date.date()
+        vendor.subscription_end_date    = sub.end_date.date()
         vendor.save(update_fields=[
             'is_subscribed', 'subscription_start_date', 'subscription_end_date'
         ])
 
-    # Send confirmation email outside the transaction
+    # Fire email outside the transaction — worker reads committed data
     try:
         from .tasks import send_subscription_confirmation_email
         send_subscription_confirmation_email.delay(vendor.id, sub.id)

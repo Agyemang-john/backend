@@ -289,322 +289,65 @@ def batch_payouts():
             logger.error(f"Payout failed for vendor {vendor.id}: {result['message']}")
 
 
-# subscriptions/tasks.py
-
-import logging
-from celery import shared_task
-from django.utils import timezone
-from datetime import timedelta
-
-logger = logging.getLogger(__name__)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Daily renewal processor — runs at 8am via Celery Beat
+# REPLACE charge_vendor_for_renewal() in subscriptions/tasks.py with this.
+# Reads max_retries from SubscriptionEmailConfig instead of hardcoding 3.
 # ─────────────────────────────────────────────────────────────────────────────
-
-@shared_task(name="subscriptions.process_renewals")
-def process_subscription_renewals():
-    """
-    Finds all subscriptions expiring tomorrow with auto_renew=True
-    and queues an individual charge task for each.
-
-    Celery Beat schedule (add to settings.py):
-
-    CELERY_BEAT_SCHEDULE = {
-        'process-renewals-daily': {
-            'task': 'subscriptions.process_renewals',
-            'schedule': crontab(hour=8, minute=0),
-        },
-        'expire-old-subscriptions': {
-            'task': 'subscriptions.expire_old_subscriptions',
-            'schedule': crontab(hour=0, minute=30),
-        },
-        'warn-expiring-soon': {
-            'task': 'subscriptions.warn_expiring_soon',
-            'schedule': crontab(hour=9, minute=0),
-        },
-    }
-    """
-    from .models import VendorSubscription
-
-    tomorrow = timezone.now() + timedelta(days=1)
-
-    due = VendorSubscription.objects.filter(
-        status='active',
-        auto_renew=True,
-        end_date__date=tomorrow.date(),
-    ).values_list('id', flat=True)
-
-    count = 0
-    for sub_id in due:
-        charge_vendor_for_renewal.delay(sub_id)
-        count += 1
-
-    logger.info(f"process_subscription_renewals: queued {count} renewal tasks")
-    return f"queued:{count}"
-
 
 @shared_task(
-    name="subscriptions.charge_vendor_for_renewal",
+    name='subscriptions.charge_vendor_for_renewal',
     bind=True,
-    max_retries=3,
-    default_retry_delay=86400,      # Retry after 24 hours
+    max_retries=10,          # ceiling — actual limit comes from DB config
+    default_retry_delay=86400,  # 24 hours between retries
 )
 def charge_vendor_for_renewal(self, subscription_id: int):
     """
-    Charges a single vendor's saved card for renewal.
-    Retries up to 3 times (once per day) before expiring the subscription.
+    Charges a single vendor's saved card or MoMo for renewal.
+    Retries up to renewal_max_retries times (from SubscriptionEmailConfig),
+    once per day, before expiring the subscription.
     """
     from . import services
     from .models import VendorSubscription
+    from .email_models import SubscriptionEmailConfig
+
+    cfg         = SubscriptionEmailConfig.get()
+    max_retries = cfg.renewal_max_retries  # reads live from DB
 
     try:
         result = services.charge_for_renewal(subscription_id)
-        logger.info(f"Renewal success: sub_id={subscription_id}, ref={result.get('reference')}")
+
+        if result.get('status') == 'pending_momo':
+            # MoMo was initiated — the vendor needs to approve on their phone.
+            # Poll will activate the subscription when they do.
+            # Log and return — don't retry (retrying would fire another USSD prompt).
+            logger.info(
+                f'MoMo renewal initiated for sub={subscription_id}: '
+                f'ref={result.get("reference")} — waiting for vendor approval'
+            )
+            return result
+
+        logger.info(f'Renewal success: sub={subscription_id} ref={result.get("reference")}')
         return result
 
     except Exception as exc:
+        attempt = self.request.retries + 1
         logger.warning(
-            f"Renewal attempt {self.request.retries + 1}/3 failed for sub_id={subscription_id}: {exc}"
+            f'Renewal attempt {attempt}/{max_retries} failed '
+            f'for sub={subscription_id}: {exc}'
         )
 
-        if self.request.retries < self.max_retries - 1:
+        if self.request.retries < max_retries - 1:
             raise self.retry(exc=exc)
-        else:
-            # All retries exhausted — expire the subscription
-            logger.error(f"Renewal exhausted for sub_id={subscription_id}. Expiring.")
-            try:
-                sub = VendorSubscription.objects.select_related('vendor').get(pk=subscription_id)
-                sub.status = 'expired'
-                sub.save(update_fields=['status'])
 
-                services._sync_vendor_flags(sub.vendor)
-                send_subscription_expired_email.delay(sub.vendor.id)
-            except Exception as inner:
-                logger.error(f"Failed to expire sub_id={subscription_id}: {inner}")
+        # All retries exhausted — expire the subscription
+        logger.error(f'Renewal exhausted ({max_retries} attempts) for sub={subscription_id}. Expiring.')
+        try:
+            sub = VendorSubscription.objects.select_related('vendor').get(pk=subscription_id)
+            sub.status = 'expired'
+            sub.save(update_fields=['status'])
+            services._sync_vendor_flags(sub.vendor)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. Expire overdue subscriptions (safety net)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@shared_task(name="subscriptions.expire_old_subscriptions")
-def expire_old_subscriptions():
-    """
-    Marks active-but-past-their-end-date subscriptions as expired.
-    Runs as a safety net at midnight.
-    """
-    from .models import VendorSubscription
-    from . import services
-
-    overdue = VendorSubscription.objects.filter(
-        status='active',
-        auto_renew=False,
-        end_date__lt=timezone.now(),
-    ).select_related('vendor')
-
-    count = 0
-    for sub in overdue:
-        sub.status = 'expired'
-        sub.save(update_fields=['status'])
-        services._sync_vendor_flags(sub.vendor)
-        count += 1
-
-    logger.info(f"expire_old_subscriptions: expired {count} subscriptions")
-    return f"expired:{count}"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. Warn vendors whose subscription expires in 3 days
-# ─────────────────────────────────────────────────────────────────────────────
-
-@shared_task(name="subscriptions.warn_expiring_soon")
-def warn_expiring_soon():
-    """Sends warning emails to vendors whose subscription expires in 3 days."""
-    from .models import VendorSubscription
-
-    in_3_days = timezone.now() + timedelta(days=3)
-
-    expiring = VendorSubscription.objects.filter(
-        status='active',
-        auto_renew=False,
-        end_date__date=in_3_days.date(),
-    ).select_related('vendor', 'plan')
-
-    for sub in expiring:
-        send_expiring_soon_email.delay(sub.vendor.id, sub.id)
-
-    return f"warned:{expiring.count()}"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. Email tasks
-# ─────────────────────────────────────────────────────────────────────────────
-
-@shared_task(name="subscriptions.send_subscription_confirmation_email")
-def send_subscription_confirmation_email(vendor_id: int, subscription_id: int):
-    from vendor.models import Vendor
-    from .models import VendorSubscription
-    from django.core.mail import send_mail
-    from django.conf import settings
-
-    try:
-        vendor = Vendor.objects.get(pk=vendor_id)
-        sub = VendorSubscription.objects.select_related('plan').get(pk=subscription_id)
-
-        send_mail(
-            subject=f"Your {sub.plan.name} Plan is now active — Negromart",
-            message=(
-                f"Hi {vendor.name},\n\n"
-                f"Your {sub.plan.name} subscription is now active.\n"
-                f"Plan: {sub.plan.name}\n"
-                f"Renews: {sub.end_date.strftime('%B %d, %Y')}\n\n"
-                f"Manage your subscription at {settings.FRONTEND_URL}/subscription/\n\n"
-                f"— The Negromart Team"
-            ),
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[vendor.email],
-            fail_silently=True,
-        )
-    except Exception as e:
-        logger.error(f"send_subscription_confirmation_email failed: {e}")
-
-
-@shared_task(name="subscriptions.send_renewal_success_email")
-def send_renewal_success_email(vendor_id: int):
-    from vendor.models import Vendor
-    from .models import VendorSubscription
-    from django.core.mail import send_mail
-    from django.conf import settings
-
-    try:
-        vendor = Vendor.objects.get(pk=vendor_id)
-        sub = VendorSubscription.objects.filter(
-            vendor=vendor, status='active'
-        ).select_related('plan').first()
-
-        if not sub:
-            return
-
-        send_mail(
-            subject=f"Subscription renewed — Negromart",
-            message=(
-                f"Hi {vendor.name},\n\n"
-                f"Your {sub.plan.name} plan has been renewed successfully.\n"
-                f"GHS {sub.plan.price} has been charged to your saved card.\n"
-                f"Next renewal: {sub.end_date.strftime('%B %d, %Y')}\n\n"
-                f"— The Negromart Team"
-            ),
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[vendor.email],
-            fail_silently=True,
-        )
-    except Exception as e:
-        logger.error(f"send_renewal_success_email failed: {e}")
-
-
-@shared_task(name="subscriptions.send_payment_method_required_email")
-def send_payment_method_required_email(vendor_id: int):
-    from vendor.models import Vendor
-    from django.core.mail import send_mail
-    from django.conf import settings
-
-    try:
-        vendor = Vendor.objects.get(pk=vendor_id)
-        send_mail(
-            subject="Action required: Update your payment method — Negromart",
-            message=(
-                f"Hi {vendor.name},\n\n"
-                f"We couldn't renew your subscription because no valid payment method was found.\n\n"
-                f"Update your payment method here: {settings.FRONTEND_URL}/vendor/subscription/\n\n"
-                f"Your subscription has been paused. Update your card to restore access.\n\n"
-                f"— The Negromart Team"
-            ),
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[vendor.email],
-            fail_silently=True,
-        )
-    except Exception as e:
-        logger.error(f"send_payment_method_required_email failed: {e}")
-
-
-@shared_task(name="subscriptions.send_cancellation_email")
-def send_cancellation_email(vendor_id: int, subscription_id: int):
-    from vendor.models import Vendor
-    from .models import VendorSubscription
-    from django.core.mail import send_mail
-    from django.conf import settings
-
-    try:
-        vendor = Vendor.objects.get(pk=vendor_id)
-        sub = VendorSubscription.objects.select_related('plan').get(pk=subscription_id)
-
-        send_mail(
-            subject="Subscription cancelled — Negromart",
-            message=(
-                f"Hi {vendor.name},\n\n"
-                f"Your {sub.plan.name} subscription has been cancelled.\n"
-                f"You'll keep full access until {sub.end_date.strftime('%B %d, %Y')}.\n\n"
-                f"Changed your mind? Resubscribe at {settings.FRONTEND_URL}/vendor/subscription/\n\n"
-                f"— The Negromart Team"
-            ),
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[vendor.email],
-            fail_silently=True,
-        )
-    except Exception as e:
-        logger.error(f"send_cancellation_email failed: {e}")
-
-
-@shared_task(name="subscriptions.send_expiring_soon_email")
-def send_expiring_soon_email(vendor_id: int, subscription_id: int):
-    from vendor.models import Vendor
-    from .models import VendorSubscription
-    from django.core.mail import send_mail
-    from django.conf import settings
-
-    try:
-        vendor = Vendor.objects.get(pk=vendor_id)
-        sub = VendorSubscription.objects.select_related('plan').get(pk=subscription_id)
-
-        send_mail(
-            subject=f"Your {sub.plan.name} plan expires in 3 days — Negromart",
-            message=(
-                f"Hi {vendor.name},\n\n"
-                f"Your {sub.plan.name} subscription expires on {sub.end_date.strftime('%B %d, %Y')}.\n\n"
-                f"Renew now to keep your store features: {settings.FRONTEND_URL}/vendor/subscription/\n\n"
-                f"— The Negromart Team"
-            ),
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[vendor.email],
-            fail_silently=True,
-        )
-    except Exception as e:
-        logger.error(f"send_expiring_soon_email failed: {e}")
-
-
-@shared_task(name="subscriptions.send_subscription_expired_email")
-def send_subscription_expired_email(vendor_id: int):
-    from vendor.models import Vendor
-    from django.core.mail import send_mail
-    from django.conf import settings
-
-    try:
-        vendor = Vendor.objects.get(pk=vendor_id)
-        send_mail(
-            subject="Your subscription has expired — Negromart",
-            message=(
-                f"Hi {vendor.name},\n\n"
-                f"Your subscription has expired and your store has been moved to the Free plan.\n"
-                f"Your products and data are safe.\n\n"
-                f"Resubscribe to restore your features: {settings.FRONTEND_URL}/vendor/subscription/\n\n"
-                f"— The Negromart Team"
-            ),
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[vendor.email],
-            fail_silently=True,
-        )
-    except Exception as e:
-        logger.error(f"send_subscription_expired_email failed: {e}")
-
+            from .email_tasks import send_subscription_expired_email
+            send_subscription_expired_email.delay(sub.vendor.id)
+        except Exception as inner:
+            logger.error(f'Failed to expire sub={subscription_id}: {inner}')
