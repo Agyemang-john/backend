@@ -41,7 +41,7 @@ class HomeSliderView(APIView):
             static_data = HomeSliderSerializer(
                 sliders,
                 many=True,
-                context={'static': True}
+                context={'static': True, 'request': request}
             ).data
 
             cache.set(cache_key, static_data, 60 * 60)  # 1 hour
