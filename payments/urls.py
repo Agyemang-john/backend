@@ -3,7 +3,7 @@ from django.urls import path
 from .momo_views import (
       BillingProfileView,
       MomoAccountListView, MomoAccountDetailView, SetDefaultMomoView,
-      InitiateMomoView, PollMomoStatusView, ManualMomoPaymentView,
+      InitiateMomoView, PollMomoStatusView, ManualMomoPaymentView, SubmitMomoOtpView
   )
 from . import views
 from .flutterwave_view import FlutterwaveCallbackAPIView
@@ -96,5 +96,7 @@ urlpatterns = [
     path('momo/initiate/',                InitiateMomoView.as_view()),
     path('momo/status/',                  PollMomoStatusView.as_view()),
     path('momo/pay-now/',                 ManualMomoPaymentView.as_view()),
+    path('momo/submit-otp/',              SubmitMomoOtpView.as_view()),
+
 
 ]

@@ -14,7 +14,7 @@ from .models import (
     VendorSubscription, PaymentTransaction,
     SubscriptionPlan, SubscriptionUsage,
 )
-from .momo_models import BillingProfile, MomoAccount
+from .momo_models import MomoAccount, BillingProfile
 
 logger = logging.getLogger(__name__)
 
@@ -360,15 +360,67 @@ def initiate_momo_charge(vendor, plan_id, billing, phone, provider, save=False):
             },
         )
 
+    # Pass the raw Paystack status through so the frontend can distinguish:
+    # 'send_otp'    → MTN: show OTP input field (SMS code was sent)
+    # 'pay_offline' → Vodafone/AirtelTigo: show "check phone" polling UI
+    # 'pending'     → generic pending
     return {
         'reference':    reference,
         'status':       charge.get('status', 'pending'),
         'display_text': display_text,
         'provider':     provider,
         'masked_phone': _mask(phone),
+        'requires_otp': charge.get('status') == 'send_otp',
         'resumed':      False,
     }
 
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Submit OTP — for MTN MoMo which sends OTP via SMS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def submit_momo_otp(reference, otp):
+    """
+    Submit the OTP received via SMS to Paystack.
+    Called when Paystack returns status='send_otp' on the initial charge.
+    
+    After submission, the charge moves to 'pay_offline' (awaiting USSD approval)
+    or directly to 'success'. Frontend should start polling after this.
+    
+    Returns: { status: 'pending'|'success'|'failed', message: str }
+    """
+    resp = requests.post(
+        f'{PAYSTACK_BASE}/charge/submit_otp',
+        json={'otp': otp, 'reference': reference},
+        headers=_headers(),
+        timeout=15,
+    )
+    data = resp.json()
+
+    if not data.get('status'):
+        raise ValueError(data.get('message') or 'OTP submission failed.')
+
+    charge    = data.get('data') or {}
+    ps_status = charge.get('status', 'pending')
+
+    STATUS_MAP = {
+        'success':     'success',
+        'failed':      'failed',
+        'abandoned':   'failed',
+        'pay_offline': 'pending',
+        'pending':     'pending',
+        'processing':  'pending',
+    }
+    our_status = STATUS_MAP.get(ps_status, 'pending')
+
+    logger.info(f'OTP submitted for ref={reference}: ps_status={ps_status} → {our_status}')
+    return {
+        'reference': reference,
+        'status':    our_status,
+        'message':   charge.get('display_text') or charge.get('message') or 'OTP accepted. Waiting for confirmation.',
+    }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Poll MoMo charge status

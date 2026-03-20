@@ -211,6 +211,34 @@ class PollMomoStatusView(APIView):
                 'message': 'Checking payment status…', 'activated': False,
             })
 
+class SubmitMomoOtpView(APIView):
+    """
+    POST /api/v1/payments/momo/submit-otp/
+    Body: { reference: str, otp: str }
+    
+    Called when the vendor receives an SMS OTP and types it into the UI.
+    Returns { status: 'pending'|'success'|'failed', message: str }
+    After this, the frontend continues polling GET /momo/status/?ref=
+    """
+    permission_classes = [IsAuthenticated]
+ 
+    def post(self, request):
+        reference = request.data.get('reference')
+        otp       = request.data.get('otp', '').strip()
+ 
+        if not reference:
+            return Response({'error': 'Missing reference.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not otp or not otp.isdigit():
+            return Response({'error': 'Please enter the numeric OTP from the SMS.'}, status=status.HTTP_400_BAD_REQUEST)
+ 
+        try:
+            result = momo_services.submit_momo_otp(reference, otp)
+            return Response(result)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.error(f'SubmitOTP error ref={reference}: {exc}', exc_info=True)
+            return Response({'error': 'OTP submission failed. Please try again.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Manual MoMo payment — "Pay now"
