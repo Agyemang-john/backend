@@ -254,10 +254,6 @@ class IsVendorOwner(permissions.BasePermission):
 
 
 class ProductListCreateView(SubscriptionGateMixin, generics.ListCreateAPIView):
-    """
-    GET  — list vendor's own products (no subscription gate on reads).
-    POST — create product; gated by product count limit + image limit.
-    """
     serializer_class   = ProductSerializer
     permission_classes = [IsAuthenticated, IsVerifiedVendor]
 
@@ -270,13 +266,12 @@ class ProductListCreateView(SubscriptionGateMixin, generics.ListCreateAPIView):
             raise serializers.ValidationError("Vendor profile is required.")
         return Product.objects.filter(vendor=vendor)
 
-    def perform_create(self, serializer):
+    # ✅ No perform_create — mixin handles everything
+    def get_perform_create_kwargs(self) -> dict:
         vendor = self.request.user.vendor_user
         if not vendor:
             raise serializers.ValidationError("Vendor profile is required.")
-        # Mixin runs limit gates, then calls super() which calls serializer.save()
-        super().perform_create(serializer)
-        serializer.save(vendor=vendor)
+        return {'vendor': vendor}
 
 
 class ProductCreateView(SubscriptionGateMixin, generics.CreateAPIView):
@@ -298,7 +293,7 @@ class ProductCreateView(SubscriptionGateMixin, generics.CreateAPIView):
 class ProductDetailView(SubscriptionGateMixin, generics.RetrieveUpdateDestroyAPIView):
     serializer_class   = ProductSerializer
     permission_classes = [IsAuthenticated, IsVerifiedVendor]
-
+    check_product_limit = True
     # Only check image limit on updates — not on GET / DELETE
     check_image_limit = True
 

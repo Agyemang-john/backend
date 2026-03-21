@@ -264,10 +264,14 @@ class SubscriptionUsage(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def can_add_product(self):
-        """Check if vendor is within their product listing limit."""
-        plan = self.subscription.plan if self.subscription else None
+        from payments.models import SubscriptionPlan
+        if self.subscription:
+            plan = self.subscription.plan
+        else:
+            # Fall back to free plan limits
+            plan = SubscriptionPlan.objects.filter(tier="free").order_by("price").first()
         if not plan:
-            return False
+            return True  # no plan configured at all — allow
         return self.active_products_count < plan.max_products
 
     def reset_for_new_cycle(self):

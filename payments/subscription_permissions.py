@@ -22,6 +22,8 @@
 from __future__ import annotations
 from rest_framework.permissions import BasePermission
 from rest_framework.exceptions import PermissionDenied
+from django.db.models import F
+
 
 from payments.models import VendorSubscription, SubscriptionUsage, SubscriptionPlan
 
@@ -49,9 +51,18 @@ def _plan(user) -> SubscriptionPlan | None:
 
 
 def _usage(user) -> SubscriptionUsage | None:
+    vendor = getattr(user, 'vendor_user', None) or getattr(user, 'vendor', None)
+    if not vendor:
+        return None
     try:
-        return SubscriptionUsage.objects.get(vendor__user=user)
-    except SubscriptionUsage.DoesNotExist:
+        usage, _ = SubscriptionUsage.objects.get_or_create(
+            vendor=vendor,
+            defaults={'active_products_count': 0}
+        )
+        return usage
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"[SubscriptionGate] _usage() failed for {vendor}: {e}")
         return None
 
 
@@ -197,7 +208,9 @@ class SubscriptionGateMixin:
                 "upgrade_url":  "/subscribe",
             })
 
-    # ── Hook into DRF generic lifecycle ──────────────────────────────────────
+    def get_perform_create_kwargs(self) -> dict:
+        """Override in subclasses to inject extra kwargs into serializer.save()."""
+        return {}
 
     def perform_create(self, serializer):
         self._gate_feature()
@@ -206,19 +219,21 @@ class SubscriptionGateMixin:
         if self.check_image_limit:
             images = self.request.FILES.getlist("images[]", [])
             self._gate_image_limit(len(images))
-        super().perform_create(serializer)  # type: ignore[misc]
-        # Increment usage counter AFTER successful save
+
+        serializer.save(**self.get_perform_create_kwargs())
+
         if self.check_product_limit:
             usage = _usage(self.request.user)
             if usage:
                 SubscriptionUsage.objects.filter(pk=usage.pk).update(
-                    products_used=usage.products_used + 1
+                    active_products_count=F("active_products_count") + 1
                 )
-
-    def perform_update(self, serializer):
-        self._gate_feature()
-        if self.check_image_limit:
-            images = self.request.FILES.getlist("images[]", [])
-            if images:  # only gate if new images are actually being uploaded
-                self._gate_image_limit(len(images))
-        super().perform_update(serializer)  # type: ignore[misc]
+    
+    def perform_destroy(self, instance):
+        super().perform_destroy(instance)
+        if getattr(self, 'check_product_limit', False):
+            usage = _usage(self.request.user)
+            if usage and usage.active_products_count > 0:
+                SubscriptionUsage.objects.filter(pk=usage.pk).update(
+                    active_products_count=F("active_products_count") - 1
+                )
