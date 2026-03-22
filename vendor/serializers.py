@@ -108,6 +108,20 @@ class ProductSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = ['id', 'slug', 'sub_category', 'variant', 'title', 'image', 'price', 'old_price', 'sku', 'currency', 'variants', 'date']
+    
+    def validate_title(self, value):
+        # Slugify and check the resulting slug length too
+        from django.utils.text import slugify
+        slug = slugify(value, allow_unicode=True)
+        if len(slug) > 150:
+            raise serializers.ValidationError(
+                "Title is too long — please shorten it so the URL-safe version stays under 150 characters."
+            )
+        if len(value) > 150:
+            raise serializers.ValidationError(
+                "Title must be 150 characters or fewer."
+            )
+        return value
 
     def get_currency(self, obj):
         request = self.context.get('request')
