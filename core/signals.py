@@ -157,3 +157,15 @@ def invalidate_banners_cache(sender, instance, **kwargs):
     cache_key = 'banners'
     cache.delete(cache_key)
 
+CACHE_KEY = 'home_sliders_static_v1'
+
+
+@receiver(post_save, sender=HomeSlider)
+def clear_slider_cache_on_save(sender, instance, **kwargs):
+    cache.delete(CACHE_KEY)
+
+
+@receiver(post_delete, sender=HomeSlider)
+def clear_slider_cache_on_delete(sender, instance, **kwargs):
+    cache.delete(CACHE_KEY) 
+
