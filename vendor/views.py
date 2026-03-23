@@ -394,6 +394,16 @@ class LocationAutocompleteView(APIView):
             return Response({'error': 'Failed to fetch location suggestions'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+# views.py
+class CheckCustomerAuth(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response({
+            "isAuthenticated": True,
+            "email": request.user.email,
+        })
+
 class VendorSignupAPIView(APIView):
     permission_classes = [IsAuthenticated]
     parser_classes     = [MultiPartParser, FormParser]

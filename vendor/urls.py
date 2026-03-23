@@ -25,12 +25,14 @@ from .views import (
     LocationAutocompleteView,
     BankValidationView,
     PayoutListView,
-    ProductAnalyticsDetailView
+    ProductAnalyticsDetailView,
+    CheckCustomerAuth
 )
 
 urlpatterns = [
     # Vendor Routes
     path('location/autocomplete/', LocationAutocompleteView.as_view(), name='location-autocomplete'),
+    path('check/', CheckCustomerAuth.as_view(), name='check-auth'),
     path('register/', VendorSignupAPIView.as_view(), name='vendor-register'),
     path('product-related-data/', ProductRelatedDataAPIView.as_view(), name='product-related-data'),
 
