@@ -34,9 +34,9 @@ services:
     image: certbot/certbot:latest
     container_name: certbot
     volumes:
-      - /root/backend/certbot-etc:/etc/letsencrypt        # 👈 FIXED
+      - /root/backend/certbot-etc:/etc/letsencrypt
       - certbot-var:/var/lib/letsencrypt
-    entrypoint: /bin/sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/lib/letsencrypt --deploy-hook 'nginx -s reload'; sleep 12h; done"
+    entrypoint: /bin/sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/lib/letsencrypt; sleep 12h & wait $${!}; done"
     restart: always
 
   celery:
