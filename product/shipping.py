@@ -173,53 +173,36 @@ def get_user_country_region(request):
     return location
 
 def can_product_ship_to_user(request, product):
-    """
-    Checks if product ships to user's country.
-    - Returns (True/False, country_name)
-    """
     country_result, region_name = get_user_country_region(request)
+
     logger.debug(f"Country result: {country_result}, Region: {region_name}")
 
     if not country_result:
-        user_info = (
-            f"user:{request.user.id}"
-            if request.user.is_authenticated
-            else f"ip:{get_ip_address_from_request(request)}"
-        )
-        logger.warning(f"No country identified for shipping check for {user_info}")
         return False, None
 
-    # Resolve to Country object (if geolocation returned string)
+    # Normalize country
     if isinstance(country_result, str):
-        country_name = country_result.strip()
-        cache_key = f"country_obj:{country_name.lower().replace(' ', '_')}"
-        country = cache.get(cache_key)
+        value = country_result.strip()
+
+        country = Country.objects.filter(
+            Q(code__iexact=value) |
+            Q(name__iexact=value)
+        ).first()
+
         if not country:
-            try:
-                country = Country.objects.get(Q(name__iexact=country_name) | Q(code__iexact=country_name))
-                cache.set(cache_key, country, 24 * 60 * 60)
-            except Country.DoesNotExist:
-                logger.warning(f"Country not found in DB: {country_name}")
-                return False, country_name
-            except Country.MultipleObjectsReturned:
-                logger.error(f"Multiple countries found for: {country_name}")
-                return False, country_name
+            logger.warning(f"Country not found in DB: {value}")
+            return False, value
+
+        country_name = country.name
     else:
         country = country_result
-        country_name = country.name if country else None
+        country_name = country.name
 
-    # Check shipping eligibility
-    if not country:
-        logger.warning(f"No valid country object for shipping check")
-        return False, country_name
-
+    # Shipping rules
     if not product.available_in_regions.exists():
-        logger.info(f"Product {product.id} has no regions; assuming global shipping.")
         return True, country_name
 
     if product.available_in_regions.filter(id=country.id).exists():
-        logger.info(f"Product {product.id} ships to {country_name}.")
         return True, country_name
 
-    logger.info(f"Product {product.id} does NOT ship to {country_name}.")
     return False, country_name
