@@ -20,7 +20,7 @@ from rest_framework.pagination import PageNumberPagination
 
 from .utils import get_recently_viewed_products, update_recently_viewed
 from .tasks import increment_product_view_count
-from .shipping import can_product_ship_to_user
+# from .shipping import can_product_ship_to_user
 
 class AddProductReviewView(APIView):
     permission_classes = [IsAuthenticated]
@@ -266,7 +266,7 @@ class ProductDetailAPIView(APIView):
             stock_quantity = product.get_stock_quantity(variant)
             is_out_of_stock = stock_quantity <= 0
 
-            can_ship, user_region = can_product_ship_to_user(request, product)
+            # can_ship, user_region = can_product_ship_to_user(request, product)
 
             variant_data = {}
             if product.variant != "None" and variant:
@@ -322,8 +322,8 @@ class ProductDetailAPIView(APIView):
                 "cart_item_id": cart_data["cart_item_id"],
                 'is_following': is_following,
                 'follower_count': follower_count,
-                "user_region": user_region,
-                "can_ship": can_ship,
+                "user_region": None,
+                "can_ship": True,
             }
 
             # Create the response object
