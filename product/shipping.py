@@ -75,32 +75,42 @@ def is_valid_ip(ip):
 
 def get_ip_address_from_request(request):
     """
-    Extract the real client IP from the request, handling Docker + Nginx + optional CDN.
+    Extract the real client IP from the request, handling:
+    - Next.js SSR on Vercel (sends X-Client-IP with the user's real IP)
+    - Cloudflare CDN (sends CF-Connecting-IP)
+    - Docker + Nginx (sends X-Forwarded-For / X-Real-IP)
 
     Resolution order:
-    1. CF-Connecting-IP  — set by Cloudflare, most trustworthy if using CF
-    2. django-ipware      — parses X-Forwarded-For with trusted-proxy awareness
-    3. X-Real-IP          — set by Nginx (proxy_set_header X-Real-IP $remote_addr)
-    4. REMOTE_ADDR        — last resort (will be Docker IP in containerised setups)
+    1. X-Client-IP        — set by Next.js SSR to forward the user's real IP
+    2. CF-Connecting-IP   — set by Cloudflare, most trustworthy if using CF
+    3. django-ipware      — parses X-Forwarded-For with trusted-proxy awareness
+    4. X-Real-IP          — set by Nginx (proxy_set_header X-Real-IP $remote_addr)
+    5. REMOTE_ADDR        — last resort (will be Docker/Vercel IP in hosted setups)
     """
-    # 1. Cloudflare provides the true client IP in a dedicated header
+    # 1. Next.js SSR: the frontend server forwards the user's real IP via X-Client-IP
+    #    because SSR requests come from Vercel's US servers, not the user's browser.
+    client_ip = request.META.get('HTTP_X_CLIENT_IP')
+    if client_ip and is_valid_ip(client_ip):
+        return client_ip
+
+    # 2. Cloudflare provides the true client IP in a dedicated header
     cf_ip = request.META.get('HTTP_CF_CONNECTING_IP')
     if cf_ip and is_valid_ip(cf_ip):
         return cf_ip
 
-    # 2. Let django-ipware parse X-Forwarded-For using settings
+    # 3. Let django-ipware parse X-Forwarded-For using settings
     #    proxy_count=0 → best-effort (picks leftmost public IP)
     ip, is_routable = ipware_get_client_ip(request)
 
     if ip and is_routable:
         return str(ip)
 
-    # 3. Fallback: Nginx sets X-Real-IP to $remote_addr
+    # 4. Fallback: Nginx sets X-Real-IP to $remote_addr
     x_real_ip = request.META.get('HTTP_X_REAL_IP')
     if x_real_ip and is_valid_ip(x_real_ip):
         return x_real_ip
 
-    # 4. Last resort
+    # 5. Last resort
     return request.META.get('REMOTE_ADDR', '127.0.0.1')
 
 def get_user_country_region(request):

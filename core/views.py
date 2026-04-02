@@ -54,6 +54,7 @@ class DebugIPView(APIView):
                 "HTTP_X_FORWARDED_FOR": request.META.get("HTTP_X_FORWARDED_FOR"),
                 "HTTP_X_REAL_IP": request.META.get("HTTP_X_REAL_IP"),
                 "HTTP_CF_CONNECTING_IP": request.META.get("HTTP_CF_CONNECTING_IP"),
+                "HTTP_X_CLIENT_IP": request.META.get("HTTP_X_CLIENT_IP"),
             },
         })
 
