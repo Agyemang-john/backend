@@ -172,10 +172,15 @@ def get_user_country_region(request):
     cache.set(cache_key, location, 60 * 60)
     return location
 
+    # logger.warning(f"Country result: {country_result}, Region: {region_name}")
+        # value = country_result.strip()
+    
+    
 def can_product_ship_to_user(request, product):
     country_result, region_name = get_user_country_region(request)
 
-    logger.debug(f"Country result: {country_result}, Region: {region_name}")
+    logger.warning(f"Country result: {country_result}, Region: {region_name}")
+
 
     if not country_result:
         return False, None
@@ -185,8 +190,8 @@ def can_product_ship_to_user(request, product):
         value = country_result.strip()
 
         country = Country.objects.filter(
-            Q(code__iexact=value) |
-            Q(name__iexact=value)
+            Q(name__iexact=value) |
+            Q(code__iexact=value)
         ).first()
 
         if not country:
