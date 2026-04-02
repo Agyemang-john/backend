@@ -1,3 +1,11 @@
+"""
+userauths/serializers.py
+DRF serializers for authentication flows:
+- CustomPasswordResetSerializer: handles password reset with social-auth detection
+- CustomTokenObtainPairSerializer: login with email/phone, lockout after failed attempts
+- CustomerCustomTokenRefreshSerializer: refresh tokens from HTTP-only cookies
+- RegisterSerializer: new user registration with strong password validation
+"""
 
 import re
 from rest_framework import serializers
@@ -6,14 +14,13 @@ from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth import authenticate
 from django.core.mail import send_mail
 from django.conf import settings
-from .models import User 
+from .models import User
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.template.loader import render_to_string
 from django.utils.html import strip_tags
 from django.core.validators import validate_email
 from djoser.conf import settings as djoser_settings
-# from djoser.serializers import PasswordResetSerializer
 from django.utils import timezone
 from datetime import timedelta
 from django.db.models import F
@@ -66,37 +73,13 @@ class CustomPasswordResetSerializer(serializers.Serializer):
         send_mail(subject, plain_message, from_email, [to], html_message=html_message)
 
 
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from django.core.mail import send_mail
-from django.conf import settings
-from django.contrib.auth import authenticate
-from django.core.exceptions import ValidationError
-from django.core.validators import validate_email
-from django.utils import timezone
-from django.db.models import F
-from .models import User
-from datetime import timedelta
 import random
-
-
-
-class OTPTokenGenerator:
-    token_ttl = timedelta(minutes=10)
-
-    def generate_otp(self):
-        return random.randint(10000, 99999)
-
-    def _is_token_expired(self, timestamp):
-        expiration_time = self._num_minutes(self.token_ttl)
-        return timezone.now() > (timestamp + timedelta(minutes=expiration_time))
-
-    def _num_minutes(self, td):
-        return td.days * 24 * 60 + td.seconds // 60 + td.microseconds / 60e6
+from .otp import OTPTokenGenerator
 
 otp_token_generator = OTPTokenGenerator()
 
-MAX_FAILED_ATTEMPTS = 5      # max attempts before lockout
-LOCKOUT_TIME = timedelta(minutes=15)  # lockout duration
+MAX_FAILED_ATTEMPTS = 5      # Max failed login attempts before lockout
+LOCKOUT_TIME = timedelta(minutes=15)  # Duration of lockout
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     email = serializers.CharField()  # can be email or phone
@@ -180,8 +163,8 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             "access": str(refresh.access_token),
         }
 
-from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+
 
 class CustomerCustomTokenRefreshSerializer(TokenRefreshSerializer):
     refresh = serializers.CharField(required=False, write_only=True)
@@ -218,11 +201,10 @@ class CustomerCustomTokenRefreshSerializer(TokenRefreshSerializer):
         data["access"] = str(access)
         return data
 
-import re
 from django.contrib.auth import get_user_model
-from rest_framework import serializers
 
 User = get_user_model()
+
 
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)

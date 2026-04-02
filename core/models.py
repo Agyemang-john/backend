@@ -1,6 +1,11 @@
-from django.db import models
+"""
+core/models.py
+Models for homepage and promotional content:
+- CurrencyRate: stores exchange rates for offline/fallback currency conversion
+- HomeSlider: hero banner slides on the homepage
+- Banners: smaller promotional banners throughout the site
+"""
 
-# Create your models here.
 from django.db import models
 from django.utils.html import mark_safe
 from vendor.models import *
@@ -81,7 +86,10 @@ class HomeSlider(models.Model):
         ]
 
     def slider_image(self):
-        return mark_safe('<img src="%s" width="50" height="50" />' % (self.image_desktop.url))
+        """Admin thumbnail preview. Returns empty string if no image uploaded."""
+        if self.image_desktop:
+            return mark_safe('<img src="%s" width="50" height="50" />' % (self.image_desktop.url))
+        return ""
 
     def __str__(self):
         return self.title
@@ -116,7 +124,10 @@ class Banners(models.Model):
         ]
 
     def banner_image(self):
-        return mark_safe('<img src="%s" width="50" height="50" />' % (self.image.url))
+        """Admin thumbnail preview. Returns empty string if no image uploaded."""
+        if self.image:
+            return mark_safe('<img src="%s" width="50" height="50" />' % (self.image.url))
+        return ""
 
     def __str__(self):
         return self.title

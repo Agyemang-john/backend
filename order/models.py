@@ -1,17 +1,30 @@
+"""
+Order models for the e-commerce platform.
+
+Defines the core order-related data structures including Cart, CartItem, Order,
+OrderProduct, DeliveryRate, Shipment, TrackingEvent, and CampusZone. Handles
+cart management, order lifecycle, delivery fee calculation, shipment tracking,
+and campus-zone-based delivery logic.
+"""
+
+import logging
+import uuid
+
 from django.db import models
-from product.models import *
+from django.db.models import Q
+from django.utils import timezone
 from django.utils.html import mark_safe
+from django.contrib.auth import get_user_model
+from decimal import Decimal
+
+from product.models import *
+from product.utils import *
 from address.models import *
 from vendor.models import *
-from decimal import Decimal
-from django.contrib.auth import get_user_model
-from product.utils import *
 from .service import FeeCalculator, FeeResult
-from django.db.models import Q
 from userauths.models import Profile
 
-
-# Create your models here.
+logger = logging.getLogger(__name__)
 
 PAYMENT_STATUS = (
     ('received', 'Received'),

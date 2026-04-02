@@ -78,11 +78,13 @@ class VendorAdmin(admin.ModelAdmin):
     suspend_vendors.short_description = "Suspend selected vendors"
 
     def get_fields(self, request, obj=None):
-        fields = super().get_fields(request, obj)
+        # super() may return a tuple which is immutable — convert to list
+        fields = list(super().get_fields(request, obj))
         if obj:
-            if obj.vendor_type == 'student':
+            # Show only the relevant ID field based on vendor type
+            if obj.vendor_type == 'student' and 'government_issued_id' in fields:
                 fields.remove('government_issued_id')
-            else:
+            elif 'student_id' in fields:
                 fields.remove('student_id')
         return fields
 

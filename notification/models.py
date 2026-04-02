@@ -1,9 +1,21 @@
-# notifications/models.py
+"""
+notification/models.py
+Models for the notification and support system:
+- Notification: generic notifications with verb choices, polymorphic actor/target, and read state.
+  Uses a custom manager for efficient unread counts and bulk mark-read.
+- ContactInquiry: public "Contact Us" form submissions (supports guest and logged-in users).
+- Report: user-submitted reports for abusive content, fake products, etc. Uses GenericForeignKey.
+- SupportTicket: auto-created from ContactInquiry, tracks priority and assignment.
+- TicketReply: threaded replies on support tickets (internal or customer-visible).
+"""
+
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.utils import timezone
+from django.core.validators import MinLengthValidator
+import uuid
 
 User = get_user_model()
 
@@ -121,11 +133,6 @@ class Notification(models.Model):
         return dict(self.VERB_CHOICES).get(self.verb, self.verb)
     
 
-
-# models.py
-from django.db import models
-from django.core.validators import MinLengthValidator
-import uuid
 
 
 class ContactInquiry(models.Model):

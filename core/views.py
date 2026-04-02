@@ -1,21 +1,61 @@
+"""
+core/views.py
+API views for the homepage and supporting data:
+- HomeSliderView: promotional sliders with currency conversion
+- BannersView: site banners
+- MainCategoryWithCategoriesAPIView: navigation menu data
+- CategoryDetailView: single category with subcategories
+- TopEngagedCategoryView: highest-engagement category
+- MainAPIView: combined homepage payload (products, brands, subcategories)
+- RecentlyViewedRelatedProductsAPIView: related products based on recently viewed
+- SearchedProducts: persists search history in cookies
+- RecommendedProducts: personalised recommendations from viewed + searched
+- TrendingProductsAPIView: top trending products by score
+- SuggestedCartProductsAPIView: suggestions based on current cart contents
+- MakeDefaultAddressView: set/get default address for a user
+"""
+
 from django.shortcuts import get_object_or_404
 from rest_framework.response import Response
 from .models import *
 from order.models import *
 from .serializers import *
 from product.serializers import ProductSerializer
-from django.db.models import Avg, Count
+from django.db.models import Avg, Count, Q
 import random
 import json
 from django.core.cache import cache
 from rest_framework import status
-from rest_framework.response import Response
 from rest_framework.views import APIView
 from address.serializers import *
 from order.service import *
 from rest_framework.permissions import IsAuthenticated
 from .service import *
-from django.core.serializers import serialize
+from product.shipping import get_ip_address_from_request, get_user_country_region
+
+
+class DebugIPView(APIView):
+    """
+    Temporary debug endpoint to verify IP detection in production.
+    Hit GET /api/debug/ip/ and check what Django sees.
+    REMOVE THIS VIEW once IP geolocation is confirmed working.
+    """
+    permission_classes = []
+
+    def get(self, request):
+        ip = get_ip_address_from_request(request)
+        country, region = get_user_country_region(request)
+        return Response({
+            "resolved_ip": ip,
+            "country": str(country),
+            "region": region,
+            "headers": {
+                "REMOTE_ADDR": request.META.get("REMOTE_ADDR"),
+                "HTTP_X_FORWARDED_FOR": request.META.get("HTTP_X_FORWARDED_FOR"),
+                "HTTP_X_REAL_IP": request.META.get("HTTP_X_REAL_IP"),
+                "HTTP_CF_CONNECTING_IP": request.META.get("HTTP_CF_CONNECTING_IP"),
+            },
+        })
 
 
 class HomeSliderView(APIView):
@@ -311,14 +351,16 @@ class RecommendedProducts(APIView):
     
 
 class TrendingProductsAPIView(APIView):
+    """Returns top 10 products by trending_score, cached for 10 minutes."""
+
     def get(self, request):
-        products_data = cache.get("top_trending_product")
+        products_data = cache.get("top_trending_products")
 
         if not products_data:
             products = Product.objects.filter(status='published').order_by('-trending_score')[:10]
-            # Serialize in base currency only (GHS)
+            # Serialize in base currency (GHS); currency conversion happens below per-request
             products_data = ProductSerializer(products, many=True, context={'request': request}).data
-            cache.set("top_trending_products", products_data, timeout=600)  # Cache for 10 minutes
+            cache.set("top_trending_products", products_data, timeout=600)
 
         # Always convert prices for current request currency (dynamic part)
         currency = request.headers.get('X-Currency', 'GHS')

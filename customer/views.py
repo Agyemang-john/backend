@@ -1,12 +1,24 @@
+"""
+Views for the customer app.
+
+Exposes API endpoints for managing the authenticated customer's profile,
+orders, reviews, password changes, and wishlist.
+"""
+
+import logging
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import NotFound, APIException
+
 from userauths.models import Profile
 from .serializers import *
-from product.models import  *
+from product.models import *
 from order.models import *
-from rest_framework.exceptions import NotFound, APIException
+
+logger = logging.getLogger(__name__)
 
 class ProfileAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -29,7 +41,8 @@ class ProfileAPIView(APIView):
         if serializer.is_valid():
             serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
-        print(serializer.errors)
+        # Log validation errors instead of printing to stdout
+        logger.warning("Profile creation validation errors: %s", serializer.errors)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def put(self, request, *args, **kwargs):

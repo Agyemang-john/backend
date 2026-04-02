@@ -1,11 +1,25 @@
+"""
+payments/paystack.py
+Lightweight wrapper around the Paystack REST API.
+
+Usage:
+    paystack = Paystack()
+    ok, data = paystack.verify_payment("REF_123")
+"""
+
 from django.conf import settings
 import requests
+
 
 class Paystack:
     PAYSTACK_SK = settings.PAYSTACK_PRIVATE_KEY
     base_url = "https://api.paystack.co/"
 
     def verify_payment(self, ref, *args, **kwargs):
+        """
+        Verify a Paystack transaction by reference.
+        Returns (status: bool, data_or_message: dict|str).
+        """
         path = f'transaction/verify/{ref}'
         headers = {
             "Authorization": f"Bearer {self.PAYSTACK_SK}",
@@ -14,24 +28,8 @@ class Paystack:
         url = self.base_url + path
         response = requests.get(url, headers=headers)
 
+        response_data = response.json()
         if response.status_code == 200:
-            response_data = response.json()
             return response_data['status'], response_data['data']
 
-        response_data = response.json()
-
         return response_data['status'], response_data['message']
-    
-    def amount_value(self):
-        return int(self.amount) * 100
-
-def verify_payment(self):
-    paystack = Paystack()
-    status, result = paystack.verify_payment(self.ref, self.amount)
-    if status:
-        if result['amount'] / 100 == self.amount:
-            self.verified = True
-        self.save()
-    if self.verified:
-        return True
-    return False

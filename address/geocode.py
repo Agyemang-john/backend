@@ -1,5 +1,17 @@
-# utils/geocode.py
+"""
+Geocoding utility for the address app.
+
+Provides a helper function that resolves a free-text address string
+to latitude / longitude coordinates using the OpenStreetMap Nominatim
+API.  Results are returned as a (lat, lon) tuple, or (None, None) on
+failure.
+"""
+
+import logging
 import requests
+
+logger = logging.getLogger(__name__)
+
 
 def geocode_address(address_str):
     """
@@ -23,7 +35,8 @@ def geocode_address(address_str):
         data = response.json()
         if data:
             return float(data[0]['lat']), float(data[0]['lon'])
-    except Exception:
-        pass
+    except Exception as exc:
+        # Log the error instead of silently swallowing it
+        logger.error("Geocoding failed for '%s': %s", address_str, exc)
 
     return None, None

@@ -1,3 +1,17 @@
+"""
+product/models.py
+Data models for the product catalog:
+- Main_Category, Category, Sub_Category: three-level navigation hierarchy
+- Brand, Type: product classification
+- DeliveryOption, ProductDeliveryOption: shipping methods per product
+- Product: core product model with full-text search, trending scores, variants
+- Variants: size/color/price variants of a product
+- ProductImages, VariantImage: product and variant image galleries
+- ProductReview: customer reviews with ratings
+- Wishlist: saved products per user
+- Color, Size: attribute models for variants
+"""
+
 from django.db import models
 from shortuuid.django_fields import ShortUUIDField
 from django.utils.html import mark_safe
@@ -8,8 +22,6 @@ from .utils import *
 from datetime import timedelta
 from address.models import Country
 from django_ckeditor_5.fields import CKEditor5Field
-# from order.models import DeliveryType
-# Create your models here.
 from django.conf import settings
 from django.contrib.postgres.indexes import GinIndex
 from django.contrib.postgres.search import SearchVectorField
@@ -328,8 +340,10 @@ class Product(models.Model):
         return self.title
     
     def get_percentage(self):
-        new_price = (self.price - self.old_price) / (self.price) * 100
-        return new_price
+        """Calculate the discount percentage between old_price and price."""
+        if not self.price or self.price == 0:
+            return 0
+        return (self.price - self.old_price) / self.price * 100
     
     def get_stock_quantity(self, variant=None):
         if self.variant in ['Size', 'Color', 'Size-Color']:

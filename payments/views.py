@@ -1,17 +1,30 @@
-from django.shortcuts import redirect
+"""
+payments/views.py
+API views for payment processing and subscription management:
+- VerifyPaymentAPIView: verifies Paystack payment and triggers order creation
+- SubscriptionPlanListView: lists available subscription plans
+- InitiateSubscriptionView / VerifySubscriptionView: subscription payment flow
+- CurrentSubscriptionView / CancelSubscriptionView / AutoRenewToggleView: manage subscriptions
+- PaymentHistoryView / SavedCardsView: transaction and card management
+- PaystackWebhookView: receives Paystack webhook events
+"""
 
+import logging
+from django.shortcuts import redirect
 from .models import Payment
 from django.conf import settings
 import requests
 from order.models import Cart, Order
 from address.models import Address
 from product.models import *
-from . models import *
+from .models import *
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from .tasks import create_order_from_payment_task
+
+logger = logging.getLogger(__name__)
 
 
 class VerifyPaymentAPIView(APIView):

@@ -1,13 +1,26 @@
+"""
+core/serializers.py
+Serializers used by homepage and core API views:
+- UserSerializer: lightweight user representation with profile image
+- ProductSerializer: product card data with currency-converted prices
+- SubCategorySerializer: subcategory card for navigation
+- TopEngagedCategorySerializer: category with nested subcategories
+- CategoryWithSubcategoriesSerializer: category detail with subcategories + products
+- MainCategoryWithCategoriesAndSubSerializer: full menu tree
+- BrandSerializer, VendorSerializer, AboutSerializer, OpeningHourSerializer
+- ProductReviewSerializer: product review with user info
+- HomeSliderSerializer, BannersSerializer: promotional content
+"""
+
 from rest_framework import serializers
-from product.models import  *
+from product.models import *
 from order.models import *
 from .models import *
 from django.contrib.auth import get_user_model
 from address.models import *
 from .service import get_exchange_rates
 from decimal import Decimal
-import random  # make sure this import is at the top of your file
-
+import random
 
 User = get_user_model()
 
@@ -113,7 +126,8 @@ class MainCategoryWithCategoriesAndSubSerializer(serializers.ModelSerializer):
 
     def get_categories(self, obj):
         categories = Category.objects.filter(main_category=obj)
-        return CategoryWithSubcategoriesSerializer(categories, many=True).data
+        # Pass context so nested serializers can build absolute URLs
+        return CategoryWithSubcategoriesSerializer(categories, many=True, context=self.context).data
 
 class BrandSerializer(serializers.ModelSerializer):
     class Meta:
@@ -177,21 +191,10 @@ class ProductReviewSerializer(serializers.ModelSerializer):
         return None
 
     def create(self, validated_data):
-        # Pop user from context and assign it explicitly
+        """Assign the authenticated user as the review author on creation."""
         user = self.context['request'].user
         review = ProductReview.objects.create(user=user, **validated_data)
         return review
-
-    def create(self, validated_data):
-        """
-        Ensure that the same product cannot be added multiple times for the same user.
-        """
-        user = validated_data['user']
-        product = validated_data['product']
-        wishlist_item, created = Wishlist.objects.get_or_create(user=user, product=product)
-        if not created:
-            raise serializers.ValidationError("This product is already in your wishlist.")
-        return wishlist_item
 
 
 class HomeSliderSerializer(serializers.ModelSerializer):
@@ -221,10 +224,5 @@ class HomeSliderSerializer(serializers.ModelSerializer):
 class BannersSerializer(serializers.ModelSerializer):
     class Meta:
         model = Banners
-        fields = '__all__'
-
-class SubCategorySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Sub_Category
         fields = '__all__'
 

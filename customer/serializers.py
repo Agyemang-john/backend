@@ -1,5 +1,15 @@
+"""
+Serializers for the customer app.
+
+Handles serialization / deserialization of user profiles, addresses,
+orders, products, delivery options, reviews, wishlists, and password
+changes for the customer-facing API.
+"""
+
+import logging
+
 from rest_framework import serializers
-from product.models import  *
+from product.models import *
 from order.models import *
 from django.contrib.auth import get_user_model
 from django.db.models.query_utils import Q
@@ -7,6 +17,7 @@ from address.models import *
 from userauths.models import Profile
 from django.contrib.auth.password_validation import validate_password
 
+logger = logging.getLogger(__name__)
 
 User = get_user_model()
 

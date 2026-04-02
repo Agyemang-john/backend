@@ -603,17 +603,30 @@ Ckeditor5_filetype_whitelist = [
 ]
 
 
+# django-ipware: header precedence for extracting the client IP.
+# CF-Connecting-IP is checked first (Cloudflare), then standard proxy headers.
 IPWARE_META_PRECEDENCE_ORDER = (
-    'HTTP_X_FORWARDED_FOR',
-    'X_FORWARDED_FOR',
-    'HTTP_X_REAL_IP',
-    'HTTP_CLIENT_IP',
-    'REMOTE_ADDR',
+    'HTTP_CF_CONNECTING_IP',    # Cloudflare (most reliable if using CF)
+    'HTTP_X_FORWARDED_FOR',     # Standard proxy header (Nginx, LBs)
+    'HTTP_X_REAL_IP',           # Nginx's X-Real-IP
+    'REMOTE_ADDR',              # Direct connection (last resort)
 )
 
-IPWARE_TRUSTED_PROXY_LIST = ['127.0.0.1'] 
+# Trust Docker-internal IPs as proxies so ipware reads X-Forwarded-For.
+# In Docker, Nginx talks to Django via the bridge network (172.x.x.x),
+# NOT 127.0.0.1 — so we must trust the entire private range.
+IPWARE_TRUSTED_PROXY_LIST = [
+    '127.0.0.1',
+    '10.0.0.0/8',        # Docker overlay / DigitalOcean internal
+    '172.16.0.0/12',     # Docker bridge networks (172.16–31.x.x)
+    '192.168.0.0/16',    # Other private ranges
+]
 
-IPWARE_TRUSTED_PROXY_COUNT = 1
+# Number of proxies between the client and Django.
+# 0 = best-effort (ipware picks the leftmost public IP from X-Forwarded-For).
+# Set to 1 ONLY if you have exactly one proxy (Nginx) AND no upstream LB/CDN.
+# 0 is safer because it works whether or not there's a CDN in front.
+IPWARE_TRUSTED_PROXY_COUNT = 0
 
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 USE_X_FORWARDED_HOST = True

@@ -19,6 +19,8 @@ RUN pip install --upgrade pip && \
 # Copy source code
 COPY . .
 
-# 
+# --forwarded-allow-ips="*" tells gunicorn to trust X-Forwarded-For from any IP.
+# Required because Nginx contacts Django via Docker's bridge network (172.x.x.x),
+# and gunicorn's default only trusts 127.0.0.1.
 # CMD ["daphne", "-b", "0.0.0.0", "-p", "8000", "ecommerce.asgi:application", "--access-log", "-", "--proxy-headers"]
-CMD ["gunicorn", "ecommerce.asgi:application", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--workers", "2", "--timeout", "300"]
+CMD ["gunicorn", "ecommerce.asgi:application", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--workers", "2", "--timeout", "300", "--forwarded-allow-ips", "*"]

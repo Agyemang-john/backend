@@ -1,13 +1,22 @@
+"""
+userauths/utils.py
+Utility helpers for the authentication module:
+- generate_otp(): creates a time-based OTP using pyotp
+- send_email_otp(): sends an OTP code via styled HTML email
+- send_activation_email_safe(): queues an activation email via Celery (never breaks registration)
+"""
+
+import logging
 from django.contrib.sites.shortcuts import get_current_site
 from django.template.loader import render_to_string
 from django.core.mail import EmailMessage
 from ecommerce import settings
 from django.core.cache import cache
 from .tasks import send_activation_email_task
-from  .otp import cache_activation_data
-
-# from twilio.rest import Client
+from .otp import cache_activation_data
 import pyotp
+
+logger = logging.getLogger(__name__)
 
 def generate_otp(secret_key=None, interval=300):
     """
@@ -51,7 +60,7 @@ def send_email_otp(to_email, otp, user_name, request):
         email.send()
         return True
     except Exception as e:
-        print(f"Error sending email: {e}")
+        logger.error(f"Error sending OTP email to {to_email}: {e}")
         return False
 
 def send_activation_email_safe(user):
@@ -69,8 +78,8 @@ def send_activation_email_safe(user):
 
     try:
         send_activation_email_task.delay(user_data, activation_link)
-    except:
-        # Absolutely NEVER break registration
-        pass
+    except Exception as e:
+        # Log but NEVER break registration if the email task fails
+        logger.error(f"Failed to queue activation email for {user.email}: {e}")
 
     return activation_data

@@ -1,8 +1,16 @@
+"""
+Models for the address app.
+
+Defines the Country, Region, Town, Location, and Address models used
+to store geographic and user-address data.  The Address model
+auto-geocodes via the Nominatim API on save when coordinates are missing.
+"""
+
 from django.db import models
 from django.utils import timezone
 from django.core.validators import EmailValidator, RegexValidator
 from userauths.models import User
-from .geocode import geocode_address  # import your helper
+from .geocode import geocode_address  # import the geocoding helper
 
 
 class Country(models.Model):
@@ -67,8 +75,8 @@ class Address(models.Model):
     modified_at = models.DateTimeField(auto_now=True)
     date_added = models.DateTimeField(default=timezone.now)
 
-    def __str__(self):
-        return f"{self.full_name} - {self.user.email} ({self.status})"
+    # NOTE: Duplicate __str__ removed during audit -- the version after save()
+    # is the canonical one, showing 'Default' / 'Secondary' instead of raw bool.
 
     class Meta:
         verbose_name_plural = "Addresses"

@@ -1,19 +1,27 @@
+"""
+Views for the address app.
+
+Provides API endpoints for creating, listing, retrieving, updating,
+deleting, and setting default user addresses. Includes auto-geocoding
+via the Nominatim API when latitude/longitude are not supplied.
+"""
+
+import logging
+import requests
+
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
-from .serializers import *
+from rest_framework.generics import GenericAPIView, RetrieveUpdateDestroyAPIView
+from rest_framework.response import Response
+from rest_framework.exceptions import NotFound, ValidationError
+from django.db.models.deletion import ProtectedError
+from django.db import transaction
+
 from userauths.models import Profile
 from order.service import *
-# User = get_user_model()
-from django.db.models.deletion import ProtectedError
-from rest_framework.generics import RetrieveUpdateDestroyAPIView
-from rest_framework.exceptions import NotFound, ValidationError
-from django.db import transaction
-from .serializers import AddressSerializer
-import logging
-from rest_framework.generics import GenericAPIView
-from rest_framework.response import Response
 from address.models import Address
+from .serializers import AddressSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -149,8 +157,6 @@ class AddressDetailView(RetrieveUpdateDestroyAPIView):
                 'data': None
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-
-from django.db import transaction
 
 class MakeDefaultAddressView(APIView):
     permission_classes = [IsAuthenticated]

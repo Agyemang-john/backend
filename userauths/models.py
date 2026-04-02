@@ -1,3 +1,13 @@
+"""
+userauths/models.py
+Core user and profile models for the platform:
+- User: custom user model with email as USERNAME_FIELD, supports email+phone login,
+  role-based access (customer, vendor, admin, etc.), and login lockout after failed attempts.
+- Profile: one-to-one extension of User with address, avatar generation, and preferences.
+- ContactUs: stores contact-form submissions.
+- SubscribedUsers / MailMessage: legacy newsletter models.
+"""
+
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.utils import timezone
@@ -8,7 +18,6 @@ from PIL import Image
 from io import BytesIO
 from rest_framework_simplejwt.tokens import RefreshToken
 import re
-# from address.models import Country, Region, Town
 
 ROLE_CHOICES = (
     ('vendor', 'Vendor'),
