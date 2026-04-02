@@ -172,30 +172,37 @@ def get_user_country_region(request):
     cache.set(cache_key, location, 60 * 60)
     return location
 
-    # logger.warning(f"Country result: {country_result}, Region: {region_name}")
-    
 def can_product_ship_to_user(request, product):
     country_result, region_name = get_user_country_region(request)
 
-    if not country_result:
-        return False, "Unknown"
+    logger.debug(f"Country result: {country_result}, Region: {region_name}")
 
-    # Ensure we have a Country Model Instance
+    if not country_result:
+        return False, None
+
+    # Normalize country
     if isinstance(country_result, str):
+        value = country_result.strip()
+
         country = Country.objects.filter(
-            Q(code__iexact=country_result) | Q(name__iexact=country_result)
+            Q(code__iexact=value) |
+            Q(name__iexact=value)
         ).first()
+
+        if not country:
+            logger.warning(f"Country not found in DB: {value}")
+            return False, value
+
+        country_name = country.name
     else:
         country = country_result
+        country_name = country.name
 
-    if not country:
-        return False, str(country_result)
-
-    # Shipping Logic
+    # Shipping rules
     if not product.available_in_regions.exists():
-        return True, country.name
+        return True, country_name
 
     if product.available_in_regions.filter(id=country.id).exists():
-        return True, country.name
+        return True, country_name
 
-    return False, country.name
+    return False, country_name
