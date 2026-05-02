@@ -198,31 +198,39 @@ class ProductReviewSerializer(serializers.ModelSerializer):
 
 
 class HomeSliderSerializer(serializers.ModelSerializer):
-    price = serializers.DecimalField(max_digits=10, decimal_places=2)
-    currency = serializers.SerializerMethodField()
-
     class Meta:
         model = HomeSlider
         fields = [
-            'id',
-            'title',
-            'deal_type',
-            'price',          # BASE price (GHS)
-            'currency',       # injected later
-            'price_prefix',
-            'link_url',
-            'image_mobile',
-            'image_desktop',
-            'order',
-            'is_active',
+            'id', 'title', 'subtitle', 'description', 'deal_type',
+            'price_prefix', 'price', 'image_desktop', 'image_mobile',
+            'link_url', 'cta_label', 'text_theme', 'content_align',
+            'cta_position', 'is_active', 'order',
         ]
-
-    def get_currency(self, obj):
-        # Static serializer does not compute currency
-        return None
 
 class BannersSerializer(serializers.ModelSerializer):
     class Meta:
         model = Banners
         fields = '__all__'
+
+
+class PromoCardSerializer(serializers.ModelSerializer):
+    image = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PromoCard
+        fields = [
+            'id', 'title', 'eyebrow', 'link_url', 'link_text',
+            'image', 'card_color', 'badge_text', 'badge_color',
+            'text_color', 'link_color', 'is_tall', 'position',
+        ]
+
+    def get_image(self, obj):
+        request = self.context.get('request')
+        if obj.image:
+            try:
+                url = obj.image.url
+                return request.build_absolute_uri(url) if request else url
+            except Exception:
+                return None
+        return None
 

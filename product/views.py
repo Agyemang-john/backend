@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from .models import *
 from order.models import *
 from .serializers import *
-from django.db.models import Avg, Count, Q, Max, Min
+from django.db.models import Avg, Count, Q, Max, Min, Prefetch
 from address.serializers import AddressSerializer
 from django.http import Http404
 from django.core.cache import cache
@@ -309,9 +309,40 @@ class ProductDetailAPIView(APIView):
             # Optimize cart data retrieval
             cart_data = self._get_cart_data(request, product, variant)
 
-            # if cart_data["cart_quantity"] >= stock_quantity and stock_quantity != 0:
-            #     is_out_of_stock = True
-            
+            # Wishlist check
+            is_wishlisted = False
+            wishlist_item_id = None
+            if request.user.is_authenticated:
+                wishlist_item = Wishlist.objects.filter(user=request.user, product=product).first()
+                is_wishlisted = wishlist_item is not None
+                wishlist_item_id = wishlist_item.id if wishlist_item else None
+
+            # Fresh flash sale lookup — never cached, changes every minute
+            # Variant-specific sale takes priority over product-level; product-level only
+            # shows when no variant is selected or no variant-specific sale exists.
+            from django.utils import timezone as tz
+            from django.db.models import Case, When, IntegerField as _IntField
+            now = tz.now()
+            base_qs = FlashSale.objects.filter(
+                product=product, is_active=True,
+                start_time__lte=now, end_time__gte=now,
+            )
+            if variant:
+                active_flash = (
+                    base_qs
+                    .filter(Q(variant=variant) | Q(variant__isnull=True))
+                    .annotate(specificity=Case(
+                        When(variant__isnull=False, then=0),
+                        default=1,
+                        output_field=_IntField(),
+                    ))
+                    .order_by('specificity')
+                    .first()
+                )
+            else:
+                active_flash = base_qs.filter(variant__isnull=True).first()
+            flash_data = FlashSaleSerializer(active_flash, context={'request': request}).data if active_flash else None
+
             response_data = {
                 **shared_data,
                 "address": AddressSerializer(address).data if address else None,
@@ -324,6 +355,9 @@ class ProductDetailAPIView(APIView):
                 'follower_count': follower_count,
                 "user_region": user_region,
                 "can_ship": can_ship,
+                "is_wishlisted": is_wishlisted,
+                "wishlist_item_id": wishlist_item_id,
+                "active_flash_sale": flash_data,
             }
 
             # Create the response object
@@ -1239,3 +1273,193 @@ class FrequentlyBoughtTogetherAPIView(APIView):
         # Step 4: Serialize and return
         serializer = ProductSerializer(related_products, many=True, context={'request': request})
         return Response(serializer.data, status=200)
+
+
+class OccasionListAPIView(APIView):
+    """
+    Returns all active occasions (within date range) with their sections
+    and 4 preview products per section. Cached 30 min.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from django.db.models import Q as Qm
+        today = timezone.now().date()
+        cache_key = f'occasions_list_{request.headers.get("X-Currency","GHS")}'
+        cached = cache.get(cache_key)
+        if cached:
+            return Response(cached)
+
+        qs = Occasion.objects.filter(is_active=True).filter(
+            Qm(start_date__isnull=True) | Qm(start_date__lte=today)
+        ).filter(
+            Qm(end_date__isnull=True) | Qm(end_date__gte=today)
+        ).prefetch_related(
+            Prefetch(
+                'sections',
+                queryset=OccasionSection.objects.select_related('collection').order_by('position')
+            )
+        )
+        data = OccasionSerializer(qs, many=True, context={'request': request}).data
+        cache.set(cache_key, data, 60 * 30)
+        return Response(data)
+
+
+class CollectionAPIView(APIView):
+    """
+    Returns a marketing collection (Back to School, Christmas, etc.) with its
+    products and sidebar filter options.  Mirrors the CategoryProductListView
+    response shape so the frontend can reuse the same product grid + sidebar.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, slug):
+        collection = get_object_or_404(Collection, slug=slug, is_active=True)
+
+        currency = request.headers.get('X-Currency', 'GHS')
+        rates = get_exchange_rates()
+        exchange_rate = Decimal(str(rates.get(currency, 1)))
+
+        # Parse query params
+        page = max(1, int(request.GET.get('page', 1) or 1))
+        active_colors  = [int(v) for v in request.GET.getlist('color')  if v.isdigit()]
+        active_sizes   = [int(v) for v in request.GET.getlist('size')   if v.isdigit()]
+        active_brands  = [int(v) for v in request.GET.getlist('brand')  if v.isdigit()]
+        active_vendors = [int(v) for v in request.GET.getlist('vendor') if v.isdigit()]
+        active_ratings = [int(v) for v in request.GET.getlist('rating') if v.isdigit()]
+        raw_from = request.GET.get('from')
+        raw_to   = request.GET.get('to')
+        min_price = Decimal(str(raw_from)) if raw_from else None
+        max_price = Decimal(str(raw_to))   if raw_to   else None
+
+        base_qs = collection.get_products_qs().select_related(
+            'vendor', 'brand', 'sub_category'
+        ).prefetch_related(
+            Prefetch(
+                'variants',
+                queryset=Variants.objects.select_related('color', 'size').only(
+                    'id', 'product_id', 'color__id', 'color__name', 'color__code',
+                    'size__id', 'size__name', 'quantity', 'price',
+                )
+            )
+        ).only(
+            'id', 'title', 'slug', 'sku', 'image', 'price', 'old_price',
+            'brand__id', 'brand__title', 'brand__slug',
+            'vendor__id', 'vendor__name',
+            'sub_category__id', 'sub_category__title',
+        )
+
+        filtered = base_qs
+        needs_distinct = False
+
+        if active_colors:
+            filtered = filtered.filter(variants__color__id__in=active_colors)
+            needs_distinct = True
+        if active_sizes:
+            filtered = filtered.filter(variants__size__id__in=active_sizes)
+            needs_distinct = True
+        if active_brands:
+            filtered = filtered.filter(brand__id__in=active_brands)
+        if active_vendors:
+            filtered = filtered.filter(vendor__id__in=active_vendors)
+        if min_price is not None:
+            filtered = filtered.filter(price__gte=min_price / exchange_rate)
+        if max_price is not None:
+            filtered = filtered.filter(price__lte=max_price / exchange_rate)
+
+        filtered = filtered.annotate(
+            average_rating=Avg('reviews__rating'),
+            review_count=Count('reviews', distinct=True),
+        )
+        if active_ratings:
+            filtered = filtered.filter(average_rating__gte=min(active_ratings))
+        if needs_distinct:
+            filtered = filtered.distinct()
+
+        filtered = filtered.order_by('id')
+
+        PAGE_SIZE = 12
+        total_items = filtered.count()
+        total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
+        page = max(1, min(page, total_pages))
+        paged = list(filtered[(page - 1) * PAGE_SIZE: page * PAGE_SIZE])
+
+        products_with_details = []
+        for product in paged:
+            variants = list(product.variants.all())
+            seen_colors = {}
+            for v in variants:
+                if v.color and v.color.id not in seen_colors:
+                    seen_colors[v.color.id] = {
+                        'color__name': v.color.name,
+                        'color__code': v.color.code,
+                        'id': v.id,
+                    }
+            products_with_details.append({
+                'product': ProductSerializer(product, context={'request': request}).data,
+                'average_rating': float(product.average_rating) if product.average_rating else 0.0,
+                'review_count': product.review_count or 0,
+                'variants': VariantSerializer(variants, many=True).data,
+                'colors': list(seen_colors.values()),
+            })
+
+        # Sidebar filter options from the unfiltered base
+        filter_cache_key = f"collection_filters:{slug}"
+        filter_options = cache.get(filter_cache_key)
+        if not filter_options:
+            sizes   = list(Size.objects.filter(variants__product__in=base_qs).distinct().values('id', 'name'))
+            colors  = list(Color.objects.filter(variants__product__in=base_qs).distinct().values('id', 'name', 'code'))
+            brands  = list(Brand.objects.filter(product__in=base_qs).distinct().values('id', 'title', 'slug'))
+            vendors = list(Vendor.objects.filter(product__in=base_qs).distinct().values('id', 'name', 'slug'))
+            filter_options = {'sizes': sizes, 'colors': colors, 'brands': brands, 'vendors': vendors}
+            cache.set(filter_cache_key, filter_options, timeout=3600)
+
+        price_agg = base_qs.aggregate(min_price=Min('price'), max_price=Max('price'))
+
+        next_url = request.build_absolute_uri(
+            f"/api/v1/product/collection/{slug}/?page={page + 1}"
+        ) if page < total_pages else None
+        prev_url = request.build_absolute_uri(
+            f"/api/v1/product/collection/{slug}/?page={page - 1}"
+        ) if page > 1 else None
+
+        return Response({
+            'collection': CollectionSerializer(collection, context={'request': request}).data,
+            'products_with_details': products_with_details,
+            'next': next_url,
+            'previous': prev_url,
+            'total': total_items,
+            'min_price_unfiltered': float(price_agg['min_price'] or 0) * float(exchange_rate),
+            'max_price_unfiltered': float(price_agg['max_price'] or 0) * float(exchange_rate),
+            'default_max_price':    float(price_agg['max_price'] or 10000) * float(exchange_rate),
+            **filter_options,
+            'currency': currency,
+        }, status=status.HTTP_200_OK)
+
+
+class FlashSaleListAPIView(APIView):
+    """
+    Returns all currently live flash sales (is_active=True, within time window).
+    Cached for 30 seconds so every page load doesn't hit the DB,
+    but the countdown timer still feels real-time.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from django.utils import timezone as tz
+        cache_key = "flash_sales_live"
+        data = cache.get(cache_key)
+
+        if data is None:
+            now = tz.now()
+            sales = (
+                FlashSale.objects
+                .filter(is_active=True, start_time__lte=now, end_time__gte=now)
+                .select_related('product', 'variant', 'created_by')
+                .order_by('end_time')
+            )
+            serializer = FlashSaleSerializer(sales, many=True, context={'request': request})
+            data = serializer.data
+            cache.set(cache_key, data, timeout=30)
+
+        return Response(data, status=status.HTTP_200_OK)

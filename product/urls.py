@@ -1,8 +1,12 @@
 
 from django.urls import path
-from . import views 
+from . import views
 
 urlpatterns = [
+    path('flash-sales/', views.FlashSaleListAPIView.as_view(), name='flash-sales'),
+    path('occasions/', views.OccasionListAPIView.as_view(), name='occasions'),
+    path('collection/<slug:slug>/', views.CollectionAPIView.as_view(), name='collection'),
+
     # AJAX and custom endpoints
     path('add-review/', views.AddProductReviewView.as_view(), name='product-review-create'),
     path('sitemap-data/', views.SitemapDataAPIView.as_view(), name='sitemap-data'),

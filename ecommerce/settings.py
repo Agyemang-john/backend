@@ -334,6 +334,39 @@ CELERY_TIMEZONE = "UTC"
 CELERY_ENABLE_UTC = True
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 
+CELERY_BEAT_SCHEDULE = {
+    # Recalculate trending scores every 30 minutes
+    "update-trending-scores": {
+        "task": "product.tasks.update_trending_scores",
+        "schedule": 1800,
+    },
+    # Recalculate category engagement hourly
+    "update-category-engagement": {
+        "task": "product.tasks.update_category_engagement_scores",
+        "schedule": 3600,
+    },
+    # Recalculate brand engagement hourly
+    "update-brand-engagement": {
+        "task": "product.tasks.update_brand_engagement_scores",
+        "schedule": 3600,
+    },
+    # Rebuild FBT rules every 6 hours
+    "generate-fbt": {
+        "task": "product.tasks.generate_fbt",
+        "schedule": 21600,
+    },
+    # Clear old product views daily
+    "clear-product-views": {
+        "task": "product.tasks.clear_product_views",
+        "schedule": 86400,
+    },
+    # Expire flash sales every 60 seconds
+    "expire-flash-sales": {
+        "task": "product.tasks.expire_flash_sales",
+        "schedule": 60,
+    },
+}
+
 #SIMPLE JWT CONFIGURATION
 AUTH_COOKIE = 'access'
 AUTH_ACCESS_MAX_AGE = timedelta(hours=1).total_seconds()
@@ -408,7 +441,9 @@ CORS_ALLOWED_ORIGINS = [
     "https://frontend-sigma-khaki-70.vercel.app",  # Next.js frontend URL
     "https://negromart-space.sfo3.cdn.digitaloceanspaces.com",
     "https://negromart-space.sfo3.digitaloceanspaces.com",
-    "exp://192.168.1.100:19000",
+    "http://172.22.176.1:8000",
+    "http://localhost:8082",
+    "exp://10.142.141.54:8082",
 ]
 
 

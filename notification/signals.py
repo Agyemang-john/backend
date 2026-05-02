@@ -8,37 +8,25 @@ from .tasks import send_ticket_reply_email
 
 
 @receiver(post_save, sender=Notification)
-def broadcast_notification(sender, instance, created, **kwargs):
+def broadcast_new_notification(sender, instance, created, **kwargs):
+    """
+    Fires once when a Notification row is INSERT-ed.
+    Pushes a lightweight 'new_notification' event to the recipient's channel group.
+    The consumers handle the rest (re-fetching list / updating count).
+    """
     if not created:
         return
 
     channel_layer = get_channel_layer()
     if not channel_layer:
         return
-    
-    verb_display = str(instance.get_verb_display())
 
-    payload = {
-        "type": "new_notification",
-        "notification": {
-            "id": instance.id,
-            "verb": instance.verb,
-            "verb_display": verb_display,
-            "data": instance.data or {},
-            "created_at": instance.created_at.isoformat(),  # ← MATCH MODEL
-            "is_read": False,                               # ← ADD THIS
-            "unread": True,
+    async_to_sync(channel_layer.group_send)(
+        f"user_{instance.recipient_id}",
+        {
+            "type": "new_notification",
+            "notification_id": instance.id,
         }
-    }
-
-    async_to_sync(channel_layer.group_send)(
-        f"user_{instance.recipient.id}",
-        payload
-    )
-
-    async_to_sync(channel_layer.group_send)(
-        f"user_{instance.recipient.id}",
-        {"type": "new_notification"}
     )
 
 
@@ -47,5 +35,4 @@ from .models import TicketReply
 @receiver(post_save, sender=TicketReply)
 def queue_reply_email(sender, instance, created, **kwargs):
     if created and not instance.is_internal:
-        # Fire and forget — admin returns instantly
         send_ticket_reply_email.delay(instance.id)

@@ -150,3 +150,53 @@ admin.site.register(VariantImage, VariantImageAdmin)
 admin.site.register(Coupon)
 admin.site.register(ClippedCoupon)
 admin.site.register(FrequentlyBoughtTogether)
+
+
+@admin.register(FlashSale)
+class FlashSaleAdmin(admin.ModelAdmin):
+    list_display  = ['__str__', 'label', 'sale_price', 'discount_percentage', 'start_time', 'end_time', 'is_active', 'sold_count']
+    list_filter   = ['label', 'is_active', 'created_by']
+    list_editable = ['is_active']
+    search_fields = ['product__title']
+    date_hierarchy = 'start_time'
+    readonly_fields = ['sold_count', 'discount_percentage', 'is_live', 'stock_remaining', 'seconds_remaining']
+
+    def discount_percentage(self, obj):
+        return f"{obj.discount_percentage}%"
+    discount_percentage.short_description = "Discount"
+
+
+class OccasionSectionInline(admin.TabularInline):
+    model = OccasionSection
+    extra = 1
+    autocomplete_fields = ['collection']
+    fields = ['title', 'collection', 'position']
+
+
+@admin.register(Occasion)
+class OccasionAdmin(admin.ModelAdmin):
+    list_display  = ['title', 'icon', 'is_active', 'start_date', 'end_date', 'position']
+    list_editable = ['is_active', 'position']
+    list_filter   = ['is_active']
+    search_fields = ['title', 'slug']
+    prepopulated_fields = {'slug': ('title',)}
+    inlines = [OccasionSectionInline]
+    fieldsets = (
+        (None,         {'fields': ('title', 'slug', 'subtitle', 'icon', 'accent_color')}),
+        ('Scheduling', {'fields': ('is_active', 'start_date', 'end_date', 'position')}),
+    )
+
+
+@admin.register(Collection)
+class CollectionAdmin(admin.ModelAdmin):
+    list_display  = ['title', 'slug', 'filter_type', 'is_active', 'created_at']
+    list_filter   = ['filter_type', 'is_active']
+    list_editable = ['is_active']
+    search_fields = ['title', 'slug']
+    prepopulated_fields = {'slug': ('title',)}
+    filter_horizontal = ['products']
+    fieldsets = (
+        (None, {'fields': ('title', 'slug', 'subtitle', 'description', 'is_active')}),
+        ('Appearance', {'fields': ('banner_image', 'accent_color', 'icon')}),
+        ('Product Source', {'fields': ('filter_type', 'sub_category', 'products')}),
+    )

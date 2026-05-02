@@ -1,7 +1,7 @@
 # tasks.py
 import redis
 from celery import shared_task
-from .models import Product, FrequentlyBoughtTogether, Brand, Category, Sub_Category, ProductView
+from .models import Product, FrequentlyBoughtTogether, Brand, Category, Sub_Category, ProductView, FlashSale
 from .trending import calculate_trending_score
 from celery import shared_task
 from django.db.models import Sum
@@ -34,6 +34,23 @@ def clear_product_views():
             logger.info(f"Deleted {deleted_count} ProductView records in batch")
     except Exception as e:
         logger.error(f"Error deleting ProductView records: {str(e)}")
+
+@shared_task(ignore_result=True)
+def expire_flash_sales():
+    """
+    Deactivates flash sales whose end_time has passed.
+    Runs every 60 seconds via Celery Beat.
+    Also invalidates the live flash-sales cache so the next request
+    returns fresh data immediately.
+    """
+    from django.utils import timezone as tz
+    from django.core.cache import cache
+    expired = FlashSale.objects.filter(is_active=True, end_time__lt=tz.now())
+    count = expired.update(is_active=False)
+    if count:
+        cache.delete("flash_sales_live")
+        logger.info(f"Expired {count} flash sale(s).")
+
 
 @shared_task
 def update_trending_scores():

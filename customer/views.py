@@ -120,19 +120,55 @@ class UserReviewsAPIView(APIView):
 
 
 class WishlistAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get(self, request):
-        wishlists = Wishlist.objects.filter(user=request.user).order_by('-saved_at')
-        serializer = WishlistSerializer(wishlists, many=True, context={'request': request})
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        from order.models import Cart, CartItem
+        wishlists = Wishlist.objects.filter(user=request.user).select_related('product').order_by('-saved_at')
+
+        # Build a single cart item map for this user so we don't query per product
+        cart_map = {}
+        try:
+            cart = Cart.objects.get(user=request.user)
+            for ci in CartItem.objects.filter(cart=cart, variant__isnull=True).select_related('product'):
+                cart_map[ci.product_id] = {'quantity': ci.quantity, 'cart_item_id': ci.id}
+        except Cart.DoesNotExist:
+            pass
+
+        data = []
+        for wl in wishlists:
+            p = wl.product
+            stock = p.get_stock_quantity(None)
+            ci = cart_map.get(p.id)
+            data.append({
+                'id': wl.id,
+                'saved_at': wl.saved_at,
+                'product': {
+                    'id': p.id,
+                    'title': p.title,
+                    'slug': p.slug,
+                    'sku': p.sku,
+                    'price': float(p.price),
+                    'old_price': float(p.old_price) if p.old_price else None,
+                    'currency': 'GHS',
+                    'image': request.build_absolute_uri(p.image.url) if p.image else None,
+                    'is_in_cart': ci is not None,
+                    'cart_quantity': ci['quantity'] if ci else 0,
+                    'is_out_of_stock': stock <= 0,
+                    'available_stock': stock,
+                },
+            })
+        return Response(data, status=status.HTTP_200_OK)
 
     def post(self, request):
-        serializer = WishlistSerializer(data=request.data, context={'request': request})
+        from product.serializers import WishlistSerializer as WriteSerializer
+        serializer = WriteSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            instance = serializer.save()
+            return Response({'id': instance.id, 'product': instance.product_id}, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    def delete(self, request, pk):
+    def delete(self, request, pk=None):
         wishlist = Wishlist.objects.filter(user=request.user, id=pk).first()
         if wishlist:
             wishlist.delete()

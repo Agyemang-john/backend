@@ -1,55 +1,35 @@
-# notification/consumers.py — FINAL, FLAWLESS, GOD-TIER VERSION
+# notification/consumers.py
 import json
+import logging
 from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.db import database_sync_to_async
 from .models import Notification
 from .serializers import NotificationSerializer
 
-# LIGHTWEIGHT: BELL COUNTER ONLY
-class NotificationCountConsumer(AsyncWebsocketConsumer):
-    async def connect(self):
-        if self.scope["user"].is_anonymous:
-            await self.close()
-            return
-        self.user = self.scope["user"]
-        self.group_name = f"user_{self.user.id}"
-        await self.channel_layer.group_add(self.group_name, self.channel_name)
-        await self.accept()
-        await self.send_unread_count()
+logger = logging.getLogger(__name__)
 
-    async def disconnect(self, close_code):
-        if hasattr(self, "group_name"):
-            await self.channel_layer.group_discard(self.group_name, self.channel_name)
 
-    async def count_updated(self, event):
-        # THIS IS THE REAL FIX — TRUST THE EVENT, DON'T RE-QUERY DB
-        await self.send(text_data=json.dumps({
-            "type": "unread_count",
-            "count": event["count"]
-        }))
+# ── DB helpers ────────────────────────────────────────────────────────────────
 
-    async def send_unread_count(self):
-        count = await database_sync_to_async(Notification.objects.unread_count_for)(self.user)
-        await self.send(text_data=json.dumps({
-            "type": "unread_count",
-            "count": count
-        }))
-    
-    async def new_notification(self, event):
-        count = await database_sync_to_async(Notification.objects.unread_count_for)(self.user)
-        await self.send(text_data=json.dumps({
-            "type": "unread_count",
-            "count": count,
-            "trigger_toast": True
-        }))
-
-# FULL LIST + ACTIONS
 @database_sync_to_async
-def get_notifications(user):
+def get_notifications_for(user):
     qs = Notification.objects.filter(recipient=user).order_by("-created_at")[:100]
     return list(NotificationSerializer(qs, many=True).data)
 
-class NotificationConsumer(AsyncWebsocketConsumer):
+
+@database_sync_to_async
+def get_unread_count_for(user):
+    return Notification.objects.unread_count_for(user)
+
+
+# ── Bell (count-only) consumer ────────────────────────────────────────────────
+
+class NotificationCountConsumer(AsyncWebsocketConsumer):
+    """
+    Lightweight WebSocket for the notification bell.
+    Only tracks the unread count — never sends full payloads.
+    """
+
     async def connect(self):
         if self.scope["user"].is_anonymous:
             await self.close()
@@ -58,94 +38,125 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         self.group_name = f"user_{self.user.id}"
         await self.channel_layer.group_add(self.group_name, self.channel_name)
         await self.accept()
-
-        # Just send refresh_list on connect
-        notifications = await get_notifications(self.user)
-        count = await database_sync_to_async(Notification.objects.unread_count_for)(self.user)
-
-        await self.send(text_data=json.dumps({
-            "type": "refresh_list",
-            "notifications": notifications,
-            "unread_count": count
-        }))
+        # Send current count immediately on connect
+        count = await get_unread_count_for(self.user)
+        await self.send(text_data=json.dumps({"type": "unread_count", "count": count}))
 
     async def disconnect(self, close_code):
         if hasattr(self, "group_name"):
             await self.channel_layer.group_discard(self.group_name, self.channel_name)
 
+    # ── Group event handlers ──────────────────────────────────────────────────
+
+    async def new_notification(self, event):
+        """New notification created — update count and ring the bell."""
+        count = await get_unread_count_for(self.user)
+        await self.send(text_data=json.dumps({
+            "type": "unread_count",
+            "count": count,
+            "trigger_toast": True,
+        }))
+
+    async def count_updated(self, event):
+        """Count changed (e.g. user marked something read elsewhere)."""
+        await self.send(text_data=json.dumps({
+            "type": "unread_count",
+            "count": event["count"],
+        }))
+
+
+# ── Full-list consumer ────────────────────────────────────────────────────────
+
+class NotificationConsumer(AsyncWebsocketConsumer):
+    """
+    Full notification WebSocket for the notifications page / bell dropdown.
+    Sends the complete list on connect and after every action.
+    Supports: mark_read, mark_all_read, delete, view_detail.
+    """
+
+    async def connect(self):
+        if self.scope["user"].is_anonymous:
+            await self.close()
+            return
+        self.user = self.scope["user"]
+        self.group_name = f"user_{self.user.id}"
+        await self.channel_layer.group_add(self.group_name, self.channel_name)
+        await self.accept()
+        await self._send_refresh()
+
+    async def disconnect(self, close_code):
+        if hasattr(self, "group_name"):
+            await self.channel_layer.group_discard(self.group_name, self.channel_name)
+
+    # ── Client → Server ───────────────────────────────────────────────────────
+
     async def receive(self, text_data):
-        data = json.loads(text_data)
+        try:
+            data = json.loads(text_data)
+        except json.JSONDecodeError:
+            return
+
         action = data.get("action")
 
-        # === MARK ALL READ ===
-        if action == "mark_all_read":
+        if action == "mark_read":
+            await self._mark_single_read(data.get("id"))
+
+        elif action == "mark_all_read":
             await database_sync_to_async(
                 Notification.objects.filter(recipient=self.user, is_read=False).update
             )(is_read=True)
 
-        # === MARK SINGLE READ ===
-        elif action == "mark_read":
-            try:
-                notif = await database_sync_to_async(Notification.objects.get)(
-                    id=data["id"], recipient=self.user
-                )
-                notif.is_read = True
-                await database_sync_to_async(notif.save)()
-            except Notification.DoesNotExist:
-                pass
-
-        # === DELETE ===
         elif action == "delete":
             await database_sync_to_async(
-                Notification.objects.filter(id=data["id"], recipient=self.user).delete
+                Notification.objects.filter(id=data.get("id"), recipient=self.user).delete
             )()
 
-        # === VIEW DETAIL (AUTO MARK AS READ) ===
         elif action == "view_detail":
-            try:
-                notif = await database_sync_to_async(Notification.objects.get)(
-                    id=data["id"], recipient=self.user
-                )
-                if not notif.is_read:
-                    notif.is_read = True
-                    await database_sync_to_async(notif.save)()
-            except Notification.DoesNotExist:
-                pass
+            await self._mark_single_read(data.get("id"))
 
-        # === ONLY SEND UPDATE ONCE — THIS IS THE FIX ===
-        # Get fresh count after any action
-        count = await database_sync_to_async(Notification.objects.unread_count_for)(self.user)
-
-        # UPDATE BELL IN ALL TABS (including count-only consumer)
+        # Refresh this socket and sync the bell in every other tab
+        count = await get_unread_count_for(self.user)
         await self.channel_layer.group_send(
             self.group_name,
-            {"type": "count_updated", "count": count}
+            {"type": "count_updated", "count": count},
         )
+        await self._send_refresh()
 
-        # UPDATE LIST IN CURRENT TAB
-        notifications = await get_notifications(self.user)
-        await self.send(text_data=json.dumps({
-            "type": "refresh_list",
-            "notifications": notifications,
-            "unread_count": count
-        }))
+    @database_sync_to_async
+    def _mark_single_read(self, notif_id):
+        if not notif_id:
+            return
+        Notification.objects.filter(id=notif_id, recipient=self.user, is_read=False).update(is_read=True)
 
-    async def count_updated(self, event):
-        await self.send(text_data=json.dumps({
-            "type": "unread_count",
-            "count": event["count"]
-        }))
+    # ── Server → Client ───────────────────────────────────────────────────────
 
     async def new_notification(self, event):
-        # Keep your refresh_list logic
-        notifications = await get_notifications(self.user)
-        count = await database_sync_to_async(Notification.objects.unread_count_for)(self.user)
+        """
+        A new Notification was just saved.
+        Refresh the list so the new item appears immediately.
+        Also push a count update to sync the bell.
+        """
+        count = await get_unread_count_for(self.user)
+        await self.channel_layer.group_send(
+            self.group_name,
+            {"type": "count_updated", "count": count},
+        )
+        await self._send_refresh()
+
+    async def count_updated(self, event):
+        """Bell sync — send lightweight count update to this socket too."""
+        await self.send(text_data=json.dumps({
+            "type": "unread_count",
+            "count": event["count"],
+        }))
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    async def _send_refresh(self):
+        notifications = await get_notifications_for(self.user)
+        count = await get_unread_count_for(self.user)
         await self.send(text_data=json.dumps({
             "type": "refresh_list",
             "notifications": notifications,
-            "unread_count": count
+            "unread_count": count,
         }))
-        await self.channel_layer.group_send(
-            self.group_name,
-            {"type": "count_updated", "count": count}
-        )

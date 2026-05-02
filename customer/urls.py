@@ -8,4 +8,6 @@ urlpatterns = [
     path('order/<int:id>/', views.OrderDetailView.as_view(), name='order-detail'),
     path('change-password/', views.ChangePasswordView.as_view(), name='change-password'),
     path('reviews/', views.UserReviewsAPIView.as_view(), name='reviews'),
+    path('wishlist/', views.WishlistAPIView.as_view(), name='wishlist'),
+    path('wishlist/<int:pk>/', views.WishlistAPIView.as_view(), name='wishlist-delete'),
 ]

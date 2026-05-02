@@ -1,5 +1,8 @@
 from django.urls import path
 from .views import (
+    VendorAccountAPIView,
+    VendorDeletionRequestView,
+    VendorStatusAPIView,
     VendorSignupAPIView,
     VendorDetailView,
     VendorProductsView,
@@ -26,13 +29,23 @@ from .views import (
     BankValidationView,
     PayoutListView,
     ProductAnalyticsDetailView,
-    CheckCustomerAuth
+    CheckCustomerAuth,
+    ShipmentAPIView,
+    TrackingEventAddAPIView,
 )
+
+from vendor.bulk_upload_views import (
+    BulkProductUploadAPIView,
+    BulkUploadTemplatAPIView,
+    BulkUploadMetaAPIView,
+)
+ 
 
 urlpatterns = [
     # Vendor Routes
     path('location/autocomplete/', LocationAutocompleteView.as_view(), name='location-autocomplete'),
     path('check/', CheckCustomerAuth.as_view(), name='check-auth'),
+    path('my-status/', VendorStatusAPIView.as_view(), name='vendor-my-status'),
     path('register/', VendorSignupAPIView.as_view(), name='vendor-register'),
     path('product-related-data/', ProductRelatedDataAPIView.as_view(), name='product-related-data'),
 
@@ -51,6 +64,9 @@ urlpatterns = [
 
     # About Route
     path('about/management/', AboutManagementAPIView.as_view(), name='about-detail'),
+    # Vendor account (business details + documents)
+    path('account/', VendorAccountAPIView.as_view(), name='vendor-account'),
+    path('deletion-request/', VendorDeletionRequestView.as_view(), name='vendor-deletion-request'),
 
     path("reviews/", VendorProductReviewsAPIView.as_view(), name="vendor-reviews"),
     path("reviews/<int:pk>/", VendorProductReviewsAPIView.as_view(), name="vendor-review-update"),
@@ -58,6 +74,9 @@ urlpatterns = [
     path('orders/', VendorOrderListAPIView.as_view(), name='vendor-order-list'),
     path('orders/<int:id>/detail/', VendorOrderDetailView.as_view(), name='vendor-order-detail'),
     path('orders/<int:id>/status/', UpdateOrderStatusAPIView.as_view(), name='vendor-order-status-update'),
+    path('orders/<int:id>/shipment/', ShipmentAPIView.as_view(), name='vendor-shipment-list-create'),
+    path('orders/<int:id>/shipment/<str:shipment_id>/', ShipmentAPIView.as_view(), name='vendor-shipment-update'),
+    path('orders/<int:id>/shipment/<str:shipment_id>/event/', TrackingEventAddAPIView.as_view(), name='vendor-tracking-event'),
 
     # Ananlitics Views
     path('sales-summary/', SalesSummaryView.as_view(), name='sales-summary'),
@@ -72,6 +91,22 @@ urlpatterns = [
     path('seller-detail/<slug:slug>/reviews/', VendorReviewsView.as_view(), name='vendor-reviews'),
 
     path('products/<int:pk>/analytics/', ProductAnalyticsDetailView.as_view(), name='product-analytics-detail'),
+
+    path(
+        "products/bulk-upload/",
+        BulkProductUploadAPIView.as_view(),
+        name="bulk-product-upload",
+    ),
+    path(
+        "products/bulk-upload/template/",
+        BulkUploadTemplatAPIView.as_view(),
+        name="bulk-upload-template",
+    ),
+    path(
+        "products/bulk-upload/meta/",
+        BulkUploadMetaAPIView.as_view(),
+        name="bulk-upload-meta",
+    ),
 ]
 
 # Note: Removed router.urls since payment-method now uses APIView

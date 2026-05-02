@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from order.models import Cart, CartItem, Coupon, OrderProduct, ProductDeliveryOption, Order
+from order.models import Cart, CartItem, Coupon, OrderProduct, ProductDeliveryOption, Order, Shipment, TrackingEvent
 from product.models import *
 from rest_framework import serializers
 from .models import DeliveryOption  # Adjust the import according to your project structure
@@ -75,7 +75,8 @@ class ProductSerializer(serializers.ModelSerializer):
     vendor = VendorSerializer()
     currency = serializers.SerializerMethodField()
     price = serializers.SerializerMethodField()
-    
+    old_price = serializers.SerializerMethodField()
+
     class Meta:
         model = Product
         fields = [
@@ -86,7 +87,9 @@ class ProductSerializer(serializers.ModelSerializer):
             "status",
             "title",
             "image",
-            "price",             # Now handled by get_price
+            "price",
+            "old_price",
+            "return_period_days",
             "features",
             "description",
             "specifications",
@@ -118,6 +121,15 @@ class ProductSerializer(serializers.ModelSerializer):
             exchange_rate = Decimal(str(rates.get(currency, 1)))
             return round(obj.price * exchange_rate, 2)
         return obj.price
+
+    def get_old_price(self, obj):
+        if not obj.old_price:
+            return None
+        request = self.context.get('request')
+        currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
+        rates = get_exchange_rates()
+        exchange_rate = Decimal(str(rates.get(currency, 1)))
+        return round(obj.old_price * exchange_rate, 2)
 
 class ColorSerializer(serializers.ModelSerializer):
     class Meta:
@@ -161,14 +173,32 @@ class CartItemSerializer(serializers.ModelSerializer):
     item_total = serializers.SerializerMethodField()
     packaging_fee = serializers.SerializerMethodField()
     delivery_option = DeliveryOptionSerializer()
+    effective_unit_price = serializers.SerializerMethodField()
+    is_flash_sale = serializers.SerializerMethodField()
 
     class Meta:
         model = CartItem
-        fields = ['id', 'product', 'variant', 'quantity', 'item_total', 'packaging_fee', 'delivery_option']
-    
+        fields = [
+            'id', 'product', 'variant', 'quantity',
+            'item_total', 'packaging_fee', 'delivery_option',
+            'flash_sale_price', 'effective_unit_price', 'is_flash_sale',
+        ]
+
+    def _rate(self):
+        request = self.context.get('request')
+        currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
+        rates = get_exchange_rates()
+        return Decimal(str(rates.get(currency, 1)))
+
     def get_item_total(self, obj):
-        return obj.amount
-    
+        return round(obj.amount * self._rate(), 2)
+
+    def get_effective_unit_price(self, obj):
+        return round(obj.price * self._rate(), 2)
+
+    def get_is_flash_sale(self, obj):
+        return obj.flash_sale_price is not None
+
     def get_packaging_fee(self, obj):
         return obj.packaging_fee()
 
@@ -193,8 +223,15 @@ class CouponSerializer(serializers.ModelSerializer):
         return obj.is_valid()
 
 class OrderProductSerializer(serializers.ModelSerializer):
-    product_title = serializers.CharField(source='product.title', read_only=True)
-    variant_title = serializers.CharField(source='variant.title', read_only=True)
+    product_title = serializers.SerializerMethodField()
+    product_image = serializers.SerializerMethodField()
+    product_slug = serializers.SerializerMethodField()
+    product_sku = serializers.SerializerMethodField()
+    variant_title = serializers.SerializerMethodField()
+    variant_image = serializers.SerializerMethodField()
+    variant_size = serializers.SerializerMethodField()
+    variant_color = serializers.SerializerMethodField()
+    delivery_option_name = serializers.SerializerMethodField()
     delivery_range = serializers.SerializerMethodField()
 
     class Meta:
@@ -202,20 +239,76 @@ class OrderProductSerializer(serializers.ModelSerializer):
         fields = [
             'id',
             'product_title',
+            'product_image',
+            'product_slug',
+            'product_sku',
             'variant_title',
+            'variant_image',
+            'variant_size',
+            'variant_color',
             'quantity',
             'price',
             'amount',
             'status',
             'delivery_range',
+            'delivery_option_name',
         ]
+
+    def get_product_title(self, obj):
+        if obj.product:
+            return obj.product.title
+        return "Product no longer available"
+
+    def get_product_slug(self, obj):
+        return obj.product.slug if obj.product else None
+
+    def get_product_sku(self, obj):
+        return obj.product.sku if obj.product else None
+
+    def get_product_image(self, obj):
+        request = self.context.get('request')
+        if obj.product and obj.product.image:
+            try:
+                url = obj.product.image.url
+                return request.build_absolute_uri(url) if request else url
+            except Exception:
+                return None
+        return None
+
+    def get_variant_title(self, obj):
+        return obj.variant.title if obj.variant else None
+
+    def get_variant_image(self, obj):
+        request = self.context.get('request')
+        if obj.variant and obj.variant.image:
+            try:
+                url = obj.variant.image.url
+                return request.build_absolute_uri(url) if request else url
+            except Exception:
+                return None
+        return None
+
+    def get_variant_size(self, obj):
+        if obj.variant and obj.variant.size:
+            return obj.variant.size.name
+        return None
+
+    def get_variant_color(self, obj):
+        if obj.variant and obj.variant.color:
+            return obj.variant.color.name
+        return None
+
+    def get_delivery_option_name(self, obj):
+        if obj.selected_delivery_option:
+            return obj.selected_delivery_option.name
+        return None
 
     def get_delivery_range(self, obj):
         return obj.get_delivery_range()
 
 class OrderSerializer(serializers.ModelSerializer):
     user = serializers.SerializerMethodField()
-    address = AddressSerializer()
+    address = AddressSerializer(allow_null=True)
     order_products = OrderProductSerializer(many=True)
     overall_delivery_range = serializers.SerializerMethodField()
 
@@ -244,3 +337,130 @@ class OrderSerializer(serializers.ModelSerializer):
 
     def get_overall_delivery_range(self, obj):
         return obj.get_overall_delivery_range()
+
+
+class TrackingEventSerializer(serializers.ModelSerializer):
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+
+    class Meta:
+        model = TrackingEvent
+        fields = [
+            'id', 'status', 'status_display', 'description',
+            'location', 'city', 'country', 'event_date', 'created_at',
+        ]
+
+
+class ShipmentSerializer(serializers.ModelSerializer):
+    tracking_events = TrackingEventSerializer(many=True, read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    vendor_name = serializers.CharField(source='vendor.name', read_only=True)
+    latest_event = TrackingEventSerializer(read_only=True)
+    items_summary = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Shipment
+        fields = [
+            'shipment_id', 'carrier', 'carrier_code', 'tracking_number', 'tracking_url',
+            'status', 'status_display', 'vendor_name', 'shipped_at', 'delivered_at',
+            'estimated_delivery_date', 'progress_percentage', 'is_international',
+            'tracking_events', 'latest_event', 'items_summary', 'created_at',
+        ]
+
+    def get_items_summary(self, obj):
+        return [
+            {
+                'product_title': op.product.title,
+                'quantity': op.quantity,
+                'image': op.product.image.url if op.product.image else None,
+            }
+            for op in obj.items.select_related('product').all()
+        ]
+
+
+class OrderTrackingSerializer(serializers.ModelSerializer):
+    shipments = ShipmentSerializer(many=True, read_only=True)
+    overall_status = serializers.SerializerMethodField()
+    address_summary = serializers.SerializerMethodField()
+    vendors_summary = serializers.SerializerMethodField()
+    delivery_progress = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Order
+        fields = [
+            'id', 'order_number', 'status', 'date_created',
+            'overall_status', 'address_summary', 'shipments',
+            'vendors_summary', 'delivery_progress',
+        ]
+
+    def get_overall_status(self, obj):
+        shipments = list(obj.shipments.all())
+        if not shipments:
+            return obj.status
+        statuses = [s.status for s in shipments]
+        if all(s == 'delivered' for s in statuses):
+            return 'delivered'
+        if any(s == 'delivered' for s in statuses):
+            return 'partially_delivered'
+        if any(s == 'out_for_delivery' for s in statuses):
+            return 'out_for_delivery'
+        if any(s in ('in_transit', 'label_created') for s in statuses):
+            return 'in_transit'
+        return obj.status
+
+    def get_vendors_summary(self, obj):
+        """
+        Returns per-vendor shipping status so the UI can show a card for every
+        seller — including those who haven't shipped yet.
+        """
+        # All vendors on this order (prefetched by the view/consumer)
+        all_vendors = list(obj.vendors.all())
+        # Shipments indexed by vendor id
+        shipment_map = {s.vendor_id: s for s in obj.shipments.all()}
+
+        result = []
+        for vendor in all_vendors:
+            shipment = shipment_map.get(vendor.id)
+            result.append({
+                'vendor_id': vendor.id,
+                'vendor_name': vendor.name,
+                'has_shipped': shipment is not None,
+                'shipment_id': shipment.shipment_id if shipment else None,
+                'shipment_status': shipment.status if shipment else 'pending',
+                'carrier': shipment.carrier if shipment else None,
+                'tracking_number': shipment.tracking_number if shipment else None,
+                'estimated_delivery_date': str(shipment.estimated_delivery_date) if shipment and shipment.estimated_delivery_date else None,
+            })
+        return result
+
+    def get_delivery_progress(self, obj):
+        """
+        Returns a simple progress summary: how many vendor shipments have been
+        delivered out of the total number of vendors on this order.
+        """
+        all_vendors = obj.vendors.all()
+        total = all_vendors.count()
+        if total == 0:
+            return {'total': 0, 'delivered': 0, 'shipped': 0, 'pending': 0}
+
+        shipments = list(obj.shipments.all())
+        delivered = sum(1 for s in shipments if s.status == 'delivered')
+        shipped = sum(1 for s in shipments if s.status in ('in_transit', 'out_for_delivery', 'label_created'))
+        pending = total - len(shipments)
+        return {
+            'total': total,
+            'delivered': delivered,
+            'shipped': shipped,
+            'pending': pending,
+        }
+
+    def get_address_summary(self, obj):
+        addr = obj.address
+        if not addr:
+            return None
+        return {
+            'full_name': addr.full_name,
+            'address': addr.address,
+            'town': addr.town,
+            'region': addr.region,
+            'country': addr.country,
+        }

@@ -115,7 +115,29 @@ class ProductReviewSerializer(serializers.ModelSerializer):
         if ProductReview.objects.filter(user=user, product=product).exists():
             raise serializers.ValidationError("You have already reviewed this product.")
 
-        return ProductReview.objects.create(user=user, **validated_data)
+        review = ProductReview.objects.create(user=user, **validated_data)
+
+        # Notify the vendor about the new review
+        try:
+            vendor = product.vendor
+            if vendor and hasattr(vendor, 'user') and vendor.user:
+                from notification.utils import send_notification
+                send_notification(
+                    recipient=vendor.user,
+                    verb="vendor_new_review",
+                    actor=user,
+                    target=product,
+                    data={
+                        "product_title": product.title,
+                        "rating": str(validated_data.get('rating', '')),
+                        "message": f"New {validated_data.get('rating', '')}★ review on {product.title}",
+                        "url": f"/products/{product.slug}/",
+                    }
+                )
+        except Exception:
+            pass
+
+        return review
 
 class ProductSerializer(serializers.ModelSerializer):
     sub_category = SubCategorySerializer()
@@ -326,3 +348,165 @@ class CouponSerializer(serializers.ModelSerializer):
     # Custom method to return the validity status of the coupon
     def get_is_valid(self, obj):
         return obj.is_valid()
+
+
+class FlashSaleSerializer(serializers.ModelSerializer):
+    """
+    Serializes a FlashSale for the public storefront.
+    Prices are converted to the requested currency via X-Currency header.
+    All computed state (is_live, stock, timer) is read-only.
+    """
+    product_title   = serializers.SerializerMethodField()
+    product_image   = serializers.SerializerMethodField()
+    product_slug    = serializers.SerializerMethodField()
+    product_sku     = serializers.SerializerMethodField()
+    variant_title   = serializers.SerializerMethodField()
+    sale_price      = serializers.SerializerMethodField()
+    original_price  = serializers.SerializerMethodField()
+    currency        = serializers.SerializerMethodField()
+    discount_percentage = serializers.FloatField(read_only=True)
+    is_live         = serializers.BooleanField(read_only=True)
+    stock_remaining = serializers.IntegerField(read_only=True, allow_null=True)
+    stock_percentage = serializers.FloatField(read_only=True)
+    seconds_remaining = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = FlashSale
+        fields = [
+            'id',
+            'label',
+            'product_title',
+            'product_image',
+            'product_slug',
+            'product_sku',
+            'variant_id',
+            'variant_title',
+            'sale_price',
+            'original_price',
+            'currency',
+            'discount_percentage',
+            'start_time',
+            'end_time',
+            'seconds_remaining',
+            'max_quantity',
+            'sold_count',
+            'stock_remaining',
+            'stock_percentage',
+            'is_live',
+        ]
+
+    def _currency_and_rate(self):
+        request = self.context.get('request')
+        currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
+        rates = get_exchange_rates()
+        rate = Decimal(str(rates.get(currency, 1)))
+        return currency, rate
+
+    def get_currency(self, obj):
+        currency, _ = self._currency_and_rate()
+        return currency
+
+    def get_sale_price(self, obj):
+        _, rate = self._currency_and_rate()
+        return round(obj.sale_price * rate, 2)
+
+    def get_original_price(self, obj):
+        _, rate = self._currency_and_rate()
+        return round(obj.original_price * rate, 2)
+
+    def get_product_title(self, obj):
+        return obj.product.title if obj.product else "Product no longer available"
+
+    def get_product_slug(self, obj):
+        return obj.product.slug if obj.product else None
+
+    def get_product_sku(self, obj):
+        return obj.product.sku if obj.product else None
+
+    def get_product_image(self, obj):
+        request = self.context.get('request')
+        if obj.product and obj.product.image:
+            try:
+                url = obj.product.image.url
+                return request.build_absolute_uri(url) if request else url
+            except Exception:
+                return None
+        return None
+
+    def get_variant_title(self, obj):
+        return obj.variant.title if obj.variant else None
+
+
+class OccasionProductSerializer(serializers.ModelSerializer):
+    image = serializers.SerializerMethodField()
+    price = serializers.SerializerMethodField()
+    currency = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = ['id', 'title', 'slug', 'sku', 'image', 'price', 'currency']
+
+    def get_image(self, obj):
+        request = self.context.get('request')
+        if obj.image:
+            try:
+                url = obj.image.url
+                return request.build_absolute_uri(url) if request else url
+            except Exception:
+                return None
+        return None
+
+    def get_price(self, obj):
+        request = self.context.get('request')
+        currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
+        rates = get_exchange_rates()
+        exchange_rate = Decimal(str(rates.get(currency, 1)))
+        return round(obj.price * exchange_rate, 2)
+    
+    def get_currency(self, obj):
+        request = self.context.get('request')
+        return request.headers.get('X-Currency', 'GHS') if request else 'GHS'
+
+
+class OccasionSectionSerializer(serializers.ModelSerializer):
+    collection_slug = serializers.SerializerMethodField()
+    products        = serializers.SerializerMethodField()
+
+    class Meta:
+        model = OccasionSection
+        fields = ['id', 'title', 'collection_slug', 'products']
+
+    def get_collection_slug(self, obj):
+        return obj.collection.slug if obj.collection else None
+
+    def get_products(self, obj):
+        if not obj.collection:
+            return []
+        qs = list(obj.collection.get_products_qs()[:4])
+        return OccasionProductSerializer(qs, many=True, context=self.context).data
+
+
+class OccasionSerializer(serializers.ModelSerializer):
+    sections = OccasionSectionSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Occasion
+        fields = ['id', 'title', 'slug', 'subtitle', 'icon', 'accent_color', 'sections']
+
+
+class CollectionSerializer(serializers.ModelSerializer):
+    banner_image = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Collection
+        fields = ['slug', 'title', 'subtitle', 'description', 'banner_image', 'accent_color', 'icon']
+
+    def get_banner_image(self, obj):
+        request = self.context.get('request')
+        if obj.banner_image:
+            try:
+                url = obj.banner_image.url
+                return request.build_absolute_uri(url) if request else url
+            except Exception:
+                return None
+        return None

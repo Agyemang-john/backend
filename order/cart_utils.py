@@ -114,7 +114,7 @@ from .models import CartItem
 from product.models import Product, Variants, ProductDeliveryOption
 
 
-def handle_authenticated_cart(user, product, variant, quantity_change):
+def handle_authenticated_cart(user, product, variant, quantity_change, flash_sale_price=None):
     cart, _ = Cart.objects.get_or_create(user=user)
 
     cart_item, created = CartItem.objects.get_or_create(
@@ -136,8 +136,11 @@ def handle_authenticated_cart(user, product, variant, quantity_change):
             "cart_item_id": None
         }
 
-    # Update quantity
     cart_item.quantity = new_quantity
+
+    # Lock in the flash sale price on first add only
+    if created and flash_sale_price is not None:
+        cart_item.flash_sale_price = flash_sale_price
 
     # Set delivery option only on first add
     if created or not cart_item.delivery_option:
@@ -146,7 +149,6 @@ def handle_authenticated_cart(user, product, variant, quantity_change):
 
     cart_item.save()
 
-    # Exact messages you wanted
     if created:
         message = "Item added to cart."
     elif quantity_change > 0:

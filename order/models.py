@@ -169,16 +169,21 @@ class CartItem(models.Model):
     delivery_option = models.ForeignKey(
         DeliveryOption, on_delete=models.SET_NULL, null=True, blank=True
     )
+    # Locked-in flash sale price — set when item is first added during an active sale.
+    # Overrides the product/variant base price for the lifetime of this cart item.
+    flash_sale_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
 
     def __str__(self):
         if self.cart.user:
             return f"CartItem for {self.cart.user.email} - Product: {self.product.title}"
-        
+
     class Meta:
         ordering = ('-created_at',)
 
     @property
     def price(self):
+        if self.flash_sale_price is not None:
+            return self.flash_sale_price
         return self.variant.price if self.variant else self.product.price
     
     @property
@@ -225,6 +230,7 @@ class Order(models.Model):
         ('pending', 'Pending'),
         ('processing', 'Processing'),
         ('shipped', 'Shipped'),
+        ('partially_delivered', 'Partially Delivered'),
         ('delivered', 'Delivered'),
         ('canceled', 'Canceled'),
     )
@@ -233,7 +239,7 @@ class Order(models.Model):
     vendors = models.ManyToManyField(Vendor, blank=True)
     order_number = models.CharField(max_length=390, editable=False)
     payment_id = models.CharField(max_length=200, null=True, blank=True, editable=False)
-    address = models.ForeignKey(Address, on_delete=models.PROTECT)
+    address = models.ForeignKey(Address, on_delete=models.SET_NULL, null=True, blank=True)
     payment_method = models.CharField(max_length=30, choices=PAYMENT_METHOD, default='paystack')
     total = models.DecimalField(max_digits=10, decimal_places=2)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
@@ -251,7 +257,8 @@ class Order(models.Model):
         return ", ".join([str(vendor) for vendor in self.vendors.all()])
 
     def __str__(self):
-        return f"Order {self.order_number} by {self.user.email}"
+        user_email = self.user.email if self.user else "Deleted User"
+        return f"Order {self.order_number} by {user_email}"
     
     @property
     def total_price(self):
@@ -432,7 +439,7 @@ class Order(models.Model):
 
 class OrderProduct(models.Model):
     order = models.ForeignKey(Order, related_name='order_products', on_delete=models.CASCADE)
-    product = models.ForeignKey(Product, on_delete=models.CASCADE)
+    product = models.ForeignKey(Product, on_delete=models.SET_NULL, null=True)
     variant = models.ForeignKey(Variants, on_delete=models.SET_NULL, null=True, blank=True)
     quantity = models.PositiveIntegerField()
     price = models.DecimalField(max_digits=10, decimal_places=2)
@@ -464,18 +471,18 @@ class OrderProduct(models.Model):
         ordering = ('-date_created',)
 
     def packaging_fee(self):
+        if not self.product:
+            return Decimal(0)
         return calculate_packaging_fee(self.product.weight, self.product.volume) * self.quantity
 
     def save(self, *args, **kwargs):
-        self.amount = Decimal(self.quantity) * self.price  # Calculate amount
+        self.amount = Decimal(self.quantity) * self.price
         super().save(*args, **kwargs)
-    
+
     def get_delivery_range(self):
-        """
-        Get the delivery date range for this OrderProduct, using date_created as reference.
-        """
         if not self.selected_delivery_option:
-            # Fallback to default delivery option
+            if not self.product:
+                return None
             product_delivery_option = ProductDeliveryOption.objects.filter(
                 product=self.product, variant=self.variant, default=True
             ).first()
@@ -486,11 +493,9 @@ class OrderProduct(models.Model):
         return self.selected_delivery_option.get_delivery_date_range(self.date_created)
 
     def get_delivery_status(self):
-        """
-        Get the delivery status for this OrderProduct.
-        """
         if not self.selected_delivery_option:
-            # Fallback to default delivery option
+            if not self.product:
+                return "Product no longer available"
             product_delivery_option = ProductDeliveryOption.objects.filter(
                 product=self.product, variant=self.variant, default=True
             ).first()
@@ -498,10 +503,10 @@ class OrderProduct(models.Model):
                 return product_delivery_option.delivery_option.get_delivery_status(self.date_created)
             return "Delivery option unavailable"
         return self.selected_delivery_option.get_delivery_status(self.date_created)
-    
 
     def __str__(self):
-        return f"{self.product.title} (Order {self.order.order_number})"
+        product_name = self.product.title if self.product else "Deleted Product"
+        return f"{product_name} (Order {self.order.order_number})"
     
 
 class Refund(models.Model):
@@ -520,7 +525,7 @@ class Shipment(models.Model):
     """
     shipment_id = models.CharField(max_length=50, unique=True, editable=False)
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='shipments')
-    vendor = models.ForeignKey(Vendor, on_delete=models.CASCADE)
+    vendor = models.ForeignKey(Vendor, on_delete=models.SET_NULL, null=True, blank=True)
     
     # Which OrderProducts are in this shipment
     items = models.ManyToManyField('OrderProduct', related_name='shipments')
@@ -555,13 +560,17 @@ class Shipment(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        unique_together = [('order', 'vendor')]
+
     def save(self, *args, **kwargs):
         if not self.shipment_id:
             self.shipment_id = f"SH-{uuid.uuid4().hex[:10].upper()}"
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.shipment_id} - {self.vendor} - {self.tracking_number or 'No tracking'}"
+        vendor_name = self.vendor.name if self.vendor else "Deleted Vendor"
+        return f"{self.shipment_id} - {vendor_name} - {self.tracking_number or 'No tracking'}"
 
     @property
     def latest_event(self):

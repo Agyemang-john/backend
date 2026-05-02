@@ -8,7 +8,7 @@ from django.conf import settings
 
     
 class Payment(models.Model):
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='payments', blank=True, null=True)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, related_name='payments', blank=True, null=True)
     amount = models.PositiveIntegerField()
     ref = models.CharField(max_length=200)
     email = models.EmailField()
@@ -31,7 +31,7 @@ class Payment(models.Model):
 
 
 class Payout(models.Model):
-    vendor = models.ForeignKey(Vendor, on_delete=models.CASCADE)
+    vendor = models.ForeignKey(Vendor, on_delete=models.SET_NULL, null=True, blank=True)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     product_total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     delivery_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0)
@@ -340,7 +340,7 @@ class PaymentTransaction(models.Model):
         ('manual', 'Manual Payment'),
     ]
 
-    vendor = models.ForeignKey(Vendor, on_delete=models.CASCADE, related_name='transactions')
+    vendor = models.ForeignKey(Vendor, on_delete=models.SET_NULL, null=True, blank=True, related_name='transactions')
     subscription = models.ForeignKey(VendorSubscription, on_delete=models.SET_NULL, null=True)
     authorization = models.ForeignKey(PaystackAuthorization, on_delete=models.SET_NULL, null=True, blank=True)
 

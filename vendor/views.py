@@ -1,5 +1,6 @@
 # vendor/views.py
 
+import json
 from django.core.cache import cache
 from datetime import date
 from django.shortcuts import get_object_or_404
@@ -404,6 +405,26 @@ class CheckCustomerAuth(APIView):
             "email": request.user.email,
         })
 
+class VendorStatusAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        try:
+            vendor = user.vendor_user
+            return Response({
+                'is_vendor': True,
+                'vendor_status': vendor.status,
+                'vendor_slug': vendor.slug,
+            })
+        except Vendor.DoesNotExist:
+            return Response({
+                'is_vendor': False,
+                'vendor_status': None,
+                'vendor_slug': None,
+            })
+
+
 class VendorSignupAPIView(APIView):
     permission_classes = [IsAuthenticated]
     parser_classes     = [MultiPartParser, FormParser]
@@ -414,7 +435,21 @@ class VendorSignupAPIView(APIView):
             return Response({'detail': 'You already have a vendor account.'}, status=400)
         if not user.is_active:
             return Response({'detail': 'Please verify your account before applying.'}, status=400)
-        serializer = VendorSignupSerializer(data=request.data, context={'request': request})
+
+        # Build a mutable data dict, parsing JSON strings for nested serializers
+        data = {}
+        for key, value in request.data.items():
+            if key in ('about', 'payment_method') and isinstance(value, str):
+                try:
+                    data[key] = json.loads(value)
+                except (json.JSONDecodeError, TypeError):
+                    data[key] = value
+            else:
+                data[key] = value
+        for key, file in request.FILES.items():
+            data[key] = file
+
+        serializer = VendorSignupSerializer(data=data, context={'request': request})
         if serializer.is_valid():
             vendor = serializer.save()
             return Response({
@@ -812,6 +847,43 @@ class UpdateOrderStatusAPIView(APIView):
             order        = Order.objects.get(id=id, vendors__in=[vendor])
             order.status = new_status
             order.save()
+
+            # ── Broadcast status change to customer tracking WebSocket ─────────
+            from asgiref.sync import async_to_sync
+            from channels.layers import get_channel_layer
+            channel_layer = get_channel_layer()
+            if channel_layer:
+                group_name = f"order_tracking_{order.id}"
+                async_to_sync(channel_layer.group_send)(group_name, {
+                    "type": "status_changed",
+                    "status": new_status,
+                    "order_id": order.id,
+                })
+
+            # ── Notify buyer of status change ─────────────────────────────────
+            if order.user:
+                from notification.utils import send_notification
+                verb_map = {
+                    "delivered":          "customer_order_delivered",
+                    "canceled":           "customer_order_cancelled",
+                    "partially_delivered": "customer_tracking_update",
+                    "shipped":            "customer_order_shipped",
+                }
+                verb = verb_map.get(new_status, "customer_tracking_update")
+                label_map = dict(Order.STATUS_CHOICES)
+                send_notification(
+                    recipient=order.user,
+                    verb=verb,
+                    target=order,
+                    data={
+                        "order_number": order.order_number,
+                        "status": new_status,
+                        "status_label": label_map.get(new_status, new_status),
+                        "message": f"Your order #{order.order_number} is now {label_map.get(new_status, new_status).lower()}.",
+                        "url": f"/dashboard/order-history/{order.id}/",
+                    }
+                )
+
             return Response(OrderSerializer(order, context={'vendor': vendor, 'request': request}).data)
         except Order.DoesNotExist:
             return Response({"error": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -855,3 +927,307 @@ class ProductAnalyticsDetailView(APIView):
         )
         return Response(serializer.data)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shipment Management — vendor creates/updates shipments & adds tracking events
+# ─────────────────────────────────────────────────────────────────────────────
+
+from order.models import Shipment, TrackingEvent
+from order.serializers import ShipmentSerializer, TrackingEventSerializer, OrderTrackingSerializer
+
+
+def _recompute_order_status(order):
+    """
+    Compute and persist the correct Order.status based on the current state of
+    all shipments in the order.
+
+    Rules (applied in priority order):
+    - No shipments at all        → 'processing'
+    - All shipments delivered     → 'delivered'
+    - Some (not all) delivered   → 'partially_delivered'
+    - Any out_for_delivery        → 'shipped'
+    - Any in_transit / label_created → 'shipped'
+    - Order already canceled      → leave untouched
+    """
+    if order.status == 'canceled':
+        return
+
+    shipments = list(order.shipments.all())
+    if not shipments:
+        return  # Nothing to recompute yet
+
+    statuses = [s.status for s in shipments]
+    total_vendors = order.vendors.count()
+
+    if all(s == 'delivered' for s in statuses) and len(statuses) == total_vendors:
+        new_status = 'delivered'
+    elif any(s == 'delivered' for s in statuses):
+        new_status = 'partially_delivered'
+    elif any(s in ('out_for_delivery', 'in_transit', 'label_created') for s in statuses):
+        new_status = 'shipped'
+    else:
+        new_status = 'processing'
+
+    if order.status != new_status:
+        order.status = new_status
+        order.save(update_fields=['status'])
+
+
+class ShipmentAPIView(APIView):
+    """
+    GET  /api/v1/vendor/orders/<id>/shipment/              → list shipments
+    POST /api/v1/vendor/orders/<id>/shipment/              → create shipment
+    PUT  /api/v1/vendor/orders/<id>/shipment/<shipment_id>/ → update shipment
+    """
+    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+
+    def _get_vendor_order(self, request, order_id):
+        vendor = get_object_or_404(Vendor, user=request.user)
+        order  = get_object_or_404(Order, id=order_id, vendors__in=[vendor])
+        return vendor, order
+
+    def _broadcast_tracking(self, order):
+        try:
+            from asgiref.sync import async_to_sync
+            from channels.layers import get_channel_layer
+            channel_layer = get_channel_layer()
+            if not channel_layer:
+                return
+            order_refreshed = Order.objects.prefetch_related(
+                'vendors',
+                'shipments__tracking_events',
+                'shipments__items__product',
+                'shipments__vendor',
+            ).get(id=order.id)
+            data = OrderTrackingSerializer(order_refreshed).data
+            async_to_sync(channel_layer.group_send)(
+                f"order_tracking_{order.id}",
+                {"type": "tracking_update", "data": data},
+            )
+        except Exception as e:
+            logger.warning(f"Broadcast tracking failed for order {order.id}: {e}")
+
+    def get(self, request, id):
+        vendor, order = self._get_vendor_order(request, id)
+        shipments = Shipment.objects.filter(order=order, vendor=vendor).prefetch_related(
+            'tracking_events', 'items__product'
+        )
+        return Response(ShipmentSerializer(shipments, many=True).data)
+
+    def post(self, request, id):
+        vendor, order = self._get_vendor_order(request, id)
+
+        # Prevent duplicate — each vendor can only have one shipment per order
+        existing = Shipment.objects.filter(order=order, vendor=vendor).first()
+        if existing:
+            return Response(
+                {"error": "Shipment already exists for your store in this order.", "shipment_id": existing.shipment_id},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        vendor_items = list(order.order_products.filter(product__vendor=vendor))
+        if not vendor_items:
+            return Response({"error": "No items for your store in this order."}, status=status.HTTP_400_BAD_REQUEST)
+
+        shipment = Shipment.objects.create(
+            order=order,
+            vendor=vendor,
+            carrier=request.data.get('carrier', ''),
+            carrier_code=request.data.get('carrier_code', ''),
+            tracking_number=request.data.get('tracking_number', ''),
+            tracking_url=request.data.get('tracking_url', ''),
+            status=request.data.get('status', 'label_created'),
+            estimated_delivery_date=request.data.get('estimated_delivery_date') or None,
+            is_international=request.data.get('is_international', False),
+        )
+        shipment.items.set(vendor_items)
+
+        _recompute_order_status(order)
+        self._broadcast_tracking(order)
+
+        # Notify buyer: shipment created
+        if order.user:
+            from notification.utils import send_notification
+            send_notification(
+                recipient=order.user,
+                verb="customer_order_shipped",
+                target=order,
+                data={
+                    "order_number": order.order_number,
+                    "vendor_name": vendor.name,
+                    "carrier": shipment.carrier or "Your seller",
+                    "tracking_number": shipment.tracking_number or "",
+                    "message": f"{vendor.name} has shipped your order #{order.order_number}!",
+                    "url": f"/dashboard/order-history/{order.id}/",
+                }
+            )
+
+        return Response(ShipmentSerializer(shipment).data, status=status.HTTP_201_CREATED)
+
+    def put(self, request, id, shipment_id):
+        vendor, order = self._get_vendor_order(request, id)
+        shipment = get_object_or_404(Shipment, shipment_id=shipment_id, order=order, vendor=vendor)
+
+        for field in ('carrier', 'carrier_code', 'tracking_number', 'tracking_url', 'status',
+                      'estimated_delivery_date', 'is_international', 'shipped_at', 'delivered_at'):
+            val = request.data.get(field)
+            if val is not None:
+                setattr(shipment, field, val)
+        shipment.save()
+
+        self._broadcast_tracking(order)
+        return Response(ShipmentSerializer(shipment).data)
+
+
+class TrackingEventAddAPIView(APIView):
+    """
+    POST /api/v1/vendor/orders/<id>/shipment/<shipment_id>/event/
+    Adds a tracking event and pushes a live update to the customer.
+    """
+    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+
+    def post(self, request, id, shipment_id):
+        vendor   = get_object_or_404(Vendor, user=request.user)
+        order    = get_object_or_404(Order, id=id, vendors__in=[vendor])
+        shipment = get_object_or_404(Shipment, shipment_id=shipment_id, order=order, vendor=vendor)
+
+        for field in ('status', 'description', 'event_date'):
+            if not request.data.get(field):
+                return Response({"error": f"'{field}' is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if request.data['status'] not in dict(TrackingEvent.STATUS_CHOICES).keys():
+            return Response({"error": "Invalid event status."}, status=status.HTTP_400_BAD_REQUEST)
+
+        event = TrackingEvent.objects.create(
+            shipment=shipment,
+            status=request.data['status'],
+            description=request.data['description'],
+            location=request.data.get('location', ''),
+            city=request.data.get('city', ''),
+            country=request.data.get('country', ''),
+            event_date=request.data['event_date'],
+        )
+
+        # Sync shipment status with the latest event
+        status_map = {
+            'in_transit': 'in_transit',
+            'out_for_delivery': 'out_for_delivery',
+            'delivered': 'delivered',
+            'failed_attempt': 'failed',
+            'returned_to_sender': 'returned',
+        }
+        if event.status in status_map:
+            shipment.status = status_map[event.status]
+            shipment.save(update_fields=['status'])
+
+        # Recompute order-level status based on all shipments
+        if event.status in ('delivered', 'returned_to_sender', 'failed_attempt'):
+            _recompute_order_status(order)
+
+        # Notify buyer of tracking update
+        if order.user:
+            from notification.utils import send_notification
+            event_verb = "customer_order_delivered" if event.status == "delivered" else "customer_tracking_update"
+            send_notification(
+                recipient=order.user,
+                verb=event_verb,
+                target=order,
+                data={
+                    "order_number": order.order_number,
+                    "vendor_name": vendor.name,
+                    "event_status": event.get_status_display(),
+                    "description": event.description,
+                    "location": ", ".join(filter(None, [event.city, event.country])),
+                    "message": event.description,
+                    "url": f"/dashboard/order-history/{order.id}/",
+                }
+            )
+
+        # Broadcast to customer tracking WebSocket
+        try:
+            from asgiref.sync import async_to_sync
+            from channels.layers import get_channel_layer
+            channel_layer = get_channel_layer()
+            if channel_layer:
+                order_refreshed = Order.objects.prefetch_related(
+                    'vendors',
+                    'shipments__tracking_events',
+                    'shipments__items__product',
+                    'shipments__vendor',
+                ).get(id=order.id)
+                data = OrderTrackingSerializer(order_refreshed).data
+                async_to_sync(channel_layer.group_send)(
+                    f"order_tracking_{order.id}",
+                    {"type": "tracking_update", "data": data},
+                )
+        except Exception as e:
+            logger.warning(f"Broadcast tracking event failed for order {order.id}: {e}")
+
+
+class VendorAccountAPIView(APIView):
+    """GET / partial-PUT on the core Vendor row (business details + documents)."""
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def _get_vendor(self, request):
+        return get_object_or_404(Vendor, user=request.user)
+
+    def get(self, request):
+        from .account_serializers import VendorAccountSerializer
+        vendor = self._get_vendor(request)
+        return Response(VendorAccountSerializer(vendor, context={'request': request}).data)
+
+    def put(self, request):
+        from .account_serializers import VendorAccountSerializer
+        vendor = self._get_vendor(request)
+        serializer = VendorAccountSerializer(
+            vendor, data=request.data, partial=True, context={'request': request}
+        )
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class VendorDeletionRequestView(APIView):
+    """Submit an account deletion request — emails the admin team."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from django.core.mail import EmailMessage
+        from django.conf import settings as django_settings
+
+        vendor = get_object_or_404(Vendor, user=request.user)
+        admin_email = getattr(django_settings, 'ADMIN_EMAIL', 'support@negromart.com')
+
+        subject = f"[DELETION REQUEST] {vendor.name} (ID: {vendor.id})"
+        body = (
+            f"A seller has submitted an account deletion request.\n\n"
+            f"Vendor Name : {vendor.name}\n"
+            f"Vendor Email: {vendor.email}\n"
+            f"Login Email : {request.user.email}\n"
+            f"Vendor ID   : {vendor.id}\n"
+            f"Vendor Type : {vendor.vendor_type}\n"
+            f"Requested at: {timezone.now().strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+            f"Please review and process the deletion within 30 days per platform policy."
+        )
+
+        try:
+            email = EmailMessage(
+                subject=subject,
+                body=body,
+                from_email=django_settings.DEFAULT_FROM_EMAIL,
+                to=[admin_email],
+                reply_to=[vendor.email],
+            )
+            email.send()
+            return Response(
+                {'detail': 'Deletion request submitted. We will process it within 30 days.'},
+                status=status.HTTP_200_OK,
+            )
+        except Exception as exc:
+            logger.error(f"Deletion request email failed for vendor {vendor.id}: {exc}")
+            return Response(
+                {'detail': 'Failed to submit request. Please contact support@negromart.com directly.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )

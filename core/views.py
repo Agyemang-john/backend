@@ -29,8 +29,9 @@ from rest_framework import status
 from rest_framework.views import APIView
 from address.serializers import *
 from order.service import *
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from .service import *
+from decimal import Decimal
 from product.shipping import get_ip_address_from_request, get_user_country_region
 
 
@@ -100,6 +101,19 @@ class HomeSliderView(APIView):
             item['currency'] = currency
 
         return Response(static_data, status=status.HTTP_200_OK)
+
+class PromoGridView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        cache_key = 'promo_grid'
+        data = cache.get(cache_key)
+        if data is None:
+            cards = PromoCard.objects.filter(is_active=True)
+            data = PromoCardSerializer(cards, many=True, context={'request': request}).data
+            cache.set(cache_key, data, timeout=60 * 30)  # 30 min cache
+        return Response(data, status=status.HTTP_200_OK)
+
 
 class BannersView(APIView):
     """
@@ -358,7 +372,7 @@ class TrendingProductsAPIView(APIView):
         products_data = cache.get("top_trending_products")
 
         if not products_data:
-            products = Product.objects.filter(status='published').order_by('-trending_score')[:10]
+            products = Product.objects.filter(status='published').order_by('-trending_score')[:20]
             # Serialize in base currency (GHS); currency conversion happens below per-request
             products_data = ProductSerializer(products, many=True, context={'request': request}).data
             cache.set("top_trending_products", products_data, timeout=600)
@@ -413,6 +427,43 @@ class SuggestedCartProductsAPIView(APIView):
                 {"detail": "Failed to load suggestions", "error": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+class DealsAPIView(APIView):
+    """Returns up to 20 products with active discounts, cached for 10 minutes."""
+
+    def get(self, request):
+        from django.db.models import F, ExpressionWrapper, FloatField
+        products_data = cache.get("deals_products")
+
+        if not products_data:
+            products = (
+                Product.objects.filter(status="published", old_price__isnull=False)
+                .filter(old_price__gt=F("price"))
+                .annotate(
+                    discount_pct=ExpressionWrapper(
+                        (F("old_price") - F("price")) * 100.0 / F("old_price"),
+                        output_field=FloatField(),
+                    )
+                )
+                .order_by("-discount_pct")[:20]
+            )
+            # Serialize in base GHS; currency conversion applied per-request below
+            products_data = ProductSerializer(products, many=True, context={"request": request}).data
+            cache.set("deals_products", products_data, timeout=600)
+
+        # Apply currency conversion dynamically on every request
+        currency = request.headers.get("X-Currency", "GHS")
+        rates = get_exchange_rates()
+        exchange_rate = Decimal(str(rates.get(currency, 1)))
+
+        for product in products_data:
+            product["currency"] = currency
+            product["price"] = round(Decimal(str(product["price"])) * exchange_rate, 2)
+            if product.get("old_price"):
+                product["old_price"] = round(Decimal(str(product["old_price"])) * exchange_rate, 2)
+
+        return Response(products_data)
+
 
 class MakeDefaultAddressView(APIView):
     permission_classes = [IsAuthenticated]

@@ -6,11 +6,12 @@ from .cart_utils import get_authenticated_cart_response, get_guest_cart_response
 from address.models import Address
 from address.serializers import AddressSerializer
 # from order.service import calculate_delivery_fee
-from .models import Cart, CartItem, Order
+from .models import Cart, CartItem, Order, Shipment
 from product.models import Product, Variants, ProductDeliveryOption
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import *
+from .serializers import OrderTrackingSerializer
 from product.utils import *
 from django.http import HttpResponse
 from reportlab.pdfgen import canvas
@@ -26,8 +27,12 @@ class AddToCartView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
+        from product.models import FlashSale
+        from django.utils import timezone as tz
+
         product_id = request.data.get("product_id")
         variant_id = request.data.get("variant_id")
+        flash_sale_id = request.data.get("flash_sale_id")
         quantity_change = int(request.data.get("quantity", 1))
 
         if not product_id:
@@ -37,9 +42,23 @@ class AddToCartView(APIView):
         variant = get_object_or_404(Variants, id=variant_id, product=product) if variant_id else None
         item_key = f"{product.id}_{variant.id if variant else 'none'}"
 
+        # Resolve flash sale price if a valid flash_sale_id is provided
+        flash_sale_price = None
+        if flash_sale_id:
+            now = tz.now()
+            flash_sale = FlashSale.objects.filter(
+                id=flash_sale_id,
+                product=product,
+                is_active=True,
+                start_time__lte=now,
+                end_time__gte=now,
+            ).first()
+            if flash_sale:
+                flash_sale_price = flash_sale.sale_price
+
         # Handle cart
         if request.user.is_authenticated:
-            result = handle_authenticated_cart(request.user, product, variant, quantity_change)
+            result = handle_authenticated_cart(request.user, product, variant, quantity_change, flash_sale_price=flash_sale_price)
             cart_item_id = result.get("cart_item_id")
         else:
             result = handle_guest_cart(request.session, item_key, quantity_change)
@@ -802,3 +821,25 @@ class OrderReceiptAPIView(APIView):
         p.showPage()
         p.save()
         return response
+
+
+class OrderTrackingAPIView(APIView):
+    """
+    Returns real-time tracking data for a customer's order.
+    Includes all shipments and their tracking event timelines.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, order_id):
+        try:
+            order = Order.objects.prefetch_related(
+                'vendors',
+                'shipments__tracking_events',
+                'shipments__items__product',
+                'shipments__vendor',
+            ).get(id=order_id, user=request.user)
+        except Order.DoesNotExist:
+            return Response({'detail': 'Order not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = OrderTrackingSerializer(order, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)

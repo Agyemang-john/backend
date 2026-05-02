@@ -19,6 +19,7 @@ app_name = 'payments'
 urlpatterns = [
 
     path('verify-payment/<str:reference>/', views.VerifyPaymentAPIView.as_view(), name='verify_payment'),
+    path('place-order-cod/', views.PlaceOrderCODAPIView.as_view(), name='place_order_cod'),
     path('flutterwave-callback/', FlutterwaveCallbackAPIView.as_view(), name='flutterwave-callback'),
     
     # ── Public ──────────────────────────────────────────────────────────────

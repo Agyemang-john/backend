@@ -89,11 +89,11 @@ def create_order_from_payment_task(
         order.save()
 
         # Send notifications to vendors
-        order_ct = ContentType.objects.get_for_model(Order)
+        from notification.utils import send_notification
         for vendor in unique_vendors:
             if hasattr(vendor, 'user') and vendor.user:
-                Notification.objects.create(
-                    recipient=vendor.user,  # This is correct — send to the actual User
+                send_notification(
+                    recipient=vendor.user,
                     verb="vendor_new_order",
                     actor=user,
                     target=order,
@@ -101,13 +101,26 @@ def create_order_from_payment_task(
                         "order_number": order.order_number,
                         "total_amount": f"GHS {order.total:,.2f}",
                         "items_count": len(order_products),
-                        "buyer_name": user.first_name or user.first_name,
-                        "message": f"New order received! #{order.order_number}",
-                        "url": f"/vendor/orders/{order.id}/"
+                        "buyer_name": user.first_name or user.email,
+                        "message": f"New order #{order.order_number} — GHS {order.total:,.2f}",
+                        "url": f"https://seller.negromart.com/orders/{order.id}/detail/",
                     }
                 )
             else:
-                logger.warning(f"Vendor {vendor.name} has no linked user account. Notification skipped.")
+                logger.warning(f"Vendor {vendor.name} has no linked user. Notification skipped.")
+
+        # Notify buyer: order confirmed
+        send_notification(
+            recipient=user,
+            verb="customer_order_placed",
+            target=order,
+            data={
+                "order_number": order.order_number,
+                "total_amount": f"GHS {order.total:,.2f}",
+                "message": f"Your order #{order.order_number} has been placed successfully!",
+                "url": f"https://www.negromart.com/dashboard/order-history/{order.id}/",
+            }
+        )
 
         # Clear user's cart (safe now)
         CartItem.objects.filter(cart__user=user).delete()

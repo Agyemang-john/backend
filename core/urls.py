@@ -11,6 +11,7 @@ urlpatterns = [
     path('debug/ip/', DebugIPView.as_view(), name='debug-ip'),
     path('sliders/', HomeSliderView.as_view(), name='home-sliders'),
     path('banners/', BannersView.as_view(), name='home-banners'),
+    path('promo-grid/', PromoGridView.as_view(), name='promo-grid'),
     path('menu-categories/', MainCategoryWithCategoriesAPIView.as_view(), name='menu-categories'),
     path('top-category/', TopEngagedCategoryView.as_view(), name='top-category'),
     path('category/<slug:slug>/', CategoryDetailView.as_view(), name='category-detail'),
@@ -20,4 +21,5 @@ urlpatterns = [
     path('recommended-products/', RecommendedProducts.as_view(), name='recommended-products'),
     path('trending-products/', TrendingProductsAPIView.as_view(), name='trending-products'),
     path('cart-suggested-products/', SuggestedCartProductsAPIView.as_view(), name='cart-suggested-products'),
+    path('deals/', DealsAPIView.as_view(), name='deals'),
 ]

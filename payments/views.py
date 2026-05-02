@@ -27,6 +27,153 @@ from .tasks import create_order_from_payment_task
 logger = logging.getLogger(__name__)
 
 
+class PlaceOrderCODAPIView(APIView):
+    """
+    POST /api/v1/payments/place-order-cod/
+    Creates an order with Cash on Delivery payment method synchronously.
+    Returns order_id and order_number immediately for the completion page.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from django.db import transaction
+        from django.utils.crypto import get_random_string
+        from order.models import CartItem, OrderProduct
+        from product.models import Product, Variants
+        from notification.utils import send_notification
+
+        user = request.user
+
+        cart = Cart.objects.filter(user=user).first()
+        if not cart or not cart.cart_items.exists():
+            return Response(
+                {"status": "failed", "message": "Cart is empty or does not exist"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        address = Address.objects.filter(user=user, status=True).first()
+        if not address:
+            return Response(
+                {"status": "failed", "message": "No active address found. Please add a delivery address."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            with transaction.atomic():
+                cart_items = cart.cart_items.select_related(
+                    "product__vendor", "variant", "delivery_option"
+                ).all()
+
+                total_amount = float(cart.calculate_grand_total())
+
+                order = Order.objects.create(
+                    user=user,
+                    total=total_amount,
+                    payment_method="cash_on_delivery",
+                    payment_id=None,
+                    status="pending",
+                    address=address,
+                    ip=request.META.get("REMOTE_ADDR", ""),
+                    is_ordered=True,
+                )
+
+                unique_vendors = set()
+                order_products = []
+
+                for item in cart_items:
+                    product = item.product
+                    variant = item.variant
+
+                    if product.vendor:
+                        unique_vendors.add(product.vendor)
+
+                    price = variant.price if variant else product.price
+
+                    order_products.append(
+                        OrderProduct(
+                            order=order,
+                            product=product,
+                            variant=variant,
+                            quantity=item.quantity,
+                            price=price,
+                            amount=price * item.quantity,
+                            selected_delivery_option_id=item.delivery_option.id if item.delivery_option else None,
+                        )
+                    )
+
+                    if variant:
+                        variant.quantity -= item.quantity
+                        variant.full_clean()
+                        variant.save()
+                    else:
+                        product.total_quantity -= item.quantity
+                        product.full_clean()
+                        product.save()
+
+                OrderProduct.objects.bulk_create(order_products)
+                order.vendors.set(unique_vendors)
+
+                while True:
+                    order_number = f"INVOICE_NO-{get_random_string(8).upper()}"
+                    if not Order.objects.filter(order_number=order_number).exists():
+                        break
+
+                order.order_number = order_number
+                order.save()
+
+                # Notify vendors
+                for vendor in unique_vendors:
+                    if hasattr(vendor, "user") and vendor.user:
+                        send_notification(
+                            recipient=vendor.user,
+                            verb="vendor_new_order",
+                            actor=user,
+                            target=order,
+                            data={
+                                "order_number": order.order_number,
+                                "total_amount": f"GHS {order.total:,.2f}",
+                                "items_count": len(order_products),
+                                "buyer_name": user.first_name or user.email,
+                                "message": f"New COD order #{order.order_number} — GHS {order.total:,.2f}",
+                                "url": f"https://seller.negromart.com/orders/{order.id}/detail/",
+                            },
+                        )
+
+                # Notify buyer
+                send_notification(
+                    recipient=user,
+                    verb="customer_order_placed",
+                    target=order,
+                    data={
+                        "order_number": order.order_number,
+                        "total_amount": f"GHS {order.total:,.2f}",
+                        "message": f"Your order #{order.order_number} is confirmed! Pay GHS {order.total:,.2f} on delivery.",
+                        "url": f"https://www.negromart.com/dashboard/order-history/{order.id}/",
+                    },
+                )
+
+                CartItem.objects.filter(cart__user=user).delete()
+
+                logger.info(f"COD order {order.order_number} created for user {user.id}")
+
+                return Response(
+                    {
+                        "status": "success",
+                        "message": "Order placed! You will pay when your order is delivered.",
+                        "order_id": order.id,
+                        "order_number": order.order_number,
+                    },
+                    status=status.HTTP_201_CREATED,
+                )
+
+        except Exception as exc:
+            logger.error(f"COD order creation failed for user {user.id}: {exc}", exc_info=True)
+            return Response(
+                {"status": "failed", "message": "Failed to place order. Please try again."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
 class VerifyPaymentAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -49,6 +196,7 @@ class VerifyPaymentAPIView(APIView):
             )
 
         # Verify payment with Paystack
+        print(settings.PAYSTACK_SECRET_KEY, 'paystack secret key')
         url = f"https://api.paystack.co/transaction/verify/{reference}"
         headers = {"Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}"}
 

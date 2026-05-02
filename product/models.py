@@ -267,7 +267,7 @@ class Product(models.Model):
     )
     slug = models.SlugField(max_length=150, unique=True)
     sub_category = models.ForeignKey('Sub_Category', on_delete=models.SET_NULL, null=True)
-    vendor = models.ForeignKey(Vendor, on_delete=models.CASCADE, null=True, related_name="product")
+    vendor = models.ForeignKey(Vendor, on_delete=models.SET_NULL, null=True, related_name="product")
     variant = models.CharField(max_length=20, choices=VARIANTS, default='None')
     brand = models.ForeignKey(Brand, on_delete=models.SET_NULL, null=True)
     status = models.CharField(max_length=50, choices=STATUS, default='in_review')
@@ -393,8 +393,8 @@ class Size(models.Model):
 class Variants(models.Model):
     title = models.CharField(max_length=225, blank=True, null=True)
     product = models.ForeignKey(Product, related_name="variants", on_delete=models.CASCADE)
-    size = models.ForeignKey(Size, on_delete=models.CASCADE, blank=True, null=True)
-    color = models.ForeignKey(Color, on_delete=models.CASCADE, blank=True, null=True)
+    size = models.ForeignKey(Size, on_delete=models.SET_NULL, blank=True, null=True)
+    color = models.ForeignKey(Color, on_delete=models.SET_NULL, blank=True, null=True)
     image = models.ImageField(upload_to="variants/", default="product.jpg")
     quantity = models.PositiveIntegerField(default=1)
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
@@ -484,9 +484,10 @@ class ProductReview(models.Model):
     )
     vendor = models.ForeignKey(
         Vendor,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
         related_name='product_reviews',
-        null=True
+        null=True,
+        blank=True
     )
     review = models.TextField(max_length=1000, blank=False)
     rating = models.IntegerField(
@@ -547,7 +548,7 @@ class SavedProduct(models.Model):
 class ProductDeliveryOption(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
     variant = models.ForeignKey(Variants, related_name='delivery_options', on_delete=models.CASCADE, null=True, blank=True)
-    delivery_option = models.ForeignKey(DeliveryOption, on_delete=models.CASCADE)
+    delivery_option = models.ForeignKey(DeliveryOption, on_delete=models.PROTECT)
     default = models.BooleanField(default=False)
     added_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -601,3 +602,188 @@ class ClippedCoupon(models.Model):
 
     def __str__(self):
         return f"{self.user.email} clipped {self.coupon.code}"
+
+
+####################### FLASH SALE MODEL ##################
+
+class FlashSale(models.Model):
+    """
+    Time-limited discount event tied to a product (or specific variant).
+    sale_price and original_price are stored denormalized so the deal card
+    stays accurate even after the product price changes.
+    """
+
+    LABEL_CHOICES = [
+        ('lightning', 'Lightning Deal'),
+        ('limited',   'Limited Offer'),
+        ('clearance', 'Clearance'),
+        ('daily',     'Daily Deal'),
+    ]
+
+    product       = models.ForeignKey(Product,  on_delete=models.SET_NULL, null=True,  related_name='flash_sales')
+    variant       = models.ForeignKey(Variants, on_delete=models.SET_NULL, null=True, blank=True, related_name='flash_sales')
+    sale_price    = models.DecimalField(max_digits=10, decimal_places=2)
+    original_price = models.DecimalField(max_digits=10, decimal_places=2)
+    start_time    = models.DateTimeField(db_index=True)
+    end_time      = models.DateTimeField(db_index=True)
+    max_quantity  = models.PositiveIntegerField(null=True, blank=True, help_text="Cap on units sold at flash price. Leave blank for unlimited.")
+    sold_count    = models.PositiveIntegerField(default=0)
+    label         = models.CharField(max_length=20, choices=LABEL_CHOICES, default='lightning')
+    is_active     = models.BooleanField(default=True, db_index=True)
+    created_by    = models.ForeignKey(Vendor, on_delete=models.SET_NULL, null=True, blank=True, related_name='flash_sales')
+    created_at    = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['end_time']
+        indexes = [
+            models.Index(fields=['is_active', 'start_time', 'end_time']),
+        ]
+
+    def __str__(self):
+        product_title = self.product.title if self.product else "Deleted Product"
+        return f"{self.get_label_display()} — {product_title}"
+
+    @property
+    def discount_percentage(self):
+        if not self.original_price or self.original_price == 0:
+            return 0
+        return round((1 - self.sale_price / self.original_price) * 100, 1)
+
+    @property
+    def is_live(self):
+        if not self.start_time or not self.end_time:
+            return False
+        now = timezone.now()
+        return self.is_active and self.start_time <= now <= self.end_time
+
+    @property
+    def stock_remaining(self):
+        if self.max_quantity is None:
+            return None
+        return max(self.max_quantity - self.sold_count, 0)
+
+    @property
+    def stock_percentage(self):
+        if not self.max_quantity:
+            return 100
+        return round((self.stock_remaining / self.max_quantity) * 100, 1)
+
+    @property
+    def seconds_remaining(self):
+        if not self.end_time:
+            return 0
+        now = timezone.now()
+        if now >= self.end_time:
+            return 0
+        return int((self.end_time - now).total_seconds())
+
+
+class Collection(models.Model):
+    """
+    Reusable marketing collection — Back to School, Christmas, Valentine's, etc.
+    Can be populated manually (hand-pick products) or automatically from a
+    sub-category, so the same URL structure works for any campaign.
+    """
+    FILTER_TYPE_CHOICES = [
+        ('manual',       'Manual – hand-picked products'),
+        ('sub_category', 'Sub-category – all products in a sub-category'),
+        ('flash_sale',   'Flash Sale – all live flash-sale products'),
+    ]
+
+    slug          = models.SlugField(unique=True)
+    title         = models.CharField(max_length=200)
+    subtitle      = models.CharField(max_length=300, blank=True)
+    description   = models.TextField(blank=True)
+    banner_image  = models.ImageField(upload_to='collections/', null=True, blank=True)
+    accent_color  = models.CharField(max_length=7, default='#212121', help_text='Hex color, e.g. #E53935')
+    icon          = models.CharField(max_length=50, blank=True, help_text='Lucide icon name shown in the header, e.g. Zap, ShoppingBag, Star')
+
+    filter_type   = models.CharField(max_length=20, choices=FILTER_TYPE_CHOICES, default='manual')
+    sub_category  = models.ForeignKey('Sub_Category', null=True, blank=True, on_delete=models.SET_NULL, related_name='collections')
+    products      = models.ManyToManyField('Product', blank=True, related_name='collections')
+
+    is_active     = models.BooleanField(default=True)
+    created_at    = models.DateTimeField(auto_now_add=True)
+    updated_at    = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.title
+
+    def get_products_qs(self):
+        if self.filter_type == 'sub_category' and self.sub_category:
+            return Product.published.filter(sub_category=self.sub_category)
+        if self.filter_type == 'flash_sale':
+            now = timezone.now()
+            ids = FlashSale.objects.filter(
+                is_active=True, start_time__lte=now, end_time__gte=now
+            ).values_list('product_id', flat=True)
+            return Product.published.filter(id__in=ids)
+        return self.products.filter(status='published')
+
+
+############################################################
+####################### OCCASIONS MODEL ####################
+############################################################
+
+class Occasion(models.Model):
+    """
+    A seasonal/holiday marketing hub (Mother's Day, Christmas, etc.).
+    Shows automatically within start_date → end_date; leave blank to
+    control visibility manually with is_active.
+    """
+    title        = models.CharField(max_length=200)
+    slug         = models.SlugField(unique=True)
+    subtitle     = models.CharField(max_length=300, blank=True,
+                                    help_text="Bottom tag-line, e.g. 'Get it all right here'")
+    icon         = models.CharField(max_length=10, blank=True,
+                                    help_text="Optional emoji shown beside the title, e.g. 🌸")
+    accent_color = models.CharField(max_length=7, default='#0071CE',
+                                    help_text="Hex color used for hover/accent elements")
+    is_active    = models.BooleanField(default=True)
+    start_date   = models.DateField(null=True, blank=True,
+                                    help_text="Auto-show from this date (leave blank = always active)")
+    end_date     = models.DateField(null=True, blank=True,
+                                    help_text="Auto-hide after this date (leave blank = no expiry)")
+    position     = models.PositiveIntegerField(default=0, help_text="Lower = shown first on homepage")
+    created_at   = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['position']
+        verbose_name = 'Occasion'
+        verbose_name_plural = 'Occasions'
+
+    def __str__(self):
+        return self.title
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.title)
+        super().save(*args, **kwargs)
+
+
+class OccasionSection(models.Model):
+    """
+    A named sub-group inside an Occasion (e.g. "Everything Mom wants").
+    Each section links to a Collection, which drives the product preview and
+    the "View all" destination page (/collection/<slug>).
+    """
+    occasion   = models.ForeignKey(Occasion, on_delete=models.CASCADE, related_name='sections')
+    title      = models.CharField(max_length=200,
+                                  help_text="Section heading, e.g. 'Everything Mom wants'")
+    collection = models.ForeignKey(
+        Collection, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='occasion_sections',
+        help_text="Products shown in this card and destination of the 'View all' link"
+    )
+    position   = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ['position']
+        verbose_name = 'Occasion Section'
+        verbose_name_plural = 'Occasion Sections'
+
+    def __str__(self):
+        return f"{self.occasion.title} — {self.title}"
