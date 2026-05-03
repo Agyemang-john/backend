@@ -1163,6 +1163,9 @@ class TrackingEventAddAPIView(APIView):
         except Exception as e:
             logger.warning(f"Broadcast tracking event failed for order {order.id}: {e}")
 
+        from order.serializers import TrackingEventSerializer
+        return Response(TrackingEventSerializer(event).data, status=status.HTTP_201_CREATED)
+
 
 class VendorAccountAPIView(APIView):
     """GET / partial-PUT on the core Vendor row (business details + documents)."""

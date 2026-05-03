@@ -358,7 +358,7 @@ class OrderAdmin(admin.ModelAdmin):
     ordering      = ('-date_created',)
     date_hierarchy = 'date_created'
     list_per_page  = 30
-    readonly_fields = ('order_number', 'date_created', 'date_updated', 'tracking_overview')
+    readonly_fields = ('order_number', 'payment_id', 'date_created', 'date_updated', 'tracking_overview')
 
     inlines = (OrderProductInline, ShipmentInline)
 
