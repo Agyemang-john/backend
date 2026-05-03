@@ -4,7 +4,7 @@ from django.dispatch import receiver
 from django.core.files.storage import default_storage
 from product.models import Category, Sub_Category, Brand, Product, ProductImages, Variants, VariantImage, Main_Category
 from vendor.models import Vendor, About
-from core.models import HomeSlider, Banners
+from core.models import HomeSlider, Banners, PromoCard
 from django.core.cache import cache
 import logging
 
@@ -168,4 +168,15 @@ def clear_slider_cache_on_save(sender, instance, **kwargs):
 @receiver(post_delete, sender=HomeSlider)
 def clear_slider_cache_on_delete(sender, instance, **kwargs):
     cache.delete(CACHE_KEY) 
+
+
+CACHE_KEY_PROMO = 'promo_grid'
+@receiver(post_save, sender=PromoCard)
+def clear_promo_cache_on_save(sender, instance, **kwargs):
+    cache.delete(CACHE_KEY_PROMO)
+
+
+@receiver(post_delete, sender=PromoCard)
+def clear_promo_cache_on_delete(sender, instance, **kwargs):
+    cache.delete(CACHE_KEY_PROMO) 
 
