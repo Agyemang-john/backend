@@ -249,9 +249,9 @@ class ProductDetailAPIView(APIView):
             update_recently_viewed(request.session, product.id)
 
             product_id_str = str(product.id)
-            viewed_for_count = request.session.get('viewed_for_count', set())
+            viewed_for_count = request.session.get('viewed_for_count', [])
             if product_id_str not in viewed_for_count:
-                viewed_for_count.add(product_id_str)
+                viewed_for_count.append(product_id_str)
                 request.session['viewed_for_count'] = viewed_for_count
                 increment_product_view_count.delay(product.id)
             request.session.modified = True
