@@ -59,6 +59,23 @@ class DebugIPView(APIView):
             },
         })
 
+def _apply_currency(products_data: list, currency: str, rates: dict) -> list:
+    """
+    Shared helper — converts price/old_price fields in a list of product dicts
+    and stamps the currency. Always works on a fresh copy so the cached list
+    is never mutated.
+    """
+    exchange_rate = Decimal(str(rates.get(currency, 1)))
+    converted = []
+    for product in products_data:
+        p = dict(product)
+        p["currency"] = currency
+        p["price"] = round(Decimal(str(p["price"])) * exchange_rate, 2)
+        if p.get("old_price"):
+            p["old_price"] = round(Decimal(str(p["old_price"])) * exchange_rate, 2)
+        converted.append(p)
+    return converted
+
 
 class HomeSliderView(APIView):
 
@@ -176,68 +193,76 @@ class TopEngagedCategoryView(APIView):
     
 
 class MainAPIView(APIView):
-    """
-    API View to retrieve products, sliders, banners, and subcategories data
-    """
+    """Combined homepage payload: new products, most popular, brands, subcategories, top category."""
 
     def get(self, request, *args, **kwargs):
-        # Get latest products with average ratings
-        new_products = Product.objects.filter(status='published', product_type="new").annotate(average_rating=Avg('reviews__rating'), review_count=Count('reviews')).order_by('-date')[:9]
-        most_popular = Product.objects.filter(status='published').annotate(average_rating=Avg('reviews__rating'), review_count=Count('reviews')).order_by('-views')[:8]
+        cache_key = "homepage_main_v1"
+        cached_data = cache.get(cache_key)
 
-        category = Category.objects.order_by('-engagement_score').first()
+        if not cached_data:
+            new_products_qs = (
+                Product.objects.filter(status='published', product_type="new")
+                .annotate(
+                    average_rating=Avg('reviews__rating'),
+                    review_count=Count('reviews')
+                )
+                .order_by('-date')[:9]
+            )
+            most_popular_qs = (
+                Product.objects.filter(status='published')
+                .annotate(
+                    average_rating=Avg('reviews__rating'),
+                    review_count=Count('reviews')
+                )
+                .order_by('-views')[:8]
+            )
+            category = Category.objects.order_by('-engagement_score').first()
+            top_brands = Brand.objects.order_by('-engagement_score')[:4]
+            subcategories = Sub_Category.objects.order_by('-engagement_score')[:4]
 
-        serializer = TopEngagedCategorySerializer(category, context={'request': request})
-
-        top_brands = Brand.objects.order_by('-engagement_score')[:4]
-        
-        
-        # Serialize new products with ratings
-        products_with_details = []
-        for product in new_products: 
-            # Serialize product data
-            product_data = {
-                'product': ProductSerializer(product, context={'request': request}).data,  # Serialize the product instance
-                'average_rating': product.average_rating or 0,
-                'review_count': product.review_count or 0,
-                # 'variants': VariantSerializer(product_variants, many=True).data,
-                # 'colors': list(product_colors),  # ensure list is serialized correctly
+            cached_data = {
+                # Wrap each new product so average_rating/review_count travel with it
+                "new_products": list(HomepageProductSerializer(new_products_qs, many=True, context={'request': request}).data),
+                "most_popular": list(HomepageProductSerializer(most_popular_qs, many=True, context={'request': request}).data),
+                "brands": BrandSerializer(top_brands, many=True, context={'request': request}).data,
+                "subcategories": SubCategorySerializer(subcategories, many=True, context={'request': request}).data,
+                "category": TopEngagedCategorySerializer(category, context={'request': request}).data if category else None,
             }
-            products_with_details.append(product_data)
+            cache.set(cache_key, cached_data, timeout=600)
 
-        # Get and serialize banner data
-        brand_data = BrandSerializer(top_brands, many=True, context={'request': request}).data
+        currency = request.headers.get('X-Currency', 'GHS')
+        rates = get_exchange_rates()
 
-        # Get and serialize subcategory data
-        subcategories = Sub_Category.objects.order_by('-engagement_score')[:4]
-        subcategory_data = SubCategorySerializer(subcategories, many=True, context={'request': request}).data
-        
-        context = {
-            "new_products": products_with_details,
-            "most_popular": ProductSerializer(most_popular, many=True, context={'request': request}).data,
-            "brands": brand_data,
-            "subcategories": subcategory_data,
-            "category": serializer.data,
+        # Deep-copy and convert — never mutate the cached dict
+        response_data = {
+            "new_products": _apply_currency(cached_data["new_products"], currency, rates),
+            "most_popular": _apply_currency(cached_data["most_popular"], currency, rates),
+            "brands": cached_data["brands"],           # no prices
+            "subcategories": cached_data["subcategories"],  # no prices
+            "category": cached_data["category"],            # no prices
         }
 
-        return Response(context, status=status.HTTP_200_OK)
+        return Response(response_data, status=status.HTTP_200_OK)
 
 
 
 class RecentlyViewedRelatedProductsAPIView(APIView):
     def get(self, request):
-        cookie_data = request.headers.get('X-Recently-Viewed')
-        if not cookie_data:
+        # Read from session — same source that ProductDetailAPIView writes to
+        viewed = request.session.get('recently_viewed', [])
+        if not viewed:
             return Response([], status=status.HTTP_200_OK)
 
         try:
-            # Handle both JSON and plain CSV formats
-            if cookie_data.strip().startswith("["):
-                product_ids = json.loads(cookie_data)
-            else:
-                product_ids = [int(x) for x in cookie_data.split(",") if x.strip().isdigit()]
+            product_ids = [int(pid) for pid in viewed if str(pid).isdigit()]
+            if not product_ids:
+                return Response([], status=status.HTTP_200_OK)
 
             position = int(request.query_params.get("position", 0))
+
+            if position >= len(product_ids):
+                return Response([], status=status.HTTP_200_OK)
+
             product_id = product_ids[position]
 
             product = Product.published.select_related("sub_category").get(pk=product_id)
@@ -246,15 +271,18 @@ class RecentlyViewedRelatedProductsAPIView(APIView):
             if not sub_category:
                 return Response([], status=status.HTTP_200_OK)
 
-            related_products = Product.published.filter(
-                sub_category=sub_category,
-                status='published'
-            ).exclude(id=product.id)[:10]
+            related_products = (
+                Product.published
+                .filter(sub_category=sub_category)
+                .exclude(id=product.id)[:10]
+            )
 
             serializer = ProductSerializer(related_products, many=True, context={'request': request})
             return Response(serializer.data)
 
-        except Exception as e:
+        except Product.DoesNotExist:
+            return Response([], status=status.HTTP_200_OK)
+        except Exception:
             return Response([], status=status.HTTP_200_OK)
 
 
@@ -288,15 +316,10 @@ class SearchedProducts(APIView):
 class RecommendedProducts(APIView):
     def get(self, request):
         # -----------------------------
-        # 1. Retrieve Recently Viewed
+        # 1. Retrieve Recently Viewed — from session, same as ProductDetailAPIView
         # -----------------------------
-        try:
-            viewed_cookie = request.COOKIES.get('recently_viewed', '[]')
-            viewed_product_ids = json.loads(viewed_cookie)
-            # Ensure it's a list of integers
-            viewed_product_ids = [int(pid) for pid in viewed_product_ids if str(pid).isdigit()]
-        except Exception:
-            viewed_product_ids = []
+        viewed = request.session.get('recently_viewed', [])
+        viewed_product_ids = [int(pid) for pid in viewed if str(pid).isdigit()]
 
         viewed_products_qs = Product.objects.filter(id__in=viewed_product_ids, status='published')
         products_dict = {product.id: product for product in viewed_products_qs}
@@ -315,26 +338,24 @@ class RecommendedProducts(APIView):
             )
 
         # -----------------------------
-        # 3. Related by Search History
+        # 3. Related by Search History — cookie is fine here, SearchedProducts writes it
         # -----------------------------
         try:
-            search_cookie = request.COOKIES.get('search_history', '[]')
+            search_cookie = request.headers.get('X-Search-History', '[]')  # Frontend can send it in header for freshness
             search_history = json.loads(search_cookie)
         except Exception:
             search_history = []
 
         search_related_products = set()
         for query in search_history:
-            matched_by_title = Product.objects.filter(
-                status="published", title__icontains=query
-            ).exclude(id__in=viewed_product_ids)
-
-            matched_by_description = Product.objects.filter(
-                status="published", description__icontains=query
-            ).exclude(id__in=viewed_product_ids)
-
-            search_related_products.update(matched_by_title)
-            search_related_products.update(matched_by_description)
+            search_related_products.update(
+                Product.objects.filter(status="published", title__icontains=query)
+                .exclude(id__in=viewed_product_ids)
+            )
+            search_related_products.update(
+                Product.objects.filter(status="published", description__icontains=query)
+                .exclude(id__in=viewed_product_ids)
+            )
 
         # -----------------------------
         # 4. Combine, Shuffle, Limit
@@ -343,48 +364,37 @@ class RecommendedProducts(APIView):
         random.shuffle(combined_related)
         recommending_products = combined_related[:10]
 
+        # Fallback: no history at all → top by views
         if not sorted_viewed_products and not search_history:
             recommending_products = Product.objects.filter(status='published').order_by('-views')[:10]
 
         # -----------------------------
         # 5. Serialize & Return
         # -----------------------------
-        serialized_viewed = ProductSerializer(
-            sorted_viewed_products, many=True, context={'request': request}
-        ).data
-
-        serialized_recommended = ProductSerializer(
-            recommending_products, many=True, context={'request': request}
-        ).data
-
-        
-
         return Response({
-            'recently_viewed': serialized_viewed,
-            'recommended_products': serialized_recommended
+            'recently_viewed': ProductSerializer(sorted_viewed_products, many=True, context={'request': request}).data,
+            'recommended_products': ProductSerializer(recommending_products, many=True, context={'request': request}).data,
         })
     
 
 class TrendingProductsAPIView(APIView):
-    """Returns top 10 products by trending_score, cached for 10 minutes."""
+    """Returns top 20 products by trending_score, cached for 10 minutes."""
 
     def get(self, request):
-        products_data = cache.get("top_trending_products")
+        products_data = cache.get("top_trending_product")
 
         if not products_data:
-            products = Product.objects.filter(status='published').order_by('-trending_score')[:20]
-            # Serialize in base currency (GHS); currency conversion happens below per-request
-            products_data = ProductSerializer(products, many=True, context={'request': request}).data
+            products = (
+                Product.objects.filter(status='published')
+                .order_by('-trending_score')[:20]
+            )
+            # No request context — stores raw GHS prices
+            products_data = list(TrendingProductSerializer(products, many=True, context={'request': request}).data)
             cache.set("top_trending_products", products_data, timeout=600)
 
-        # Always convert prices for current request currency (dynamic part)
         currency = request.headers.get('X-Currency', 'GHS')
-
-        for product in products_data:
-            product['currency'] = currency
-            product['price'] = round(product['price'], 2)
-
-        return Response(products_data)
+        rates = get_exchange_rates()
+        return Response(_apply_currency(products_data, currency, rates))
 
 # Suggested products based on cart
 class SuggestedCartProductsAPIView(APIView):
@@ -433,6 +443,7 @@ class DealsAPIView(APIView):
 
     def get(self, request):
         from django.db.models import F, ExpressionWrapper, FloatField
+
         products_data = cache.get("deals_products")
 
         if not products_data:
@@ -447,22 +458,13 @@ class DealsAPIView(APIView):
                 )
                 .order_by("-discount_pct")[:20]
             )
-            # Serialize in base GHS; currency conversion applied per-request below
-            products_data = ProductSerializer(products, many=True, context={"request": request}).data
+            # No request context — stores raw GHS prices
+            products_data = list(DealsProductSerializer(products, many=True, context={'request': request}).data)
             cache.set("deals_products", products_data, timeout=600)
 
-        # Apply currency conversion dynamically on every request
         currency = request.headers.get("X-Currency", "GHS")
         rates = get_exchange_rates()
-        exchange_rate = Decimal(str(rates.get(currency, 1)))
-
-        for product in products_data:
-            product["currency"] = currency
-            product["price"] = round(Decimal(str(product["price"])) * exchange_rate, 2)
-            if product.get("old_price"):
-                product["old_price"] = round(Decimal(str(product["old_price"])) * exchange_rate, 2)
-
-        return Response(products_data)
+        return Response(_apply_currency(products_data, currency, rates))
 
 
 class MakeDefaultAddressView(APIView):

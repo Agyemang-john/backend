@@ -451,6 +451,7 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
     "X-Guest-Cart",
     "X-Currency",
     "X-Device",
+    "X-Search-History",
     "X-Recently-Viewed",
     "X-Recently-Viewed-Vendors",
     "X-Recent-Views",

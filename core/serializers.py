@@ -25,6 +25,29 @@ import random
 User = get_user_model()
 
 
+class DealsProductSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for the deals cache — always stores raw GHS prices."""
+
+    class Meta:
+        model = Product
+        fields = ['id', 'title', 'slug', 'image', 'price', 'old_price', 'sku', 'sub_category']
+
+class TrendingProductSerializer(serializers.ModelSerializer):
+    """Raw GHS prices for cache — no currency conversion."""
+    class Meta:
+        model = Product
+        fields = ['id', 'title', 'slug', 'image', 'price', 'old_price', 'sku', 'sub_category']
+
+class HomepageProductSerializer(serializers.ModelSerializer):
+    """Raw GHS prices for homepage cache — no currency conversion."""
+    average_rating = serializers.FloatField(read_only=True, default=0)
+    review_count = serializers.IntegerField(read_only=True, default=0)
+
+    class Meta:
+        model = Product
+        fields = ['id', 'title', 'slug', 'image', 'price', 'old_price', 'sku', 'sub_category', 'average_rating', 'review_count']
+
+
 class UserSerializer(serializers.ModelSerializer):
     profile = serializers.SerializerMethodField()
 
