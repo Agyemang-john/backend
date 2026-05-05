@@ -328,6 +328,11 @@ CHANNEL_LAYERS = {
     },
 }
 
+# settings.py
+RECENTLY_VIEWED_MAX = 10        # how many IDs to keep per user/session
+VIEW_DEDUP_TTL      = 86400     # seconds before same user can re-count a view (24h)
+RECENT_LIST_TTL     = 2592000   # seconds before the recent list expires (30 days)
+
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_TIMEZONE = "UTC"

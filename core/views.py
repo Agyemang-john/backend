@@ -33,6 +33,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from .service import *
 from decimal import Decimal
 from product.shipping import get_ip_address_from_request, get_user_country_region
+from product.serializers import LightProductSerializer
 
 
 class DebugIPView(APIView):
@@ -248,42 +249,34 @@ class MainAPIView(APIView):
 
 class RecentlyViewedRelatedProductsAPIView(APIView):
     def get(self, request):
-        # Read from session — same source that ProductDetailAPIView writes to
-        viewed = request.session.get('recently_viewed', [])
-        if not viewed:
+        product_ids = get_recently_viewed_ids(request)
+        if not product_ids:
             return Response([], status=status.HTTP_200_OK)
+
+        position = int(request.query_params.get("position", 0))
+        if position >= len(product_ids):
+            return Response([], status=status.HTTP_200_OK)
+
+        product_id = product_ids[position]
 
         try:
-            product_ids = [int(pid) for pid in viewed if str(pid).isdigit()]
-            if not product_ids:
-                return Response([], status=status.HTTP_200_OK)
-
-            position = int(request.query_params.get("position", 0))
-
-            if position >= len(product_ids):
-                return Response([], status=status.HTTP_200_OK)
-
-            product_id = product_ids[position]
-
             product = Product.published.select_related("sub_category").get(pk=product_id)
-            sub_category = product.sub_category
-
-            if not sub_category:
-                return Response([], status=status.HTTP_200_OK)
-
-            related_products = (
-                Product.published
-                .filter(sub_category=sub_category)
-                .exclude(id=product.id)[:10]
-            )
-
-            serializer = ProductSerializer(related_products, many=True, context={'request': request})
-            return Response(serializer.data)
-
         except Product.DoesNotExist:
             return Response([], status=status.HTTP_200_OK)
-        except Exception:
+
+        if not product.sub_category:
             return Response([], status=status.HTTP_200_OK)
+
+        related_products = (
+            Product.published
+            .filter(sub_category=product.sub_category)
+            .exclude(id=product.id)
+            .only('id', 'title', 'slug', 'sku', 'image', 'price', 'old_price')  # light fetch
+            [:10]
+        )
+
+        serializer = LightProductSerializer(related_products, many=True, context={'request': request})
+        return Response(serializer.data)
 
 
 class SearchedProducts(APIView):
@@ -316,64 +309,88 @@ class SearchedProducts(APIView):
 class RecommendedProducts(APIView):
     def get(self, request):
         # -----------------------------
-        # 1. Retrieve Recently Viewed — from session, same as ProductDetailAPIView
+        # 1. Recently viewed — from Redis
         # -----------------------------
-        viewed = request.session.get('recently_viewed', [])
-        viewed_product_ids = [int(pid) for pid in viewed if str(pid).isdigit()]
+        viewed_product_ids = get_recently_viewed_ids(request)
 
-        viewed_products_qs = Product.objects.filter(id__in=viewed_product_ids, status='published')
-        products_dict = {product.id: product for product in viewed_products_qs}
-        sorted_viewed_products = [products_dict[pid] for pid in viewed_product_ids if pid in products_dict]
-
-        # -----------------------------
-        # 2. Related by Category
-        # -----------------------------
-        related_products = set()
-        for product in viewed_products_qs:
-            related_products.update(
-                Product.objects.filter(
-                    status='published',
-                    sub_category=product.sub_category
-                ).exclude(id=product.id)
-            )
+        viewed_products_qs = (
+            Product.published
+            .filter(id__in=viewed_product_ids)
+            .only('id', 'title', 'slug', 'sku', 'image', 'price', 'old_price', 'sub_category_id')
+        )
+        # Restore Redis order
+        products_dict = {p.id: p for p in viewed_products_qs}
+        sorted_viewed_products = [
+            products_dict[pid] for pid in viewed_product_ids if pid in products_dict
+        ]
 
         # -----------------------------
-        # 3. Related by Search History — cookie is fine here, SearchedProducts writes it
+        # 2. Related by category — one query instead of N
+        # -----------------------------
+        sub_category_ids = {
+            p.sub_category_id for p in viewed_products_qs if p.sub_category_id
+        }
+        related_products = (
+            Product.published
+            .filter(sub_category_id__in=sub_category_ids)
+            .exclude(id__in=viewed_product_ids)
+            .only('id', 'title', 'slug', 'sku', 'image', 'price', 'old_price')
+            .order_by('?')[:20]   # random sample at DB level — no Python shuffle needed
+        )
+
+        # -----------------------------
+        # 3. Related by search history
         # -----------------------------
         try:
-            search_cookie = request.headers.get('X-Search-History', '[]')  # Frontend can send it in header for freshness
-            search_history = json.loads(search_cookie)
+            search_history = json.loads(request.headers.get('X-Search-History', '[]'))
+            if not isinstance(search_history, list):
+                search_history = []
         except Exception:
             search_history = []
 
-        search_related_products = set()
-        for query in search_history:
-            search_related_products.update(
-                Product.objects.filter(status="published", title__icontains=query)
+        search_related_products = Product.objects.none()
+        if search_history:
+            search_q = Q()
+            for query in search_history[:5]:   # cap to avoid giant OR chains
+                search_q |= Q(title__icontains=query) | Q(description__icontains=query)
+
+            search_related_products = (
+                Product.published
+                .filter(search_q)
                 .exclude(id__in=viewed_product_ids)
-            )
-            search_related_products.update(
-                Product.objects.filter(status="published", description__icontains=query)
-                .exclude(id__in=viewed_product_ids)
+                .only('id', 'title', 'slug', 'sku', 'image', 'price', 'old_price')
+                .distinct()[:20]
             )
 
         # -----------------------------
-        # 4. Combine, Shuffle, Limit
+        # 4. Combine and limit
         # -----------------------------
-        combined_related = list(related_products | search_related_products)
-        random.shuffle(combined_related)
-        recommending_products = combined_related[:10]
+        seen = set()
+        combined = []
+        for p in list(related_products) + list(search_related_products):
+            if p.id not in seen:
+                seen.add(p.id)
+                combined.append(p)
+        recommending_products = combined[:10]
 
         # Fallback: no history at all → top by views
         if not sorted_viewed_products and not search_history:
-            recommending_products = Product.objects.filter(status='published').order_by('-views')[:10]
+            recommending_products = (
+                Product.published
+                .only('id', 'title', 'slug', 'sku', 'image', 'price', 'old_price')
+                .order_by('-views')[:10]
+            )
 
         # -----------------------------
-        # 5. Serialize & Return
+        # 5. Serialize & return
         # -----------------------------
         return Response({
-            'recently_viewed': ProductSerializer(sorted_viewed_products, many=True, context={'request': request}).data,
-            'recommended_products': ProductSerializer(recommending_products, many=True, context={'request': request}).data,
+            'recently_viewed': LightProductSerializer(
+                sorted_viewed_products, many=True, context={'request': request}
+            ).data,
+            'recommended_products': LightProductSerializer(
+                recommending_products, many=True, context={'request': request}
+            ).data,
         })
     
 

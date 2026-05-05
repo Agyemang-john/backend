@@ -18,7 +18,7 @@ from rest_framework.permissions import IsAuthenticated
 from django.db.models import F
 from rest_framework.pagination import PageNumberPagination
 
-from .utils import get_recently_viewed_products, update_recently_viewed
+from .utils import get_recently_viewed_products, update_recently_viewed, is_new_view
 from .tasks import increment_product_view_count
 from .shipping import can_product_ship_to_user
 
@@ -246,15 +246,10 @@ class ProductDetailAPIView(APIView):
             except Http404:
                 return Response({"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
             
-            update_recently_viewed(request.session, product.id)
+            update_recently_viewed(request, product.id)
 
-            product_id_str = str(product.id)
-            viewed_for_count = request.session.get('viewed_for_count', set())
-            if product_id_str not in viewed_for_count:
-                viewed_for_count.add(product_id_str)
-                request.session['viewed_for_count'] = viewed_for_count
+            if is_new_view(request, product.id):
                 increment_product_view_count.delay(product.id)
-            request.session.modified = True
 
             # Optimize variant queries
             variant = None
@@ -1180,16 +1175,12 @@ class ProductSearchAPIView(APIView):
 class RecentlyViewedProducts(APIView):
     def get(self, request):
         products = get_recently_viewed_products(request, limit=10)
-        if not products:
-            data = []
-        else:
-            serializer = LightProductSerializer(  # ← Use a LIGHT serializer!
-                products,
-                many=True,
-                context={'request': request}
-            )
-            data = serializer.data
-        return Response(data)
+        serializer = LightProductSerializer(
+            products,
+            many=True,
+            context={'request': request}
+        )
+        return Response(serializer.data)
 
 class ClearRecentlyViewed(APIView):
     http_method_names = ['post']
