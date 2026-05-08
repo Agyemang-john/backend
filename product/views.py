@@ -18,7 +18,10 @@ from rest_framework.permissions import IsAuthenticated
 from django.db.models import F
 from rest_framework.pagination import PageNumberPagination
 
-from .utils import get_recently_viewed_products, update_recently_viewed, is_new_view
+from .utils import (
+    get_recently_viewed_products, update_recently_viewed, is_new_view,
+    clear_recently_viewed, remove_recently_viewed,
+)
 from .tasks import increment_product_view_count
 from .shipping import can_product_ship_to_user
 
@@ -246,10 +249,12 @@ class ProductDetailAPIView(APIView):
             except Http404:
                 return Response({"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
             
-            update_recently_viewed(request, product.id)
-
-            if is_new_view(request, product.id):
-                increment_product_view_count.delay(product.id)
+            try:
+                update_recently_viewed(request, product.id)
+                if is_new_view(request, product.id):
+                    increment_product_view_count.delay(product.id)
+            except Exception:
+                logger.exception("View tracking failed for product %s", product.id)
 
             # Optimize variant queries
             variant = None
@@ -1185,28 +1190,19 @@ class RecentlyViewedProducts(APIView):
 class ClearRecentlyViewed(APIView):
     http_method_names = ['post']
     def post(self, request):
-        if 'recently_viewed' in request.session:
-            del request.session['recently_viewed']
-            request.session.modified = True
+        clear_recently_viewed(request)
         return Response({"message": "Recently viewed cleared"}, status=status.HTTP_200_OK)
 
 
 class RemoveRecentlyViewedItem(APIView):
     http_method_names = ['post']
-    
+
     def post(self, request):
         product_id = request.data.get('product_id')
         if not product_id:
             return Response({"error": "product_id required"}, status=status.HTTP_400_BAD_REQUEST)
-
-        recently_viewed = request.session.get('recently_viewed', [])
-        pid_str = str(product_id)
-        if pid_str in recently_viewed:
-            recently_viewed.remove(pid_str)
-            request.session['recently_viewed'] = recently_viewed
-            request.session.modified = True
-
-        return Response({"message": "Item removed", "removed": pid_str})
+        remove_recently_viewed(request, int(product_id))
+        return Response({"message": "Item removed", "removed": str(product_id)})
 
 
 class CartRecommendationsAPIView(APIView):
