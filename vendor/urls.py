@@ -36,8 +36,10 @@ from .views import (
 
 from vendor.bulk_upload_views import (
     BulkProductUploadAPIView,
+    BulkProductDirectAPIView,
     BulkUploadTemplatAPIView,
     BulkUploadMetaAPIView,
+    BulkUploadJobStatusAPIView,
 )
  
 
@@ -98,6 +100,11 @@ urlpatterns = [
         name="bulk-product-upload",
     ),
     path(
+        "products/bulk-upload/direct/",
+        BulkProductDirectAPIView.as_view(),
+        name="bulk-product-direct",
+    ),
+    path(
         "products/bulk-upload/template/",
         BulkUploadTemplatAPIView.as_view(),
         name="bulk-upload-template",
@@ -106,6 +113,11 @@ urlpatterns = [
         "products/bulk-upload/meta/",
         BulkUploadMetaAPIView.as_view(),
         name="bulk-upload-meta",
+    ),
+    path(
+        "products/bulk-upload/job/<uuid:job_id>/",
+        BulkUploadJobStatusAPIView.as_view(),
+        name="bulk-upload-job-status",
     ),
 ]
 

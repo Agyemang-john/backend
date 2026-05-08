@@ -450,3 +450,40 @@ class About(models.Model):
             ContentFile(avatar_bytes),
             save=True
         )
+
+
+import uuid as _uuid
+
+
+class BulkUploadJob(models.Model):
+    """Tracks an async bulk product upload task dispatched to Celery."""
+
+    STATUS_QUEUED     = "queued"
+    STATUS_PROCESSING = "processing"
+    STATUS_DONE       = "done"
+    STATUS_FAILED     = "failed"
+
+    STATUS_CHOICES = [
+        (STATUS_QUEUED,     "Queued"),
+        (STATUS_PROCESSING, "Processing"),
+        (STATUS_DONE,       "Done"),
+        (STATUS_FAILED,     "Failed"),
+    ]
+
+    id                  = models.UUIDField(primary_key=True, default=_uuid.uuid4, editable=False)
+    vendor              = models.ForeignKey(Vendor, on_delete=models.CASCADE, related_name="bulk_upload_jobs")
+    status              = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_QUEUED)
+    total_rows          = models.PositiveIntegerField(default=0)
+    success_count       = models.PositiveIntegerField(default=0)
+    failed_count        = models.PositiveIntegerField(default=0)
+    created_product_ids = models.JSONField(default=list)
+    errors              = models.JSONField(default=list)
+    error_message       = models.TextField(blank=True)
+    created_at          = models.DateTimeField(auto_now_add=True)
+    updated_at          = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"BulkUploadJob({self.id}) vendor={self.vendor_id} status={self.status}"

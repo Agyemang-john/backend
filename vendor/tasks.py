@@ -8,6 +8,83 @@ sms_client = ArkeselSMS()
 
 logger = logging.getLogger(__name__)
 
+
+@shared_task(bind=True, max_retries=0, soft_time_limit=300, time_limit=360)
+def process_bulk_upload(self, job_id, rows, vendor_id):
+    """
+    Async Celery task for large bulk product uploads (>100 rows).
+    Processes rows, creates products, updates SubscriptionUsage, and
+    writes the result back to the BulkUploadJob record.
+    """
+    from .models import BulkUploadJob, Vendor
+    from vendor.bulk_upload_serializer import BulkProductRowSerializer
+    from payments.models import SubscriptionUsage
+    from django.db import transaction
+    from django.db.models import F
+
+    try:
+        job = BulkUploadJob.objects.get(id=job_id)
+        vendor = Vendor.objects.get(id=vendor_id)
+
+        job.status = BulkUploadJob.STATUS_PROCESSING
+        job.save(update_fields=["status", "updated_at"])
+
+        created_ids = []
+        errors = []
+
+        for i, row in enumerate(rows, start=2):
+            serializer = BulkProductRowSerializer(data=row)
+            if not serializer.is_valid():
+                errors.append({
+                    "row": i,
+                    "title": row.get("title", "—"),
+                    "errors": serializer.errors,
+                })
+                continue
+            try:
+                with transaction.atomic():
+                    product = serializer.save(vendor=vendor)
+                    created_ids.append(product.id)
+            except Exception as exc:
+                logger.error(
+                    "BulkUpload job %s: row %d failed for vendor %d: %s",
+                    job_id, i, vendor_id, exc, exc_info=True,
+                )
+                errors.append({
+                    "row": i,
+                    "title": row.get("title", "—"),
+                    "errors": {"non_field_errors": [str(exc)]},
+                })
+
+        if created_ids:
+            SubscriptionUsage.objects.filter(vendor=vendor).update(
+                active_products_count=F("active_products_count") + len(created_ids)
+            )
+
+        job.status = BulkUploadJob.STATUS_DONE
+        job.success_count = len(created_ids)
+        job.failed_count = len(errors)
+        job.created_product_ids = created_ids
+        job.errors = errors
+        job.save(update_fields=[
+            "status", "success_count", "failed_count",
+            "created_product_ids", "errors", "updated_at",
+        ])
+
+        logger.info(
+            "BulkUpload job %s done: %d created, %d failed",
+            job_id, len(created_ids), len(errors),
+        )
+
+    except BulkUploadJob.DoesNotExist:
+        logger.error("BulkUploadJob %s not found", job_id)
+    except Exception as exc:
+        logger.error("BulkUpload job %s crashed: %s", job_id, exc, exc_info=True)
+        BulkUploadJob.objects.filter(id=job_id).update(
+            status=BulkUploadJob.STATUS_FAILED,
+            error_message=str(exc),
+        )
+
 @shared_task(bind=True, max_retries=3, retry_backoff=True)
 def send_vendor_approval_email(self, vendor_id, is_approved):
     """

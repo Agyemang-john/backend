@@ -227,9 +227,10 @@ class BulkProductRowSerializer(serializers.Serializer):
 
 
 class BulkUploadResultSerializer(serializers.Serializer):
-    """Summary returned after a bulk upload attempt."""
-    total_rows      = serializers.IntegerField()
-    success_count   = serializers.IntegerField()
-    failed_count    = serializers.IntegerField()
+    """Summary returned after a synchronous bulk upload attempt."""
+    mode                = serializers.CharField(default="sync")
+    total_rows          = serializers.IntegerField()
+    success_count       = serializers.IntegerField()
+    failed_count        = serializers.IntegerField()
     created_product_ids = serializers.ListField(child=serializers.IntegerField())
-    errors          = serializers.ListField(child=serializers.DictField())
+    errors              = serializers.ListField(child=serializers.DictField())
