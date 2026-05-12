@@ -518,9 +518,7 @@ class VendorProductsView(APIView):
         except (ValueError, TypeError):
             page = 1
 
-        products = Product.objects.filter(vendor=vendor, status='published').annotate(
-            average_rating=Avg('reviews__rating'), review_count=Count('reviews')
-        ).order_by('id')
+        products = Product.objects.filter(vendor=vendor, status='published').order_by('-date')
 
         total_items = products.count()
         total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -529,11 +527,11 @@ class VendorProductsView(APIView):
 
         products_data = []
         for product in paged:
-            product_variants = Variants.objects.filter(product=product)
+            product_variants = Variants.objects.filter(product=product).select_related('color', 'size')
             products_data.append({
-                'product':       ProductSerializer(product, context={'request': request}).data,
-                'average_rating': product.average_rating or 0,
-                'review_count':   product.review_count or 0,
+                'product':        ProductSerializer(product, context={'request': request}).data,
+                'average_rating': product.avg_rating,
+                'review_count':   product.review_count,
                 'variants':       VariantsSerializer(product_variants, many=True, context={'request': request}).data,
                 'colors':         list(product_variants.values('color__name', 'color__code', 'id').distinct()),
             })

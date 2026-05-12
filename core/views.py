@@ -203,18 +203,10 @@ class MainAPIView(APIView):
         if not cached_data:
             new_products_qs = (
                 Product.objects.filter(status='published', product_type="new")
-                .annotate(
-                    average_rating=Avg('reviews__rating'),
-                    review_count=Count('reviews')
-                )
                 .order_by('-date')[:9]
             )
             most_popular_qs = (
                 Product.objects.filter(status='published')
-                .annotate(
-                    average_rating=Avg('reviews__rating'),
-                    review_count=Count('reviews')
-                )
                 .order_by('-views')[:8]
             )
             category = Category.objects.order_by('-engagement_score').first()

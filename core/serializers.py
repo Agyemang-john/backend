@@ -40,8 +40,8 @@ class TrendingProductSerializer(serializers.ModelSerializer):
 
 class HomepageProductSerializer(serializers.ModelSerializer):
     """Raw GHS prices for homepage cache — no currency conversion."""
-    average_rating = serializers.FloatField(read_only=True, default=0)
-    review_count = serializers.IntegerField(read_only=True, default=0)
+    average_rating = serializers.FloatField(source='avg_rating', read_only=True)
+    review_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Product

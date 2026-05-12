@@ -173,10 +173,6 @@ def get_cached_product_data(sku: str, slug: str, request):
         .prefetch_related(
             Prefetch('p_images', queryset=ProductImages.objects.order_by('id')),
             Prefetch('reviews', queryset=ProductReview.objects.filter(status=True))
-        )
-        .annotate(
-            average_rating=Avg('reviews__rating'),
-            review_count=Count('reviews')
         ),
         sku=sku,
         slug=slug
@@ -191,8 +187,8 @@ def get_cached_product_data(sku: str, slug: str, request):
         "reviews": ProductReviewSerializer(
             product.reviews.filter(status=True), many=True, context={'request': request}
         ).data,
-        "average_rating": product.average_rating or 0,
-        "review_count": product.review_count or 0,
+        "average_rating": product.avg_rating,
+        "review_count": product.review_count,
         "delivery_options": ProductDeliveryOptionSerializer(
             ProductDeliveryOption.objects.filter(product=product), many=True
         ).data,
@@ -1082,33 +1078,29 @@ class CollectionAPIView(APIView):
         )
 
         filtered = base_qs
-        needs_distinct = False
 
         if active_colors:
-            filtered = filtered.filter(variants__color__id__in=active_colors)
-            needs_distinct = True
+            filtered = filtered.filter(
+                id__in=Variants.objects.filter(color_id__in=active_colors).values('product_id')
+            )
         if active_sizes:
-            filtered = filtered.filter(variants__size__id__in=active_sizes)
-            needs_distinct = True
+            filtered = filtered.filter(
+                id__in=Variants.objects.filter(size_id__in=active_sizes).values('product_id')
+            )
         if active_brands:
-            filtered = filtered.filter(brand__id__in=active_brands)
+            filtered = filtered.filter(brand_id__in=active_brands)
         if active_vendors:
-            filtered = filtered.filter(vendor__id__in=active_vendors)
+            filtered = filtered.filter(vendor_id__in=active_vendors)
         if min_price is not None:
             filtered = filtered.filter(price__gte=min_price / exchange_rate)
         if max_price is not None:
             filtered = filtered.filter(price__lte=max_price / exchange_rate)
-
-        filtered = filtered.annotate(
-            average_rating=Avg('reviews__rating'),
-            review_count=Count('reviews', distinct=True),
-        )
         if active_ratings:
-            filtered = filtered.filter(average_rating__gte=min(active_ratings))
-        if needs_distinct:
-            filtered = filtered.distinct()
+            filtered = filtered.filter(avg_rating__gte=min(active_ratings))
 
-        filtered = filtered.order_by('id')
+        sort = request.GET.get('sort', 'featured')
+        _sort_map = {'price_asc': 'price', 'price_desc': '-price', 'rating': '-avg_rating', 'newest': '-date'}
+        filtered = filtered.order_by(_sort_map.get(sort, '-date'))
 
         PAGE_SIZE = 12
         total_items = filtered.count()
@@ -1119,20 +1111,19 @@ class CollectionAPIView(APIView):
         products_with_details = []
         for product in paged:
             variants = list(product.variants.all())
-            seen_colors = {}
+            color_map = {}
             for v in variants:
-                if v.color and v.color.id not in seen_colors:
-                    seen_colors[v.color.id] = {
+                if v.color and v.color.id not in color_map:
+                    color_map[v.color.id] = {
                         'color__name': v.color.name,
                         'color__code': v.color.code,
                         'id': v.id,
                     }
             products_with_details.append({
-                'product': ProductSerializer(product, context={'request': request}).data,
-                'average_rating': float(product.average_rating) if product.average_rating else 0.0,
-                'review_count': product.review_count or 0,
-                'variants': VariantSerializer(variants, many=True).data,
-                'colors': list(seen_colors.values()),
+                'product': ProductListSerializer(product, context={'request': request}).data,
+                'average_rating': product.avg_rating,
+                'review_count': product.review_count,
+                'colors': list(color_map.values()),
             })
 
         # Sidebar filter options from the unfiltered base
