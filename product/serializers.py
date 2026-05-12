@@ -208,6 +208,64 @@ class ProductSerializer(serializers.ModelSerializer):
         exchange_rate = Decimal(str(rates.get(currency, 1)))# Default to 1 if currency not found
         return round(obj.price * exchange_rate, 2)
     
+class _ListBrandSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Brand
+        fields = ['id', 'title', 'slug']
+
+
+class _ListVendorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Vendor
+        fields = ['id', 'name', 'slug']
+
+
+class _ListSubCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Sub_Category
+        fields = ['id', 'title', 'slug']
+
+
+class ProductListSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for list pages — no reviews, no heavy nesting."""
+    brand = _ListBrandSerializer(read_only=True)
+    vendor = _ListVendorSerializer(read_only=True)
+    sub_category = _ListSubCategorySerializer(read_only=True)
+    price = serializers.SerializerMethodField()
+    old_price = serializers.SerializerMethodField()
+    currency = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = [
+            'id', 'slug', 'title', 'sku', 'image', 'status', 'variant',
+            'price', 'old_price', 'currency',
+            'brand', 'vendor', 'sub_category',
+            'avg_rating', 'review_count',
+            'deals_of_the_day', 'recommended_for_you', 'popular_product',
+            'date', 'total_quantity',
+        ]
+
+    def _currency_and_rate(self):
+        request = self.context.get('request')
+        currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
+        rates = get_exchange_rates()
+        rate = Decimal(str(rates.get(currency, 1)))
+        return currency, rate
+
+    def get_currency(self, obj):
+        currency, _ = self._currency_and_rate()
+        return currency
+
+    def get_price(self, obj):
+        _, rate = self._currency_and_rate()
+        return round(obj.price * rate, 2)
+
+    def get_old_price(self, obj):
+        _, rate = self._currency_and_rate()
+        return round(obj.old_price * rate, 2) if obj.old_price else None
+
+
 class LightProductSerializer(serializers.ModelSerializer):
     currency = serializers.SerializerMethodField()
     price = serializers.SerializerMethodField()
@@ -264,6 +322,34 @@ class SizeSerializer(serializers.ModelSerializer):
     class Meta:
         model = Size
         fields = '__all__'
+
+
+class VariantListSerializer(serializers.ModelSerializer):
+    """Lightweight variant serializer for list pages — no nested product."""
+    color = ColorSerializer(read_only=True)
+    size = SizeSerializer(read_only=True)
+    price = serializers.SerializerMethodField()
+    currency = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Variants
+        fields = ['id', 'color', 'size', 'price', 'quantity', 'image', 'currency']
+
+    def _currency_and_rate(self):
+        request = self.context.get('request')
+        currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
+        rates = get_exchange_rates()
+        rate = Decimal(str(rates.get(currency, 1)))
+        return currency, rate
+
+    def get_currency(self, obj):
+        currency, _ = self._currency_and_rate()
+        return currency
+
+    def get_price(self, obj):
+        _, rate = self._currency_and_rate()
+        return round(obj.price * rate, 2)
+
 
 class VariantSerializer(serializers.ModelSerializer):
     product = ProductSerializer()

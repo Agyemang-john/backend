@@ -299,6 +299,8 @@ class Product(models.Model):
     updated = models.DateTimeField(null=True, blank=True)
     views = models.PositiveIntegerField(default=0)
     search_vector = SearchVectorField(null=True, blank=True)
+    avg_rating = models.FloatField(default=0.0, db_index=True)
+    review_count = models.PositiveIntegerField(default=0)
 
     objects  = models.Manager() # Default Manager
     published = PublishedManager() # Custom Manager
@@ -322,9 +324,15 @@ class Product(models.Model):
         indexes = [
             models.Index(fields=["sub_category", "status", "id"]),
             models.Index(fields=["sub_category", "status", "price"]),
+            models.Index(fields=["sub_category", "status", "avg_rating"], name="product_cat_stat_avg_idx"),
+            models.Index(fields=["sub_category", "status", "date"], name="product_cat_stat_date_idx"),
             models.Index(fields=["brand", "status"]),
+            models.Index(fields=["brand", "status", "price"], name="product_brand_stat_price_idx"),
+            models.Index(fields=["brand", "status", "avg_rating"], name="product_brand_stat_avg_idx"),
             models.Index(fields=["vendor", "status"]),
             models.Index(fields=["status"]),
+            models.Index(fields=["status", "avg_rating"], name="product_stat_avg_rating_idx"),
+            models.Index(fields=["status", "price"], name="product_stat_price_idx"),
             models.Index(fields=["product_type"]),
             models.Index(fields=["views"]),
             models.Index(fields=["date"]),

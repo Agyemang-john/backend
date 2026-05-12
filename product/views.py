@@ -450,467 +450,309 @@ class SearchSuggestionsAPIView(APIView):
 
 
 class CategoryProductListView(APIView):
-    """
-    Returns all products for a given sub-category, with filtering and pagination.
-
-    FILTERING STRATEGY (same pattern as BrandProductListView):
-    1. Fetch ALL published products for the category (base queryset).
-    2. Derive sidebar filter options from this base set (cached 1 hour).
-    3. Apply user-selected filters on top of the base to get the display set.
-
-    The sidebar always reflects the full category catalog so users can
-    freely combine/remove filters without losing visibility of options.
-
-    PERFORMANCE:
-    - Category object cached for 1 hour.
-    - Unfiltered price range cached for 1 hour.
-    - Sidebar filter options cached for 1 hour.
-    - select_related / prefetch_related / only() to minimize DB hits.
-    - .distinct() only applied when variant joins could produce duplicates.
-    """
+    permission_classes = [AllowAny]
 
     def get(self, request, slug):
-        # ═══════════════════════════════════════════════════════════════════════
-        # STEP 1: Fetch Category (cached for 1 hour)
-        # ═══════════════════════════════════════════════════════════════════════
+        # ── Category (cached 1 h) ──────────────────────────────────────────────
         cache_key = f"category:{slug}"
         category = cache.get(cache_key)
-
         if not category:
             category = Sub_Category.objects.filter(slug=slug).first()
             if not category:
                 return Response({"detail": "Category not found"}, status=404)
             cache.set(cache_key, category, 3600)
 
-        # ═══════════════════════════════════════════════════════════════════════
-        # STEP 2: Currency setup & parse filter parameters from query string
-        # ═══════════════════════════════════════════════════════════════════════
+        # ── Currency ───────────────────────────────────────────────────────────
         currency = request.headers.get('X-Currency', 'GHS')
         rates = get_exchange_rates()
         exchange_rate = Decimal(str(rates.get(currency, 1)))
 
+        # ── Parse filters ──────────────────────────────────────────────────────
         try:
-            active_colors = [int(i) for i in request.GET.getlist('color') if i.isdigit()]
-            active_sizes = [int(i) for i in request.GET.getlist('size') if i.isdigit()]
-            active_brands = [int(i) for i in request.GET.getlist('brand') if i.isdigit()]
+            active_colors  = [int(i) for i in request.GET.getlist('color')  if i.isdigit()]
+            active_sizes   = [int(i) for i in request.GET.getlist('size')   if i.isdigit()]
+            active_brands  = [int(i) for i in request.GET.getlist('brand')  if i.isdigit()]
             active_vendors = [int(i) for i in request.GET.getlist('vendor') if i.isdigit()]
-            rating = [int(i) for i in request.GET.getlist('rating') if i.isdigit()]
-            min_price = Decimal(request.GET.get('from')) if request.GET.get('from') else None
-            max_price = Decimal(request.GET.get('to')) if request.GET.get('to') else None
-            page = int(request.GET.get('page', 1))
+            active_ratings = [int(i) for i in request.GET.getlist('rating') if i.isdigit()]
+            min_price = Decimal(request.GET['from']) if request.GET.get('from') else None
+            max_price = Decimal(request.GET['to'])   if request.GET.get('to')   else None
+            page = max(1, int(request.GET.get('page', 1)))
         except (ValueError, TypeError):
             return Response({"detail": "Invalid filter parameters"}, status=400)
 
-        # ═══════════════════════════════════════════════════════════════════════
-        # STEP 3: Unfiltered price range (cached for 1 hour)
-        # Used for the price slider bounds — always spans the full category.
-        # ═══════════════════════════════════════════════════════════════════════
-        unfiltered_cache_key = f"price_range:{slug}"
-        unfiltered_price_range = cache.get(unfiltered_cache_key)
+        sort = request.GET.get('sort', 'featured')
+        _sort_map = {
+            'price_asc':  'price',
+            'price_desc': '-price',
+            'rating':     '-avg_rating',
+            'newest':     '-date',
+        }
 
+        # ── Unfiltered price range for slider bounds (cached 1 h) ─────────────
+        price_range_key = f"price_range:{slug}"
+        unfiltered_price_range = cache.get(price_range_key)
         if not unfiltered_price_range:
             unfiltered_price_range = Product.objects.filter(
-                status="published",
-                sub_category=category
-            ).aggregate(
-                min_price_unfiltered=Min('price'),
-                max_price_unfiltered=Max('price')
-            )
-            cache.set(unfiltered_cache_key, unfiltered_price_range, 3600)
+                status="published", sub_category=category
+            ).aggregate(min_price_unfiltered=Min('price'), max_price_unfiltered=Max('price'))
+            cache.set(price_range_key, unfiltered_price_range, 3600)
 
         min_price_unfiltered = unfiltered_price_range.get('min_price_unfiltered') or Decimal('0')
         max_price_unfiltered = unfiltered_price_range.get('max_price_unfiltered') or Decimal('0')
 
-        # ═══════════════════════════════════════════════════════════════════════
-        # STEP 4: Base queryset — ALL published products in this category.
-        # This is the single source of truth. Sidebar filters and the
-        # product list both derive from this queryset.
-        # ═══════════════════════════════════════════════════════════════════════
-        base_queryset = Product.objects.filter(
-            status="published",
-            sub_category=category
-        ).select_related(
-            'brand', 'vendor', 'sub_category'
-        ).prefetch_related(
-            Prefetch(
-                'reviews',
-                queryset=ProductReview.objects.filter(status=True).only('rating', 'product_id')
-            ),
+        # ── Base queryset (no annotations — uses stored avg_rating/review_count) ─
+        base_qs = Product.objects.filter(
+            status="published", sub_category=category
+        ).select_related('brand', 'vendor', 'sub_category').prefetch_related(
             Prefetch(
                 'variants',
                 queryset=Variants.objects.select_related('color', 'size').only(
-                    'id', 'product_id', 'color__id', 'color__name', 'color__code',
-                    'size__id', 'size__name', 'quantity', 'price'
+                    'id', 'product_id', 'price',
+                    'color__id', 'color__name', 'color__code',
+                    'size__id', 'size__name', 'quantity',
                 )
             )
-        ).only(
-            'id', 'title', 'slug', 'sku', 'image', 'price', 'old_price',
-            'brand__id', 'brand__title', 'brand__slug',
-            'vendor__id', 'vendor__name',
-            'sub_category__id', 'sub_category__title'
         )
 
-        # ═══════════════════════════════════════════════════════════════════════
-        # STEP 5: Apply user-selected filters on top of the base queryset.
-        # Only adds .distinct() when variant joins (color/size) could
-        # produce duplicate product rows.
-        # ═══════════════════════════════════════════════════════════════════════
-        filtered_products = base_queryset
-        needs_distinct = False
+        # ── Apply filters (subquery for variants — no JOIN/DISTINCT) ───────────
+        filtered_qs = base_qs
 
         if active_colors:
-            filtered_products = filtered_products.filter(variants__color__id__in=active_colors)
-            needs_distinct = True
+            filtered_qs = filtered_qs.filter(
+                id__in=Variants.objects.filter(color_id__in=active_colors).values('product_id')
+            )
         if active_sizes:
-            filtered_products = filtered_products.filter(variants__size__id__in=active_sizes)
-            needs_distinct = True
+            filtered_qs = filtered_qs.filter(
+                id__in=Variants.objects.filter(size_id__in=active_sizes).values('product_id')
+            )
         if active_brands:
-            filtered_products = filtered_products.filter(brand__id__in=active_brands)
+            filtered_qs = filtered_qs.filter(brand_id__in=active_brands)
         if active_vendors:
-            filtered_products = filtered_products.filter(vendor__id__in=active_vendors)
+            filtered_qs = filtered_qs.filter(vendor_id__in=active_vendors)
         if min_price is not None:
-            filtered_products = filtered_products.filter(price__gte=min_price / exchange_rate)
+            filtered_qs = filtered_qs.filter(price__gte=min_price / exchange_rate)
         if max_price is not None:
-            filtered_products = filtered_products.filter(price__lte=max_price / exchange_rate)
+            filtered_qs = filtered_qs.filter(price__lte=max_price / exchange_rate)
+        if active_ratings:
+            filtered_qs = filtered_qs.filter(avg_rating__gte=min(active_ratings))
 
-        # Annotate AFTER filtering to avoid computing ratings for excluded products,
-        # but BEFORE .distinct() so the aggregation is accurate.
-        filtered_products = filtered_products.annotate(
-            average_rating=Avg('reviews__rating'),
-            review_count=Count('reviews', distinct=True)
-        )
+        filtered_qs = filtered_qs.order_by(_sort_map.get(sort, '-date'))
 
-        if rating:
-            filtered_products = filtered_products.filter(average_rating__gte=min(rating))
+        # ── Filtered price range ───────────────────────────────────────────────
+        price_range = filtered_qs.aggregate(min_price=Min('price'), max_price=Max('price'))
 
-        if needs_distinct:
-            filtered_products = filtered_products.distinct()
-
-        # Consistent ordering for stable pagination
-        filtered_products = filtered_products.order_by('id')
-
-        # ═══════════════════════════════════════════════════════════════════════
-        # STEP 6: Filtered price range (reflects the narrowed-down set)
-        # ═══════════════════════════════════════════════════════════════════════
-        price_range = filtered_products.aggregate(
-            max_price=Max('price'),
-            min_price=Min('price')
-        )
-
-        # ═══════════════════════════════════════════════════════════════════════
-        # STEP 7: Manual pagination (faster than DRF paginator for this case)
-        # Clamps the page number to valid bounds and slices the queryset.
-        # ═══════════════════════════════════════════════════════════════════════
+        # ── Pagination ─────────────────────────────────────────────────────────
         PAGE_SIZE = 12
+        total_items = filtered_qs.count()
+        total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
+        page = min(page, total_pages)
+        paged_products = list(filtered_qs[(page - 1) * PAGE_SIZE: page * PAGE_SIZE])
 
-        try:
-            total_items = filtered_products.count()
-            total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
-
-            # Clamp page to valid range
-            if page < 1 or (page > total_pages and total_items > 0):
-                page = 1
-
-            start = (page - 1) * PAGE_SIZE
-            end = start + PAGE_SIZE
-            paged_products = list(filtered_products[start:end])
-
-        except Exception as e:
-            logger.error(f"Pagination error in CategoryProductListView: {e}")
-            paged_products = []
-            total_items = 0
-            page = 1
-
-        # ═══════════════════════════════════════════════════════════════════════
-        # STEP 8: Build product detail objects from prefetched data.
-        # All variant/color data comes from the prefetch cache — no extra queries.
-        # ═══════════════════════════════════════════════════════════════════════
+        # ── Serialize (lightweight — no reviews, no recursive VariantSerializer) ─
         products_with_details = []
-
         for product in paged_products:
-            product_variants = list(product.variants.all())
-
-            # De-duplicate colors by color ID
-            product_colors = {}
-            for variant in product_variants:
-                if variant.color and variant.color.id not in product_colors:
-                    product_colors[variant.color.id] = {
-                        'color__name': variant.color.name,
-                        'color__code': variant.color.code,
-                        'id': variant.id
+            variants = list(product.variants.all())
+            color_map = {}
+            for v in variants:
+                if v.color and v.color.id not in color_map:
+                    color_map[v.color.id] = {
+                        'id': v.id,
+                        'color__name': v.color.name,
+                        'color__code': v.color.code,
                     }
-
             products_with_details.append({
-                'product': ProductSerializer(product, context={'request': request}).data,
-                'average_rating': float(product.average_rating) if product.average_rating else 0.0,
-                'review_count': product.review_count or 0,
-                'variants': VariantSerializer(product_variants, many=True).data,
-                'colors': list(product_colors.values()),
+                'product': ProductListSerializer(product, context={'request': request}).data,
+                'average_rating': product.avg_rating,
+                'review_count': product.review_count,
+                'colors': list(color_map.values()),
             })
 
-        # ═══════════════════════════════════════════════════════════════════════
-        # STEP 9: Sidebar Filter Options (from UNFILTERED base queryset)
-        #
-        # These are derived from ALL published products in this category,
-        # NOT from the filtered results. This ensures the sidebar always
-        # shows every available color/size/brand/vendor for the category,
-        # so users can freely adjust filters without options disappearing.
-        #
-        # Cached for 1 hour to avoid repeated DB hits on every request.
-        # Trade-off: newly added products won't appear in sidebar for up to 1 hour.
-        # ═══════════════════════════════════════════════════════════════════════
+        # ── Sidebar filter options (cached 1 h, from unfiltered base) ──────────
         filter_cache_key = f"filters:{slug}"
         filter_options = cache.get(filter_cache_key)
-
         if not filter_options:
-            sizes = list(Size.objects.filter(
-                variants__product__in=base_queryset
-            ).distinct().values('id', 'name'))
-
-            colors = list(Color.objects.filter(
-                variants__product__in=base_queryset
-            ).distinct().values('id', 'name', 'code'))
-
-            brands = list(Brand.objects.filter(
-                product__in=base_queryset
-            ).distinct().values('id', 'title'))
-
-            vendors = list(Vendor.objects.filter(
-                product__in=base_queryset
-            ).distinct().values('id', 'name'))
-
+            base_ids = base_qs.values('id')
             filter_options = {
-                "colors": colors,
-                "sizes": sizes,
-                "vendors": vendors,
-                "brands": brands,
+                "colors":  list(Color.objects.filter(variants__product_id__in=base_ids).distinct().values('id', 'name', 'code')),
+                "sizes":   list(Size.objects.filter(variants__product_id__in=base_ids).distinct().values('id', 'name')),
+                "brands":  list(Brand.objects.filter(product__id__in=base_ids).distinct().values('id', 'title')),
+                "vendors": list(Vendor.objects.filter(product__id__in=base_ids).distinct().values('id', 'name')),
             }
             cache.set(filter_cache_key, filter_options, 3600)
 
-        # ═══════════════════════════════════════════════════════════════════════
-        # STEP 10: Build pagination URLs (preserves existing query params)
-        # ═══════════════════════════════════════════════════════════════════════
-        def build_pagination_url(page_num):
+        def build_url(page_num):
             if page_num < 1 or page_num > total_pages or total_items == 0:
                 return None
             params = request.GET.copy()
             params['page'] = page_num
             return f"/api/v1/product/category/{slug}/?{params.urlencode()}"
 
-        # ═══════════════════════════════════════════════════════════════════════
-        # STEP 11: Build and return the response
-        # ═══════════════════════════════════════════════════════════════════════
-        context = {
-            # Sidebar options (from unfiltered base, cached)
+        return Response({
             **filter_options,
-
             "category": SubCategorySerializer(category).data,
-
-            # Product list (filtered + paginated)
-            "products": [p['product'] for p in products_with_details],
             "products_with_details": products_with_details,
-
-            # Price range after filters (for display)
             "min_price": round((price_range['min_price'] or min_price_unfiltered) * exchange_rate, 2),
             "max_price": round((price_range['max_price'] or max_price_unfiltered) * exchange_rate, 2),
-
-            # Price range before filters (for slider bounds)
             "min_price_unfiltered": round(min_price_unfiltered * exchange_rate, 2),
             "max_price_unfiltered": round(max_price_unfiltered * exchange_rate, 2),
             "default_max_price": round(Decimal('10000') * exchange_rate, 2),
-
             "currency": currency,
-
-            # Pagination
-            "next": build_pagination_url(page + 1),
-            "previous": build_pagination_url(page - 1) if page > 1 else None,
+            "next": build_url(page + 1),
+            "previous": build_url(page - 1) if page > 1 else None,
             "total": total_items,
             "current_page": page,
             "total_pages": total_pages,
-        }
-
-        return Response(context)
+        })
 
 class BrandProductListView(APIView):
-    """
-    Returns all products for a given brand, with filtering and pagination.
-
-    FILTERING STRATEGY:
-    1. Fetch ALL published products for the brand (base queryset).
-    2. Derive sidebar filter options (colors, sizes, vendors) from this base set.
-    3. Apply user-selected filters on top of the base to get the display set.
-
-    This means the sidebar always reflects the full brand catalog, so users
-    can freely combine/remove filters without losing visibility of options.
-    """
+    permission_classes = [AllowAny]
 
     def get(self, request, slug):
-        # ─────────────────────────────────────────────
-        # Currency conversion setup
-        # ─────────────────────────────────────────────
+        # ── Currency ───────────────────────────────────────────────────────────
         currency = request.headers.get("X-Currency", "GHS")
         exchange_rate = Decimal(str(get_exchange_rates().get(currency, 1)))
 
-        # ─────────────────────────────────────────────
-        # Fetch the brand by slug
-        # ─────────────────────────────────────────────
-        brand = Brand.objects.filter(slug=slug).first()
+        # ── Brand (cached 1 h) ─────────────────────────────────────────────────
+        brand_cache_key = f"brand:{slug}"
+        brand = cache.get(brand_cache_key)
         if not brand:
-            return Response({"detail": "Brand not found"}, status=404)
+            brand = Brand.objects.filter(slug=slug).first()
+            if not brand:
+                return Response({"detail": "Brand not found"}, status=404)
+            cache.set(brand_cache_key, brand, 3600)
 
-        # ─────────────────────────────────────────────
-        # Base queryset: ALL published products for this brand.
-        # This is the single source of truth for both the product list
-        # and the sidebar filter options. Annotated once to avoid
-        # repeated subqueries for rating/review count.
-        # ─────────────────────────────────────────────
-        base_products = (
-            Product.objects
-            .filter(status="published", brand=brand)
-            .select_related("vendor", "brand")
-            .prefetch_related(
-                "reviews",
-                "variants__color",
-                "variants__size"
-            )
-            .annotate(
-                average_rating=Avg("reviews__rating"),
-                review_count=Count("reviews", distinct=True)
-            )
-            .order_by("id")
-        )
-
-        # ─────────────────────────────────────────────
-        # Unfiltered price range (for price slider bounds)
-        # Computed from the base queryset so the slider always
-        # spans the full brand price range.
-        # ─────────────────────────────────────────────
-        price_bounds = base_products.aggregate(
-            min_price=Min("price"),
-            max_price=Max("price")
-        )
-        min_price_unfiltered = price_bounds["min_price"] or 0
-        max_price_unfiltered = price_bounds["max_price"] or 0
-
-        # ─────────────────────────────────────────────
-        # Parse filter parameters from query string
-        # ─────────────────────────────────────────────
+        # ── Parse filters ──────────────────────────────────────────────────────
         try:
-            active_colors = list(map(int, request.GET.getlist("color")))
-            active_sizes = list(map(int, request.GET.getlist("size")))
-            active_vendors = list(map(int, request.GET.getlist("vendor")))
-            active_ratings = list(map(int, request.GET.getlist("rating")))
-            min_price = Decimal(request.GET.get("from")) if request.GET.get("from") else None
-            max_price = Decimal(request.GET.get("to")) if request.GET.get("to") else None
-        except ValueError:
+            active_colors  = [int(i) for i in request.GET.getlist("color")  if i.isdigit()]
+            active_sizes   = [int(i) for i in request.GET.getlist("size")   if i.isdigit()]
+            active_vendors = [int(i) for i in request.GET.getlist("vendor") if i.isdigit()]
+            active_ratings = [int(i) for i in request.GET.getlist("rating") if i.isdigit()]
+            min_price = Decimal(request.GET["from"]) if request.GET.get("from") else None
+            max_price = Decimal(request.GET["to"])   if request.GET.get("to")   else None
+            page = max(1, int(request.GET.get("page", 1)))
+        except (ValueError, TypeError):
             return Response({"detail": "Invalid filters"}, status=400)
 
-        # ─────────────────────────────────────────────
-        # Build a combined Q filter from all active parameters.
-        # Filters are applied on top of base_products so all
-        # narrowing happens within the brand's product set.
-        # ─────────────────────────────────────────────
-        filters = Q()
-        if active_colors:
-            filters &= Q(variants__color_id__in=active_colors)
-        if active_sizes:
-            filters &= Q(variants__size_id__in=active_sizes)
-        if active_vendors:
-            filters &= Q(vendor_id__in=active_vendors)
-        if active_ratings:
-            filters &= Q(average_rating__gte=min(active_ratings))
-        if min_price is not None:
-            filters &= Q(price__gte=min_price / exchange_rate)
-        if max_price is not None:
-            filters &= Q(price__lte=max_price / exchange_rate)
+        sort = request.GET.get('sort', 'featured')
+        _sort_map = {
+            'price_asc':  'price',
+            'price_desc': '-price',
+            'rating':     '-avg_rating',
+            'newest':     '-date',
+        }
 
-        # Apply filters. Use .distinct() to prevent duplicate rows
-        # caused by joining on variants (color/size).
-        if filters:
-            filtered_products = base_products.filter(filters).distinct()
-        else:
-            filtered_products = base_products
-
-        # ─────────────────────────────────────────────
-        # Filtered price range (reflects the narrowed-down set)
-        # ─────────────────────────────────────────────
-        filtered_bounds = filtered_products.aggregate(
-            min_price=Min("price"),
-            max_price=Max("price")
+        # ── Base queryset (uses stored avg_rating — no Avg JOIN) ───────────────
+        base_qs = Product.objects.filter(
+            status="published", brand=brand
+        ).select_related("vendor", "brand", "sub_category").prefetch_related(
+            Prefetch(
+                'variants',
+                queryset=Variants.objects.select_related('color', 'size').only(
+                    'id', 'product_id', 'price',
+                    'color__id', 'color__name', 'color__code',
+                    'size__id', 'size__name', 'quantity',
+                )
+            )
         )
 
-        # ─────────────────────────────────────────────
-        # Pagination
-        # ─────────────────────────────────────────────
-        paginator = PageNumberPagination()
-        paginator.page_size = 12
-        paged_products = paginator.paginate_queryset(filtered_products, request)
+        # ── Unfiltered price range for slider bounds (cached 1 h) ─────────────
+        price_range_key = f"brand_price_range:{slug}"
+        unfiltered_pr = cache.get(price_range_key)
+        if not unfiltered_pr:
+            unfiltered_pr = base_qs.aggregate(
+                min_price_unfiltered=Min("price"),
+                max_price_unfiltered=Max("price"),
+            )
+            cache.set(price_range_key, unfiltered_pr, 3600)
 
-        # ─────────────────────────────────────────────
-        # Serialize the paginated products with variant details.
-        # Uses prefetched data so no extra DB queries are fired.
-        # ─────────────────────────────────────────────
-        product_data = ProductSerializer(
-            paged_products, many=True, context={"request": request}
-        ).data
+        min_price_unfiltered = unfiltered_pr["min_price_unfiltered"] or Decimal('0')
+        max_price_unfiltered = unfiltered_pr["max_price_unfiltered"] or Decimal('0')
 
+        # ── Apply filters (subquery for variants — no JOIN/DISTINCT) ───────────
+        filtered_qs = base_qs
+
+        if active_colors:
+            filtered_qs = filtered_qs.filter(
+                id__in=Variants.objects.filter(color_id__in=active_colors).values('product_id')
+            )
+        if active_sizes:
+            filtered_qs = filtered_qs.filter(
+                id__in=Variants.objects.filter(size_id__in=active_sizes).values('product_id')
+            )
+        if active_vendors:
+            filtered_qs = filtered_qs.filter(vendor_id__in=active_vendors)
+        if min_price is not None:
+            filtered_qs = filtered_qs.filter(price__gte=min_price / exchange_rate)
+        if max_price is not None:
+            filtered_qs = filtered_qs.filter(price__lte=max_price / exchange_rate)
+        if active_ratings:
+            filtered_qs = filtered_qs.filter(avg_rating__gte=min(active_ratings))
+
+        filtered_qs = filtered_qs.order_by(_sort_map.get(sort, '-date'))
+
+        # ── Filtered price range ───────────────────────────────────────────────
+        filtered_bounds = filtered_qs.aggregate(min_price=Min("price"), max_price=Max("price"))
+
+        # ── Pagination ─────────────────────────────────────────────────────────
+        PAGE_SIZE = 12
+        total_items = filtered_qs.count()
+        total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
+        page = min(page, total_pages)
+        paged_products = list(filtered_qs[(page - 1) * PAGE_SIZE: page * PAGE_SIZE])
+
+        # ── Serialize (lightweight) ────────────────────────────────────────────
         products_with_details = []
         for product in paged_products:
-            variants = product.variants.all()
-            # Build unique color set from prefetched variants
-            color_set = {
-                (v.color.name, v.color.code, v.id)
-                for v in variants if v.color
-            }
-
+            variants = list(product.variants.all())
+            color_map = {}
+            for v in variants:
+                if v.color and v.color.id not in color_map:
+                    color_map[v.color.id] = {
+                        'id': v.id,
+                        'color__name': v.color.name,
+                        'color__code': v.color.code,
+                    }
             products_with_details.append({
-                "product": ProductSerializer(product, context={"request": request}).data,
-                "average_rating": product.average_rating or 0,
-                "review_count": product.review_count or 0,
-                "variants": VariantSerializer(variants, many=True).data,
-                "colors": [
-                    {"name": c[0], "code": c[1], "id": c[2]}
-                    for c in color_set
-                ],
+                "product": ProductListSerializer(product, context={"request": request}).data,
+                "average_rating": product.avg_rating,
+                "review_count": product.review_count,
+                "colors": list(color_map.values()),
             })
 
-        # ─────────────────────────────────────────────
-        # Sidebar filter options — derived from the UNFILTERED
-        # base queryset so the sidebar always shows every
-        # available option for this brand.
-        # ─────────────────────────────────────────────
-        sizes_qs = Size.objects.filter(variants__product__in=base_products).distinct()
-        colors_qs = Color.objects.filter(variants__product__in=base_products).distinct()
-        vendors_qs = Vendor.objects.filter(product__in=base_products).distinct()
+        # ── Sidebar filter options (cached 1 h, from unfiltered base) ──────────
+        brand_filter_cache_key = f"brand_filters:{slug}"
+        brand_filter_options = cache.get(brand_filter_cache_key)
+        if not brand_filter_options:
+            base_ids = base_qs.values('id')
+            brand_filter_options = {
+                "colors":  list(Color.objects.filter(variants__product_id__in=base_ids).distinct().values('id', 'name', 'code')),
+                "sizes":   list(Size.objects.filter(variants__product_id__in=base_ids).distinct().values('id', 'name')),
+                "vendors": list(Vendor.objects.filter(product__id__in=base_ids).distinct().values('id', 'name')),
+            }
+            cache.set(brand_filter_cache_key, brand_filter_options, 3600)
 
-        # ─────────────────────────────────────────────
-        # Build and return the response
-        # ─────────────────────────────────────────────
+        def build_url(page_num):
+            if page_num < 1 or page_num > total_pages or total_items == 0:
+                return None
+            params = request.GET.copy()
+            params['page'] = page_num
+            return f"/api/v1/product/brand/{slug}/?{params.urlencode()}"
+
         return Response({
-            # Sidebar options (from unfiltered base)
-            "colors": ColorSerializer(colors_qs, many=True).data,
-            "sizes": SizeSerializer(sizes_qs, many=True).data,
-            "vendors": VendorSerializer(vendors_qs, many=True).data,
+            **brand_filter_options,
             "brand": BrandSerializer(brand).data,
-
-            # Product list (filtered + paginated)
-            "products": product_data,
             "products_with_details": products_with_details,
-
-            # Price ranges
             "min_price": round((filtered_bounds["min_price"] or min_price_unfiltered) * exchange_rate, 2),
             "max_price": round((filtered_bounds["max_price"] or max_price_unfiltered) * exchange_rate, 2),
             "min_price_unfiltered": round(min_price_unfiltered * exchange_rate, 2),
             "max_price_unfiltered": round(max_price_unfiltered * exchange_rate, 2),
-
-            "currency": currency,
-            "exchange_rate": exchange_rate,
             "default_max_price": round(Decimal('10000') * exchange_rate, 2),
-
-            # Pagination links
-            "next": paginator.get_next_link(),
-            "previous": paginator.get_previous_link(),
-            "total": filtered_products.count(),
+            "currency": currency,
+            "next": build_url(page + 1),
+            "previous": build_url(page - 1) if page > 1 else None,
+            "total": total_items,
+            "total_pages": total_pages,
+            "current_page": page,
         })
 
 # from elasticsearch8 import Elasticsearch
@@ -919,262 +761,165 @@ import logging
 
 # Configure logging
 logger = logging.getLogger(__name__)
-from django.contrib.postgres.search import SearchVector, SearchQuery, SearchRank
-
-from django.db.models.functions import Coalesce
+from django.contrib.postgres.search import SearchQuery, SearchRank
 
 class ProductSearchAPIView(APIView):
-    """
-    Full-text product search with filtering and pagination.
-
-    SEARCH STRATEGY:
-    1. Basic keyword matching (icontains on title/description) as a baseline.
-    2. PostgreSQL full-text search layered on top for ranking (best match first).
-       Falls back gracefully to keyword-only if full-text fails (e.g. SQLite dev).
-
-    FILTERING STRATEGY (same pattern as BrandProductListView):
-    1. The search results form the "base queryset" (unfiltered_qs).
-    2. Sidebar filter options are derived from this base so they always
-       reflect ALL available options from the search.
-    3. User-selected filters narrow the display set without affecting the sidebar.
-    """
+    permission_classes = [AllowAny]
 
     def get(self, request, format=None):
         query = (request.GET.get('q') or '').strip()
+        sort  = request.GET.get('sort', 'relevance')
 
-        # No query → return empty result immediately
         if not query:
             return Response({
-                "products": [],
-                "products_with_details": [],
-                "total": 0,
-                "min_price": 0,
-                "max_price": 0,
-                "min_price_unfiltered": 0,
-                "max_price_unfiltered": 0,
-                "colors": [],
-                "sizes": [],
-                "brands": [],
-                "vendors": [],
-                "categories": []
+                "products_with_details": [], "total": 0,
+                "min_price": 0, "max_price": 0,
+                "min_price_unfiltered": 0, "max_price_unfiltered": 0,
+                "colors": [], "sizes": [], "brands": [], "vendors": [], "categories": [],
             })
 
-        # ────────────────────────────────────────────────────────────────
-        # Build base search queryset
-        # ────────────────────────────────────────────────────────────────
-
-        # Keyword search: split query into terms and match any term
-        # against title or description (OR logic within terms).
-        search_terms = query.split()
-        q_filter = Q()
-        for term in search_terms:
-            q_filter |= (
-                Q(title__icontains=term) |
-                Q(description__icontains=term)
-            )
-
-        base_qs = (
-            Product.objects
-            .filter(status="published")
-            .filter(q_filter)
-            .annotate(
-                average_rating=Coalesce(Avg('reviews__rating'), 0.0),
-                review_count=Count('reviews')
-            )
-            .select_related("brand", "vendor", "sub_category")
-            .prefetch_related("variants__color", "variants__size", "reviews")
-        )
-
-        # Try PostgreSQL full-text search for relevance ranking.
-        # Wrapping in try/except so it degrades gracefully on SQLite or
-        # if the DB doesn't have the required extensions.
-        used_fulltext = False
-        try:
-            search_query = SearchQuery(query, config='english')
-            base_qs = base_qs.annotate(
-                search_vector=(
-                    SearchVector('title', weight='A') +
-                    SearchVector('description', weight='B') +
-                    SearchVector('features', weight='C') +
-                    SearchVector('specifications', weight='C')
-                ),
-                rank=SearchRank(
-                    SearchVector('title', weight='A') +
-                    SearchVector('description', weight='B') +
-                    SearchVector('features', weight='C') +
-                    SearchVector('specifications', weight='C'),
-                    search_query
-                )
-            ).filter(search_vector=search_query)
-
-            # Best match first, then newest
-            base_qs = base_qs.order_by('-rank', '-date')
-            used_fulltext = True
-
-        except Exception as e:
-            logger.warning(f"Full-text search failed, using keyword fallback: {e}")
-            base_qs = base_qs.order_by('-date')
-
-        # Fallback ordering if full-text didn't activate
-        if not used_fulltext:
-            base_qs = base_qs.order_by('-date')
-
-        # ────────────────────────────────────────────────────────────────
-        # Currency setup
-        # ────────────────────────────────────────────────────────────────
+        # ── Currency ───────────────────────────────────────────────────────────
         currency = request.headers.get('X-Currency', 'GHS')
         rates = get_exchange_rates()
         exchange_rate = Decimal(str(rates.get(currency, 1)))
 
-        # ────────────────────────────────────────────────────────────────
-        # Unfiltered price range (for slider bounds)
-        # Computed from the full search results before any user filters.
-        # ────────────────────────────────────────────────────────────────
-        unfiltered_price_range = base_qs.aggregate(
-            min_price_unfiltered=Min('price'),
-            max_price_unfiltered=Max('price')
-        )
-        min_price_unfiltered = unfiltered_price_range['min_price_unfiltered'] or 0
-        max_price_unfiltered = unfiltered_price_range['max_price_unfiltered'] or 0
-
-        # ────────────────────────────────────────────────────────────────
-        # Parse filter parameters from query string
-        # ────────────────────────────────────────────────────────────────
+        # ── Parse filters ──────────────────────────────────────────────────────
         try:
-            active_colors = [int(i) for i in request.GET.getlist('color') if i.isdigit()]
-            active_sizes = [int(i) for i in request.GET.getlist('size') if i.isdigit()]
-            active_brands = [int(i) for i in request.GET.getlist('brand') if i.isdigit()]
+            active_colors  = [int(i) for i in request.GET.getlist('color')  if i.isdigit()]
+            active_sizes   = [int(i) for i in request.GET.getlist('size')   if i.isdigit()]
+            active_brands  = [int(i) for i in request.GET.getlist('brand')  if i.isdigit()]
             active_vendors = [int(i) for i in request.GET.getlist('vendor') if i.isdigit()]
             active_ratings = [int(i) for i in request.GET.getlist('rating') if i.isdigit()]
-            min_price = Decimal(request.GET.get('from')) if request.GET.get('from') else None
-            max_price = Decimal(request.GET.get('to')) if request.GET.get('to') else None
-        except ValueError:
+            min_price = Decimal(request.GET['from']) if request.GET.get('from') else None
+            max_price = Decimal(request.GET['to'])   if request.GET.get('to')   else None
+            page = max(1, int(request.GET.get('page', 1)))
+        except (ValueError, TypeError):
             return Response({"detail": "Invalid filter parameters"}, status=400)
 
-        # ────────────────────────────────────────────────────────────────
-        # Build combined filter and apply on top of search results.
-        # base_qs is preserved as unfiltered_qs for sidebar options.
-        # ────────────────────────────────────────────────────────────────
-        filters = Q()
-        if active_colors:
-            filters &= Q(variants__color__id__in=active_colors)
-        if active_sizes:
-            filters &= Q(variants__size__id__in=active_sizes)
-        if active_brands:
-            filters &= Q(brand__id__in=active_brands)
-        if active_vendors:
-            filters &= Q(vendor__id__in=active_vendors)
-        if min_price is not None:
-            filters &= Q(price__gte=min_price / exchange_rate)
-        if max_price is not None:
-            filters &= Q(price__lte=max_price / exchange_rate)
-        if active_ratings:
-            filters &= Q(average_rating__gte=min(active_ratings))
-
-        # Preserve unfiltered search results for sidebar filter options.
-        unfiltered_qs = base_qs
-
-        # Apply filters. .distinct() prevents duplicate rows from variant joins.
-        filtered_products = base_qs.filter(filters).distinct()
-
-        # ────────────────────────────────────────────────────────────────
-        # Filtered price range (reflects the narrowed-down set)
-        # ────────────────────────────────────────────────────────────────
-        price_range = filtered_products.aggregate(
-            min_price=Min('price'),
-            max_price=Max('price')
+        # ── Build base search queryset using stored search_vector (GIN index) ──
+        search_query = SearchQuery(query, config='english')
+        base_qs = (
+            Product.objects
+            .filter(status="published", search_vector=search_query)
+            .annotate(rank=SearchRank('search_vector', search_query))
+            .select_related("brand", "vendor", "sub_category")
+            .prefetch_related(
+                Prefetch(
+                    'variants',
+                    queryset=Variants.objects.select_related('color', 'size').only(
+                        'id', 'product_id', 'price',
+                        'color__id', 'color__name', 'color__code',
+                        'size__id', 'size__name', 'quantity',
+                    )
+                )
+            )
         )
 
-        # ────────────────────────────────────────────────────────────────
-        # Pagination (with page clamping for out-of-range requests)
-        # ────────────────────────────────────────────────────────────────
-        paginator = PageNumberPagination()
-        paginator.page_size = 12
+        # ── Unfiltered price range for slider bounds ────────────────────────────
+        unfiltered_pr = base_qs.aggregate(
+            min_price_unfiltered=Min('price'),
+            max_price_unfiltered=Max('price'),
+        )
+        min_price_unfiltered = unfiltered_pr['min_price_unfiltered'] or Decimal('0')
+        max_price_unfiltered = unfiltered_pr['max_price_unfiltered'] or Decimal('0')
 
-        try:
-            total_items = filtered_products.count()
-            total_pages = max(1, (total_items + paginator.page_size - 1) // paginator.page_size)
-            requested_page = int(request.GET.get('page', '1'))
+        # ── Apply filters (subquery for variants — no JOIN/DISTINCT) ───────────
+        filtered_qs = base_qs
 
-            if requested_page < 1 or requested_page > total_pages or total_items == 0:
-                requested_page = 1
+        if active_colors:
+            filtered_qs = filtered_qs.filter(
+                id__in=Variants.objects.filter(color_id__in=active_colors).values('product_id')
+            )
+        if active_sizes:
+            filtered_qs = filtered_qs.filter(
+                id__in=Variants.objects.filter(size_id__in=active_sizes).values('product_id')
+            )
+        if active_brands:
+            filtered_qs = filtered_qs.filter(brand_id__in=active_brands)
+        if active_vendors:
+            filtered_qs = filtered_qs.filter(vendor_id__in=active_vendors)
+        if min_price is not None:
+            filtered_qs = filtered_qs.filter(price__gte=min_price / exchange_rate)
+        if max_price is not None:
+            filtered_qs = filtered_qs.filter(price__lte=max_price / exchange_rate)
+        if active_ratings:
+            filtered_qs = filtered_qs.filter(avg_rating__gte=min(active_ratings))
 
-            # Temporarily make request.GET mutable to set the clamped page
-            mutable = request.GET._mutable
-            request.GET._mutable = True
-            request.GET['page'] = str(requested_page)
-            request.GET._mutable = mutable
+        # ── Sort ───────────────────────────────────────────────────────────────
+        _sort_map = {
+            'price_asc':  'price',
+            'price_desc': '-price',
+            'rating':     '-avg_rating',
+            'newest':     '-date',
+        }
+        if sort in _sort_map:
+            filtered_qs = filtered_qs.order_by(_sort_map[sort])
+        else:
+            filtered_qs = filtered_qs.order_by('-rank', '-date')
 
-            paged_products = paginator.paginate_queryset(filtered_products, request)
+        # ── Filtered price range ───────────────────────────────────────────────
+        price_range = filtered_qs.aggregate(min_price=Min('price'), max_price=Max('price'))
 
-        except Exception as e:
-            logger.error(f"Pagination error in ProductSearchAPIView: {e}")
-            paged_products = []
-            total_items = 0
+        # ── Pagination ─────────────────────────────────────────────────────────
+        PAGE_SIZE = 12
+        total_items = filtered_qs.count()
+        total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
+        page = min(page, total_pages)
+        paged_products = list(filtered_qs[(page - 1) * PAGE_SIZE: page * PAGE_SIZE])
 
-        # ────────────────────────────────────────────────────────────────
-        # Serialize products (flat list + enriched details with variants)
-        # ────────────────────────────────────────────────────────────────
-        serialized_products = ProductSerializer(
-            paged_products,
-            many=True,
-            context={'request': request}
-        ).data
-
+        # ── Serialize (lightweight) ────────────────────────────────────────────
         products_with_details = []
         for product in paged_products:
-            variants = product.variants.all()
-            variant_colors = variants.values('color__name', 'color__code', 'id').distinct()
-
+            variants = list(product.variants.all())
+            color_map = {}
+            for v in variants:
+                if v.color and v.color.id not in color_map:
+                    color_map[v.color.id] = {
+                        'id': v.id,
+                        'color__name': v.color.name,
+                        'color__code': v.color.code,
+                    }
             products_with_details.append({
-                'product': ProductSerializer(product, context={'request': request}).data,
-                'average_rating': product.average_rating or 0,
-                'review_count': product.review_count or 0,
-                'variants': VariantSerializer(variants, many=True).data,
-                'colors': list(variant_colors),
+                'product': ProductListSerializer(product, context={'request': request}).data,
+                'average_rating': product.avg_rating,
+                'review_count': product.review_count,
+                'colors': list(color_map.values()),
             })
 
-        # ────────────────────────────────────────────────────────────────
-        # Sidebar filter options — from the UNFILTERED search results.
-        # Always shows all available options so users can freely adjust.
-        # ────────────────────────────────────────────────────────────────
-        sizes = Size.objects.filter(variants__product__in=unfiltered_qs).distinct()
-        colors_qs = Color.objects.filter(variants__product__in=unfiltered_qs).distinct()
-        brands = Brand.objects.filter(product__in=unfiltered_qs).distinct()
-        vendors = Vendor.objects.filter(product__in=unfiltered_qs).distinct()
-        categories = Sub_Category.objects.filter(product__in=unfiltered_qs).distinct()
+        # ── Sidebar filter options from unfiltered base ────────────────────────
+        base_ids = base_qs.values('id')
+        colors_qs   = Color.objects.filter(variants__product_id__in=base_ids).distinct().values('id', 'name', 'code')
+        sizes_qs    = Size.objects.filter(variants__product_id__in=base_ids).distinct().values('id', 'name')
+        brands_qs   = Brand.objects.filter(product__id__in=base_ids).distinct().values('id', 'title', 'slug')
+        vendors_qs  = Vendor.objects.filter(product__id__in=base_ids).distinct().values('id', 'name', 'slug')
+        cats_qs     = Sub_Category.objects.filter(product__id__in=base_ids).distinct().values('id', 'title', 'slug')
 
-        # ────────────────────────────────────────────────────────────────
-        # Build and return the response
-        # ────────────────────────────────────────────────────────────────
-        context = {
-            # Sidebar options (from unfiltered search results)
-            "colors": ColorSerializer(colors_qs, many=True).data,
-            "sizes": SizeSerializer(sizes, many=True).data,
-            "vendors": VendorSerializer(vendors, many=True).data,
-            "brands": BrandSerializer(brands, many=True).data,
-            "categories": SubCategorySerializer(categories, many=True).data,
+        def build_url(page_num):
+            if page_num < 1 or page_num > total_pages or total_items == 0:
+                return None
+            params = request.GET.copy()
+            params['page'] = page_num
+            return f"/api/v1/product/search/?{params.urlencode()}"
 
-            # Product list (filtered + paginated)
-            "products": serialized_products,
+        return Response({
+            "colors":     list(colors_qs),
+            "sizes":      list(sizes_qs),
+            "vendors":    list(vendors_qs),
+            "brands":     list(brands_qs),
+            "categories": list(cats_qs),
             "products_with_details": products_with_details,
-
-            # Price range after filters (for display)
             "min_price": round((price_range['min_price'] or min_price_unfiltered) * exchange_rate, 2),
             "max_price": round((price_range['max_price'] or max_price_unfiltered) * exchange_rate, 2),
-
-            # Price range before filters (for slider bounds)
             "min_price_unfiltered": round(min_price_unfiltered * exchange_rate, 2),
             "max_price_unfiltered": round(max_price_unfiltered * exchange_rate, 2),
             "default_max_price": round(Decimal('10000') * exchange_rate, 2),
-
             "currency": currency,
-            "next": paginator.get_next_link() if paged_products else None,
-            "previous": paginator.get_previous_link() if paged_products else None,
+            "next": build_url(page + 1),
+            "previous": build_url(page - 1) if page > 1 else None,
             "total": total_items,
-        }
-
-        return Response(context)
+            "total_pages": total_pages,
+            "current_page": page,
+        })
          
 
 class RecentlyViewedProducts(APIView):

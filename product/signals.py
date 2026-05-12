@@ -2,8 +2,9 @@ from django.contrib.auth.signals import user_logged_in, user_logged_out
 from django.dispatch import receiver
 from order.models import Cart
 from django.db.models.signals import post_save, post_delete
-from product.models import Product
+from product.models import Product, ProductReview
 from django.core.cache import cache
+from django.db.models import Avg, Count
 
 
 
@@ -70,4 +71,17 @@ def save_carts_before_logout(sender, request, user, **kwargs):
 def invalidate_category_cache(sender, instance, **kwargs):
     cache_key = f"product_detail_cache:{instance.sku}:{instance.slug}"
     cache.delete(cache_key)
+
+
+@receiver([post_save, post_delete], sender=ProductReview)
+def sync_product_rating(sender, instance, **kwargs):
+    if not instance.product_id:
+        return
+    stats = ProductReview.objects.filter(
+        product_id=instance.product_id, status=True
+    ).aggregate(avg=Avg('rating'), count=Count('id'))
+    Product.objects.filter(pk=instance.product_id).update(
+        avg_rating=round(stats['avg'] or 0.0, 2),
+        review_count=stats['count'] or 0,
+    )
 
