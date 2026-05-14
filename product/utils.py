@@ -97,18 +97,19 @@ def is_new_view(request, product_id: int) -> bool:
         return False
 
 
+FLUSH_LOCK_TTL  = getattr(settings, "FLUSH_LOCK_TTL", 200)   # seconds between auto-flushes
+FLUSH_LOCK_KEY  = "views:flush:lock"
+
+
 def buffer_view_count(product_id: int) -> None:
     """
-    Increment the Redis view-count buffer for product_id.
-    The flush_view_counts Celery task drains this buffer to the DB in bulk.
-
-    Key:  views:buf:{product_id}
-    TTL:  VIEW_BUF_TTL (48 h safety net so orphaned keys don't pile up)
+    Increment the Redis view-count buffer for product_id and self-schedule
+    a flush if one isn't already pending.  Beat remains a safety net but is
+    no longer the only trigger — each write attempt ensures a flush fires
+    within FLUSH_LOCK_TTL seconds even if Beat is not running.
     """
     conn = _get_redis()
     if conn is None:
-        # Hard fallback: direct DB update if Redis is down.
-        # Slower but never loses the count entirely.
         try:
             from django.db.models import F
             from product.models import Product
@@ -120,9 +121,20 @@ def buffer_view_count(product_id: int) -> None:
         pipe = conn.pipeline()
         pipe.incr(f"views:buf:{product_id}")
         pipe.expire(f"views:buf:{product_id}", VIEW_BUF_TTL)
-        pipe.execute()
+        # SET NX on the flush lock: first writer in the window schedules the task
+        pipe.set(FLUSH_LOCK_KEY, 1, nx=True, ex=FLUSH_LOCK_TTL)
+        results = pipe.execute()
+        flush_needed = bool(results[2])   # True only when lock was just acquired
     except Exception:
         logger.warning("buffer_view_count: Redis error for product %s", product_id)
+        return
+
+    if flush_needed:
+        try:
+            from product.tasks import flush_view_counts
+            flush_view_counts.apply_async(countdown=FLUSH_LOCK_TTL)
+        except Exception:
+            logger.warning("buffer_view_count: could not schedule flush_view_counts")
 
 
 # ── Recently viewed ──────────────────────────────────────────────────────────
