@@ -20,9 +20,8 @@ from rest_framework.pagination import PageNumberPagination
 
 from .utils import (
     get_recently_viewed_products, update_recently_viewed, is_new_view,
-    clear_recently_viewed, remove_recently_viewed,
+    clear_recently_viewed, remove_recently_viewed, buffer_view_count,
 )
-from .tasks import increment_product_view_count
 from .shipping import can_product_ship_to_user
 
 class AddProductReviewView(APIView):
@@ -245,12 +244,10 @@ class ProductDetailAPIView(APIView):
             except Http404:
                 return Response({"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
             
-            try:
-                update_recently_viewed(request, product.id)
-                if is_new_view(request, product.id):
-                    increment_product_view_count.delay(product.id)
-            except Exception:
-                logger.exception("View tracking failed for product %s", product.id)
+            # View tracking — both calls are Redis-backed and fail silently
+            update_recently_viewed(request, product.id)
+            if is_new_view(request, product.id):
+                buffer_view_count(product.id)
 
             # Optimize variant queries
             variant = None

@@ -15,25 +15,72 @@ import logging
 logger = logging.getLogger(__name__)
 
 @shared_task(ignore_result=True)
-def increment_product_view_count(product_id: int):
-    from .models import Product
-    Product.objects.filter(id=product_id).update(views=F('views') + 1)
+def flush_view_counts():
+    """
+    Drains Redis view-count buffers (views:buf:{id}) into the DB in one bulk pass.
 
-@shared_task
-def clear_product_views():
+    Flow:
+      - buffer_view_count() does INCR views:buf:{id} on every new unique view (no DB hit).
+      - This task runs every 3 minutes via Celery Beat, SCANs for those keys,
+        reads + deletes each with GETDEL (atomic), then does a single bulk UPDATE
+        per product.  One DB round-trip per batch instead of one per view.
+    """
     try:
-        twenty_four_hours_ago = timezone.now() - timezone.timedelta(hours=24)
-        batch_size = 200
-        while True:
-            batch = ProductView.objects.filter(
-                created_at__lte=twenty_four_hours_ago
-            )[:batch_size]
-            if not batch.exists():
-                break
-            deleted_count, _ = batch.delete()
-            logger.info(f"Deleted {deleted_count} ProductView records in batch")
-    except Exception as e:
-        logger.error(f"Error deleting ProductView records: {str(e)}")
+        from django_redis import get_redis_connection
+        conn = get_redis_connection("default")
+    except Exception:
+        logger.warning("flush_view_counts: Redis unavailable, skipping")
+        return
+
+    updates: dict[int, int] = {}
+    cursor = 0
+
+    # SCAN is non-blocking and safe on large keyspaces
+    while True:
+        try:
+            cursor, keys = conn.scan(cursor, match="views:buf:*", count=500)
+        except Exception as e:
+            logger.error("flush_view_counts: SCAN error: %s", e)
+            break
+
+        for raw_key in keys:
+            key = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
+            try:
+                product_id = int(key.split(":")[-1])
+            except ValueError:
+                continue
+
+            try:
+                # GETDEL: atomic get-and-delete (Redis ≥ 6.2)
+                # Falls back to GET+DEL pipeline for older Redis
+                try:
+                    raw = conn.getdel(key)
+                except AttributeError:
+                    pipe = conn.pipeline()
+                    pipe.get(key)
+                    pipe.delete(key)
+                    raw, _ = pipe.execute()
+
+                if raw:
+                    delta = int(raw)
+                    updates[product_id] = updates.get(product_id, 0) + delta
+            except Exception as e:
+                logger.error("flush_view_counts: error on key %s: %s", key, e)
+
+        if cursor == 0:
+            break
+
+    if not updates:
+        return
+
+    # One UPDATE per product — could be further batched with a CASE WHEN if needed
+    from django.db import transaction
+    with transaction.atomic():
+        for product_id, delta in updates.items():
+            Product.objects.filter(id=product_id).update(views=F('views') + delta)
+
+    logger.info("flush_view_counts: flushed %d product(s), total delta %d",
+                len(updates), sum(updates.values()))
 
 @shared_task(ignore_result=True)
 def expire_flash_sales():

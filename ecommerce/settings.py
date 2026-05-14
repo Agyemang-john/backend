@@ -340,6 +340,11 @@ CELERY_ENABLE_UTC = True
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 
 CELERY_BEAT_SCHEDULE = {
+    # Flush Redis view-count buffers → DB every 3 minutes
+    "flush-view-counts": {
+        "task": "product.tasks.flush_view_counts",
+        "schedule": 180,
+    },
     # Recalculate trending scores every 30 minutes
     "update-trending-scores": {
         "task": "product.tasks.update_trending_scores",
@@ -359,11 +364,6 @@ CELERY_BEAT_SCHEDULE = {
     "generate-fbt": {
         "task": "product.tasks.generate_fbt",
         "schedule": 21600,
-    },
-    # Clear old product views daily
-    "clear-product-views": {
-        "task": "product.tasks.clear_product_views",
-        "schedule": 86400,
     },
     # Expire flash sales every 60 seconds
     "expire-flash-sales": {
