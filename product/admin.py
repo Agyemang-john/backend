@@ -8,34 +8,27 @@ from product.models import Product
 
 # Register your models here.
 
-class ProductViewAdmin(admin.ModelAdmin):
-    list_display = ['product', 'device_id', 'created_at']
-    list_filter = ['created_at', 'product']
-    search_fields = ['product__title', 'device_id']
-    # actions = ['setup_periodic_cleanup']
+@admin.register(ProductViewLog)
+class ProductViewLogAdmin(admin.ModelAdmin):
+    list_display  = ['product', 'visitor_key', 'is_bot', 'is_returning', 'device_type', 'date', 'viewed_at']
+    list_filter   = ['is_bot', 'is_returning', 'device_type', 'date']
+    search_fields = ['product__title', 'visitor_key']
+    readonly_fields = ['viewed_at']
 
-    # def setup_periodic_cleanup(self, request, queryset):
-    #     # Create or get a crontab schedule (every 24 hours at midnight UTC)
-    #     schedule, _ = CrontabSchedule.objects.get_or_create(
-    #         minute='0',
-    #         hour='0',
-    #         day_of_week='*',
-    #         day_of_month='*',
-    #         month_of_year='*',
-    #     )
 
-    #     # Create or update the periodic task
-    #     PeriodicTask.objects.update_or_create(
-    #         name='Clear Product Views Every 24 Hours',
-    #         defaults={
-    #             'crontab': schedule,
-    #             'task': 'product.tasks.clear_product_views',
-    #             'enabled': True,
-    #             'args': json.dumps([]),  # No args needed for clear_product_views
-    #         }
-    #     )
-    #     self.message_user(request, "Periodic ProductView cleanup task set up successfully")
-    # setup_periodic_cleanup.short_description = "Set up periodic ProductView cleanup"
+@admin.register(ProductDailyStats)
+class ProductDailyStatsAdmin(admin.ModelAdmin):
+    list_display  = ['product', 'date', 'total_views', 'unique_views', 'returning_views', 'bot_views']
+    list_filter   = ['date']
+    search_fields = ['product__title']
+
+
+@admin.register(RecentlyViewedProduct)
+class RecentlyViewedProductAdmin(admin.ModelAdmin):
+    list_display  = ['user', 'product', 'viewed_at']
+    list_filter   = ['viewed_at']
+    search_fields = ['user__email', 'product__title']
+    readonly_fields = ['viewed_at']
 
 class ProductVariantsAdmin(admin.TabularInline):
     model = Variants
@@ -132,7 +125,6 @@ class VariantImageAdmin(admin.ModelAdmin):
     list_display = ['image']
 
 
-admin.site.register(ProductView, ProductViewAdmin)
 admin.site.register(Product, ProductAdmin)
 admin.site.register(Main_Category, Main_CategoryAdmin)
 admin.site.register(Category, CategoryAdmin)

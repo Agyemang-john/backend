@@ -230,18 +230,6 @@ class DeliveryOption(models.Model):
             return "TODAY" if min_date == max_date == today else "ONGOING"
         return "UPCOMING"
 
-class ProductView(models.Model):
-    product = models.ForeignKey("Product", on_delete=models.CASCADE, related_name='product_views')
-    device_id = models.CharField(max_length=36)  # For UUID storage
-    created_at = models.DateTimeField(auto_now_add=True)
-    
-    class Meta:
-        unique_together = ('product', 'device_id')
-        indexes = [
-            models.Index(fields=['product', 'device_id']),
-            models.Index(fields=['created_at']),
-        ]
-
 class Product(models.Model):
     STATUS = (
         ("draft", "Draft"),
@@ -795,3 +783,82 @@ class OccasionSection(models.Model):
 
     def __str__(self):
         return f"{self.occasion.title} — {self.title}"
+
+
+# ── View Analytics ────────────────────────────────────────────────────────────
+
+class ProductViewLog(models.Model):
+    """
+    One row per deduplicated view event, written async via Celery.
+    Drives the per-product time-series analytics in the seller dashboard.
+    Bot views are stored but excluded from product.views total.
+    """
+    DEVICE_CHOICES = [
+        ('mobile',  'Mobile'),
+        ('tablet',  'Tablet'),
+        ('desktop', 'Desktop'),
+        ('unknown', 'Unknown'),
+    ]
+
+    product      = models.ForeignKey('Product', on_delete=models.CASCADE, related_name='view_logs')
+    visitor_key  = models.CharField(max_length=100)   # "u:{id}" or "v:{uuid}"
+    user         = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
+    )
+    is_bot       = models.BooleanField(default=False)
+    is_returning = models.BooleanField(default=False)  # True if visitor came back within 30-day window
+    device_type  = models.CharField(max_length=10, choices=DEVICE_CHOICES, default='unknown')
+    date         = models.DateField()                  # denormalized for fast date-range queries
+    viewed_at    = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['product', 'date']),
+            models.Index(fields=['product', 'is_bot', 'date']),
+            models.Index(fields=['visitor_key', 'product']),
+        ]
+        ordering = ['-viewed_at']
+
+    def __str__(self):
+        return f"{self.product_id} viewed by {self.visitor_key} on {self.date}"
+
+
+class ProductDailyStats(models.Model):
+    """
+    Daily aggregate per product, materialized by Celery at midnight UTC.
+    Provides fast seller-dashboard queries without scanning ProductViewLog.
+    """
+    product          = models.ForeignKey('Product', on_delete=models.CASCADE, related_name='daily_stats')
+    date             = models.DateField()
+    total_views      = models.PositiveIntegerField(default=0)
+    unique_views     = models.PositiveIntegerField(default=0)
+    returning_views  = models.PositiveIntegerField(default=0)
+    bot_views        = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        unique_together = ('product', 'date')
+        indexes = [models.Index(fields=['product', 'date'])]
+
+    def __str__(self):
+        return f"{self.product_id} stats for {self.date}"
+
+
+class RecentlyViewedProduct(models.Model):
+    """
+    DB-backed recently viewed for authenticated users.
+    Enables cross-device sync after a guest → logged-in transition.
+    upsert logic: if the row exists, update viewed_at; otherwise insert.
+    """
+    user       = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='recently_viewed'
+    )
+    product    = models.ForeignKey('Product', on_delete=models.CASCADE)
+    viewed_at  = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('user', 'product')
+        indexes = [models.Index(fields=['user', 'viewed_at'])]
+        ordering = ['-viewed_at']
+
+    def __str__(self):
+        return f"{self.user_id} → {self.product_id}"

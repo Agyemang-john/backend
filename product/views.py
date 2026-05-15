@@ -21,6 +21,7 @@ from rest_framework.pagination import PageNumberPagination
 from .utils import (
     get_recently_viewed_products, update_recently_viewed, is_new_view,
     clear_recently_viewed, remove_recently_viewed, buffer_view_count,
+    track_view, _get_redis,
 )
 from .shipping import can_product_ship_to_user
 
@@ -244,10 +245,19 @@ class ProductDetailAPIView(APIView):
             except Http404:
                 return Response({"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
             
-            # View tracking — both calls are Redis-backed and fail silently
+            # Update recently-viewed (Redis list for everyone, DB for auth users).
+            # Must run on EVERY page load — not gated by the analytics dedup — so
+            # the ordering (newest first) stays correct even within a 24-hour window.
             update_recently_viewed(request, product.id)
-            if is_new_view(request, product.id):
-                buffer_view_count(product.id)
+            if request.user.is_authenticated:
+                try:
+                    from product.tasks import sync_recently_viewed_db
+                    sync_recently_viewed_db.delay(request.user.pk, product.id)
+                except Exception:
+                    pass
+
+            # Analytics view tracking — 24-hour dedup, bot detection, log event.
+            track_view(request, product.id)
 
             # Optimize variant queries
             variant = None
@@ -475,10 +485,12 @@ class CategoryProductListView(APIView):
 
         sort = request.GET.get('sort', 'featured')
         _sort_map = {
+            'trending':   '-trending_score',
             'price_asc':  'price',
             'price_desc': '-price',
             'rating':     '-avg_rating',
             'newest':     '-date',
+            'oldest':     'date',
         }
 
         # ── Unfiltered price range for slider bounds (cached 1 h) ─────────────
@@ -529,7 +541,8 @@ class CategoryProductListView(APIView):
         if active_ratings:
             filtered_qs = filtered_qs.filter(avg_rating__gte=min(active_ratings))
 
-        filtered_qs = filtered_qs.order_by(_sort_map.get(sort, '-date'))
+        # 'featured' and any unknown value → trending score (most engaging first)
+        filtered_qs = filtered_qs.order_by(_sort_map.get(sort, '-trending_score'))
 
         # ── Filtered price range ───────────────────────────────────────────────
         price_range = filtered_qs.aggregate(min_price=Min('price'), max_price=Max('price'))
@@ -628,10 +641,12 @@ class BrandProductListView(APIView):
 
         sort = request.GET.get('sort', 'featured')
         _sort_map = {
+            'trending':   '-trending_score',
             'price_asc':  'price',
             'price_desc': '-price',
             'rating':     '-avg_rating',
             'newest':     '-date',
+            'oldest':     'date',
         }
 
         # ── Base queryset (uses stored avg_rating — no Avg JOIN) ───────────────
@@ -681,7 +696,8 @@ class BrandProductListView(APIView):
         if active_ratings:
             filtered_qs = filtered_qs.filter(avg_rating__gte=min(active_ratings))
 
-        filtered_qs = filtered_qs.order_by(_sort_map.get(sort, '-date'))
+        # 'featured' and any unknown value → trending score
+        filtered_qs = filtered_qs.order_by(_sort_map.get(sort, '-trending_score'))
 
         # ── Filtered price range ───────────────────────────────────────────────
         filtered_bounds = filtered_qs.aggregate(min_price=Min("price"), max_price=Max("price"))
@@ -840,15 +856,18 @@ class ProductSearchAPIView(APIView):
 
         # ── Sort ───────────────────────────────────────────────────────────────
         _sort_map = {
+            'trending':   '-trending_score',
             'price_asc':  'price',
             'price_desc': '-price',
             'rating':     '-avg_rating',
             'newest':     '-date',
+            'oldest':     'date',
         }
         if sort in _sort_map:
             filtered_qs = filtered_qs.order_by(_sort_map[sort])
         else:
-            filtered_qs = filtered_qs.order_by('-rank', '-date')
+            # 'relevance' (default): search rank first, trending score as tiebreaker
+            filtered_qs = filtered_qs.order_by('-rank', '-trending_score')
 
         # ── Filtered price range ───────────────────────────────────────────────
         price_range = filtered_qs.aggregate(min_price=Min('price'), max_price=Max('price'))
@@ -917,18 +936,52 @@ class ProductSearchAPIView(APIView):
 
 class RecentlyViewedProducts(APIView):
     def get(self, request):
-        products = get_recently_viewed_products(request, limit=10)
-        serializer = LightProductSerializer(
-            products,
-            many=True,
-            context={'request': request}
-        )
-        return Response(serializer.data)
+        import math
+
+        try:
+            page      = max(1, int(request.GET.get('page', 1)))
+            page_size = min(max(1, int(request.GET.get('page_size', 12))), 48)
+        except (ValueError, TypeError):
+            page, page_size = 1, 12
+
+        if request.user.is_authenticated:
+            from product.models import RecentlyViewedProduct
+            rvp_qs = (
+                RecentlyViewedProduct.objects
+                .filter(user=request.user, product__status='published')
+                .select_related('product')
+                .order_by('-viewed_at')
+            )
+            total    = rvp_qs.count()
+            offset   = (page - 1) * page_size
+            products = [rv.product for rv in rvp_qs[offset:offset + page_size]]
+        else:
+            # Redis-backed for guests — load enough for pagination
+            all_products = list(get_recently_viewed_products(request, limit=200))
+            total    = len(all_products)
+            offset   = (page - 1) * page_size
+            products = all_products[offset:offset + page_size]
+
+        total_pages = max(1, math.ceil(total / page_size))
+
+        serializer = LightProductSerializer(products, many=True, context={'request': request})
+        return Response({
+            'results':     serializer.data,
+            'count':       total,
+            'page':        page,
+            'page_size':   page_size,
+            'total_pages': total_pages,
+        })
+
 
 class ClearRecentlyViewed(APIView):
     http_method_names = ['post']
+
     def post(self, request):
-        clear_recently_viewed(request)
+        clear_recently_viewed(request)          # Redis
+        if request.user.is_authenticated:
+            from product.models import RecentlyViewedProduct
+            RecentlyViewedProduct.objects.filter(user=request.user).delete()
         return Response({"message": "Recently viewed cleared"}, status=status.HTTP_200_OK)
 
 
@@ -939,8 +992,49 @@ class RemoveRecentlyViewedItem(APIView):
         product_id = request.data.get('product_id')
         if not product_id:
             return Response({"error": "product_id required"}, status=status.HTTP_400_BAD_REQUEST)
-        remove_recently_viewed(request, int(product_id))
+        pid = int(product_id)
+        remove_recently_viewed(request, pid)    # Redis
+        if request.user.is_authenticated:
+            from product.models import RecentlyViewedProduct
+            RecentlyViewedProduct.objects.filter(user=request.user, product_id=pid).delete()
         return Response({"message": "Item removed", "removed": str(product_id)})
+
+
+class SyncRecentlyViewedView(APIView):
+    """
+    Called once after login to merge the guest's localStorage list into the
+    backend. Accepts a list of product IDs (newest first, max 20).
+    Redis rate-limit: one sync per user per 5 minutes.
+    """
+    permission_classes = [IsAuthenticated]
+    http_method_names = ['post']
+
+    def post(self, request):
+        product_ids = request.data.get('product_ids', [])
+        if not isinstance(product_ids, list):
+            return Response({"error": "product_ids must be a list"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            product_ids = [int(pid) for pid in product_ids[:20]]
+        except (ValueError, TypeError):
+            return Response({"error": "Invalid product_ids"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Rate-limit: one sync per user per 5 minutes
+        conn = _get_redis()
+        if conn:
+            rate_key = f"rvp:sync:{request.user.pk}"
+            if not conn.set(rate_key, 1, nx=True, ex=300):
+                return Response({"message": "Already synced recently, try again in 5 minutes"}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        # Process oldest-first so newest ends up at front of the Redis list
+        for pid in reversed(product_ids):
+            update_recently_viewed(request, pid)
+
+        # Upsert DB records for cross-device access
+        from product.tasks import sync_recently_viewed_db
+        for pid in product_ids:
+            sync_recently_viewed_db.delay(request.user.pk, pid)
+
+        return Response({"synced": len(product_ids)})
 
 
 class CartRecommendationsAPIView(APIView):

@@ -1,6 +1,7 @@
 import re
 import logging
 from django.conf import settings
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -8,20 +9,29 @@ RECENTLY_VIEWED_MAX = getattr(settings, "RECENTLY_VIEWED_MAX", 10)
 VIEW_DEDUP_TTL      = getattr(settings, "VIEW_DEDUP_TTL", 86400)        # 24 h
 RECENT_LIST_TTL     = getattr(settings, "RECENT_LIST_TTL", 2592000)     # 30 days
 VIEW_BUF_TTL        = getattr(settings, "VIEW_BUF_TTL", 172800)         # 48 h safety TTL
+RETURN_WINDOW_TTL   = getattr(settings, "RETURN_WINDOW_TTL", 2592000)   # 30 days for return detection
 
 _UUID_RE = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
     re.IGNORECASE,
 )
 
+# Patterns that strongly indicate a crawler/bot user-agent
+_BOT_RE = re.compile(
+    r'bot|crawl|spider|slurp|prerender|headless|puppet|playwright|'
+    r'selenium|chrome-lighthouse|facebookexternalhit|twitterbot|'
+    r'linkedinbot|whatsapp|applebot|bingbot|googlebot|yandex|baidu|'
+    r'duckduck|semrush|ahrefs|moz/|wget|curl|python-requests|java/',
+    re.IGNORECASE,
+)
+
+_MOBILE_RE  = re.compile(r'mobile|android|iphone|ipod|blackberry|opera mini|iemobile', re.IGNORECASE)
+_TABLET_RE  = re.compile(r'ipad|tablet|kindle|playbook|silk', re.IGNORECASE)
+
 
 # ── Safe Redis connection ────────────────────────────────────────────────────
 
 def _get_redis():
-    """
-    Returns a raw Redis connection or None if Redis is unavailable.
-    Never raises — callers must check for None before use.
-    """
     try:
         from django_redis import get_redis_connection
         return get_redis_connection("default")
@@ -34,28 +44,17 @@ def _get_redis():
 
 def _get_visitor_id(request) -> str | None:
     """
-    Returns a stable, validated visitor identifier string, or None.
-
-    Priority:
-      1. X-Visitor-ID header — sent by client-side requests and by the
-         Next.js SSR layer (createServerAxios extracts the cookie value
-         and forwards it as a header).
-      2. visitor_id cookie — fallback for SSR requests that use plain
-         fetch() and only forward the raw Cookie header.
-      3. Authenticated user ID.
-      4. None — skip tracking.
+    Returns a stable visitor identifier or None.
+    Priority: X-Visitor-ID header → visitor_id cookie → authenticated user id.
     """
-    # 1. Explicit header (client-side axios + createServerAxios)
     visitor_id = request.headers.get('X-Visitor-ID', '').strip()
     if visitor_id and _UUID_RE.match(visitor_id):
         return f"v:{visitor_id}"
 
-    # 2. Cookie fallback (plain SSR fetch that only forwards Cookie header)
     cookie_vid = request.COOKIES.get('visitor_id', '').strip()
     if cookie_vid and _UUID_RE.match(cookie_vid):
         return f"v:{cookie_vid}"
 
-    # 3. Authenticated user
     if request.user.is_authenticated:
         return f"u:{request.user.pk}"
 
@@ -76,13 +75,30 @@ def _recent_key(request) -> str | None:
     return f"recent:{vid}"
 
 
+# ── Bot & device detection ───────────────────────────────────────────────────
+
+def detect_bot(request) -> bool:
+    ua = request.headers.get('User-Agent', '')
+    return bool(_BOT_RE.search(ua))
+
+
+def detect_device(request) -> str:
+    ua = request.headers.get('User-Agent', '')
+    if _TABLET_RE.search(ua):
+        return 'tablet'
+    if _MOBILE_RE.search(ua):
+        return 'mobile'
+    if ua:
+        return 'desktop'
+    return 'unknown'
+
+
 # ── View count — Redis buffer ────────────────────────────────────────────────
 
 def is_new_view(request, product_id: int) -> bool:
     """
     Returns True if this is the first view of product_id within the dedup window.
-    Uses atomic SET NX so concurrent requests don't double-count.
-    Returns False (silently) if Redis is unavailable.
+    Kept for backwards compatibility — prefer track_view() for new code.
     """
     key = _dedup_key(request, product_id)
     if key is None:
@@ -97,16 +113,13 @@ def is_new_view(request, product_id: int) -> bool:
         return False
 
 
-FLUSH_LOCK_TTL  = getattr(settings, "FLUSH_LOCK_TTL", 200)   # seconds between auto-flushes
-FLUSH_LOCK_KEY  = "views:flush:lock"
+FLUSH_LOCK_TTL = getattr(settings, "FLUSH_LOCK_TTL", 200)
+FLUSH_LOCK_KEY = "views:flush:lock"
 
 
 def buffer_view_count(product_id: int) -> None:
     """
-    Increment the Redis view-count buffer for product_id and self-schedule
-    a flush if one isn't already pending.  Beat remains a safety net but is
-    no longer the only trigger — each write attempt ensures a flush fires
-    within FLUSH_LOCK_TTL seconds even if Beat is not running.
+    Increment the Redis view-count buffer and self-schedule a flush if needed.
     """
     conn = _get_redis()
     if conn is None:
@@ -121,10 +134,9 @@ def buffer_view_count(product_id: int) -> None:
         pipe = conn.pipeline()
         pipe.incr(f"views:buf:{product_id}")
         pipe.expire(f"views:buf:{product_id}", VIEW_BUF_TTL)
-        # SET NX on the flush lock: first writer in the window schedules the task
         pipe.set(FLUSH_LOCK_KEY, 1, nx=True, ex=FLUSH_LOCK_TTL)
         results = pipe.execute()
-        flush_needed = bool(results[2])   # True only when lock was just acquired
+        flush_needed = bool(results[2])
     except Exception:
         logger.warning("buffer_view_count: Redis error for product %s", product_id)
         return
@@ -137,13 +149,81 @@ def buffer_view_count(product_id: int) -> None:
             logger.warning("buffer_view_count: could not schedule flush_view_counts")
 
 
+# ── Unified view tracking ────────────────────────────────────────────────────
+
+def track_view(request, product_id: int) -> None:
+    """
+    Single entry point for all view tracking. Non-blocking — analytics writes
+    are queued as Celery tasks so the product detail response is never delayed.
+
+    Steps:
+      1. Deduplication: 24h Redis SET NX — skip if same visitor within 24h.
+      2. Returning visitor: 30d Redis SET NX — True if key already existed.
+      3. Bot detection: bots are logged but NOT counted in product.views.
+      4. buffer_view_count(): increments Redis buffer (flushed to DB every 3 min).
+      5. log_view_event.delay(): async Celery task writes one ProductViewLog row.
+
+    RecentlyViewedProduct DB sync is intentionally NOT done here — it lives in
+    ProductDetailAPIView so it fires on every page load and keeps ordering correct.
+    """
+    visitor_key = _get_visitor_id(request)
+    if visitor_key is None:
+        return
+
+    conn = _get_redis()
+    if conn is None:
+        return
+
+    # 1. Dedup check (24 h)
+    dedup_key = f"view:dedup:{visitor_key}:{product_id}"
+    try:
+        is_new = bool(conn.set(dedup_key, 1, nx=True, ex=VIEW_DEDUP_TTL))
+    except Exception:
+        logger.warning("track_view: dedup Redis error product=%s", product_id)
+        return
+
+    if not is_new:
+        return  # same visitor within 24 h — pure duplicate
+
+    # 2. Returning visitor check (30 d window)
+    try:
+        return_key = f"view:first:{visitor_key}:{product_id}"
+        first_in_window = bool(conn.set(return_key, 1, nx=True, ex=RETURN_WINDOW_TTL))
+        is_returning = not first_in_window
+    except Exception:
+        is_returning = False
+
+    # 3. Bot detection
+    is_bot = detect_bot(request)
+    device = detect_device(request)
+
+    # 4. Count only non-bot views in the main product.views integer
+    if not is_bot:
+        buffer_view_count(product_id)
+
+    # 5. Async log to ProductViewLog
+    user_id = request.user.pk if request.user.is_authenticated else None
+    try:
+        from product.tasks import log_view_event
+        log_view_event.delay(
+            product_id=product_id,
+            visitor_key=visitor_key,
+            user_id=user_id,
+            is_bot=is_bot,
+            is_returning=is_returning,
+            device_type=device,
+            date_str=timezone.now().date().isoformat(),
+        )
+    except Exception:
+        logger.warning("track_view: could not enqueue log_view_event for product %s", product_id)
+
+
 # ── Recently viewed ──────────────────────────────────────────────────────────
 
 def update_recently_viewed(request, product_id: int) -> None:
     """
-    Prepend product_id to the visitor's recently-viewed list in Redis.
+    Prepend product_id to the visitor's recently-viewed Redis list.
     Deduplicates and caps at RECENTLY_VIEWED_MAX entries.
-    Silently no-ops if Redis is unavailable or visitor is unidentified.
     """
     key = _recent_key(request)
     if key is None:
@@ -153,8 +233,8 @@ def update_recently_viewed(request, product_id: int) -> None:
         return
     try:
         pipe = conn.pipeline()
-        pipe.lrem(key, 0, product_id)      # remove any prior occurrence
-        pipe.lpush(key, product_id)        # prepend (newest first)
+        pipe.lrem(key, 0, product_id)
+        pipe.lpush(key, product_id)
         pipe.ltrim(key, 0, RECENTLY_VIEWED_MAX - 1)
         pipe.expire(key, RECENT_LIST_TTL)
         pipe.execute()
@@ -219,7 +299,7 @@ def remove_recently_viewed(request, product_id: int) -> None:
         pass
 
 
-# ── GeoIP (unchanged) ───────────────────────────────────────────────────────
+# ── GeoIP ────────────────────────────────────────────────────────────────────
 
 def get_region_with_geoip(ip):
     try:

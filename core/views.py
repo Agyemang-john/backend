@@ -207,7 +207,7 @@ class MainAPIView(APIView):
             )
             most_popular_qs = (
                 Product.objects.filter(status='published')
-                .order_by('-views')[:8]
+                .order_by('-trending_score', '-views')[:8]
             )
             category = Category.objects.order_by('-engagement_score').first()
             top_brands = Brand.objects.order_by('-engagement_score')[:4]
@@ -241,7 +241,15 @@ class MainAPIView(APIView):
 
 class RecentlyViewedRelatedProductsAPIView(APIView):
     def get(self, request):
-        product_ids = get_recently_viewed_ids(request)
+        if request.user.is_authenticated:
+            product_ids = list(
+                RecentlyViewedProduct.objects.filter(user=request.user)
+                .order_by('-viewed_at')
+                .values_list('product_id', flat=True)[:10]
+            )
+        else:
+            product_ids = get_recently_viewed_ids(request)
+
         if not product_ids:
             return Response([], status=status.HTTP_200_OK)
 
@@ -263,7 +271,7 @@ class RecentlyViewedRelatedProductsAPIView(APIView):
             Product.published
             .filter(sub_category=product.sub_category)
             .exclude(id=product.id)
-            .only('id', 'title', 'slug', 'sku', 'image', 'price', 'old_price')  # light fetch
+            .only('id', 'title', 'slug', 'sku', 'image', 'price', 'old_price')
             [:10]
         )
 
@@ -273,51 +281,83 @@ class RecentlyViewedRelatedProductsAPIView(APIView):
 
 class SearchedProducts(APIView):
     def post(self, request):
-        # Retrieve existing search history from cookies
-        search_history = request.COOKIES.get('search_history', '[]')
-        search_history = json.loads(search_history)
+        from django.utils import timezone as tz
 
-        # Get the new search queries from the request
-        new_searched_queries = request.data.get('search_history', [])
+        try:
+            search_history = json.loads(request.COOKIES.get('search_history', '[]'))
+            if not isinstance(search_history, list):
+                search_history = []
+        except Exception:
+            search_history = []
 
-        # Process each query in new_searched_queries
-        for query in new_searched_queries:
-            # If query already exists, remove it to prevent duplicates
+        new_queries = request.data.get('search_history', [])
+        if not isinstance(new_queries, list):
+            new_queries = []
+
+        for raw in new_queries:
+            if not isinstance(raw, str):
+                continue
+            query = raw.strip()[:200]
+            if not query:
+                continue
             if query in search_history:
                 search_history.remove(query)
-            # Insert query at the beginning of the list (most recent first)
             search_history.insert(0, query)
 
-        # Limit search history to the last 10 queries
-        if len(search_history) > 10:
-            search_history = search_history[:10]
+        search_history = search_history[:10]
 
-        # Set the updated search history back in cookies
+        if request.user.is_authenticated:
+            for raw in new_queries:
+                if not isinstance(raw, str):
+                    continue
+                query = raw.strip()[:200]
+                if not query:
+                    continue
+                SearchHistory.objects.update_or_create(
+                    user=request.user,
+                    query=query,
+                    defaults={'searched_at': tz.now()},
+                )
+            # Cap at 50 entries per user — delete oldest beyond that
+            old_ids = list(
+                SearchHistory.objects.filter(user=request.user)
+                .order_by('-searched_at')
+                .values_list('id', flat=True)[50:]
+            )
+            if old_ids:
+                SearchHistory.objects.filter(id__in=old_ids).delete()
+
         response = Response({'status': 'success'}, status=status.HTTP_200_OK)
-        response.set_cookie('search_history', json.dumps(search_history), max_age=365*24*60*60, httponly=False)  # 1 year
+        response.set_cookie('search_history', json.dumps(search_history), max_age=365*24*60*60, httponly=False)
         return response
 
 
 class RecommendedProducts(APIView):
     def get(self, request):
         # -----------------------------
-        # 1. Recently viewed — from Redis
+        # 1. Recently viewed — DB for auth users, Redis for guests
         # -----------------------------
-        viewed_product_ids = get_recently_viewed_ids(request)
+        if request.user.is_authenticated:
+            viewed_product_ids = list(
+                RecentlyViewedProduct.objects.filter(user=request.user)
+                .order_by('-viewed_at')
+                .values_list('product_id', flat=True)[:10]
+            )
+        else:
+            viewed_product_ids = get_recently_viewed_ids(request)
 
         viewed_products_qs = (
             Product.published
             .filter(id__in=viewed_product_ids)
             .only('id', 'title', 'slug', 'sku', 'image', 'price', 'old_price', 'sub_category_id')
         )
-        # Restore Redis order
         products_dict = {p.id: p for p in viewed_products_qs}
         sorted_viewed_products = [
             products_dict[pid] for pid in viewed_product_ids if pid in products_dict
         ]
 
         # -----------------------------
-        # 2. Related by category — one query instead of N
+        # 2. Related by category
         # -----------------------------
         sub_category_ids = {
             p.sub_category_id for p in viewed_products_qs if p.sub_category_id
@@ -327,25 +367,31 @@ class RecommendedProducts(APIView):
             .filter(sub_category_id__in=sub_category_ids)
             .exclude(id__in=viewed_product_ids)
             .only('id', 'title', 'slug', 'sku', 'image', 'price', 'old_price')
-            .order_by('?')[:20]   # random sample at DB level — no Python shuffle needed
+            .order_by('?')[:20]
         )
 
         # -----------------------------
-        # 3. Related by search history
+        # 3. Related by search history — DB for auth users, header for guests
         # -----------------------------
-        try:
-            search_history = json.loads(request.headers.get('X-Search-History', '[]'))
-            if not isinstance(search_history, list):
+        if request.user.is_authenticated:
+            search_history = list(
+                SearchHistory.objects.filter(user=request.user)
+                .order_by('-searched_at')
+                .values_list('query', flat=True)[:5]
+            )
+        else:
+            try:
+                search_history = json.loads(request.headers.get('X-Search-History', '[]'))
+                if not isinstance(search_history, list):
+                    search_history = []
+            except Exception:
                 search_history = []
-        except Exception:
-            search_history = []
 
         search_related_products = Product.objects.none()
         if search_history:
             search_q = Q()
-            for query in search_history[:5]:   # cap to avoid giant OR chains
+            for query in search_history[:5]:
                 search_q |= Q(title__icontains=query) | Q(description__icontains=query)
-
             search_related_products = (
                 Product.published
                 .filter(search_q)
@@ -365,7 +411,6 @@ class RecommendedProducts(APIView):
                 combined.append(p)
         recommending_products = combined[:10]
 
-        # Fallback: no history at all → top by views
         if not sorted_viewed_products and not search_history:
             recommending_products = (
                 Product.published
@@ -386,20 +431,51 @@ class RecommendedProducts(APIView):
         })
     
 
+class SearchHistoryView(APIView):
+    """
+    GET  — return the user's search history (DB for auth, cookie for guest).
+    DELETE — remove one query ({query: str}) or clear all (no body).
+    """
+
+    def get(self, request):
+        if request.user.is_authenticated:
+            queries = list(
+                SearchHistory.objects.filter(user=request.user)
+                .order_by('-searched_at')
+                .values_list('query', flat=True)[:20]
+            )
+        else:
+            try:
+                raw = json.loads(request.COOKIES.get('search_history', '[]'))
+                queries = [q for q in raw if isinstance(q, str)][:20]
+            except Exception:
+                queries = []
+        return Response({'queries': queries})
+
+    def delete(self, request):
+        if request.user.is_authenticated:
+            query = request.data.get('query')
+            if query:
+                SearchHistory.objects.filter(user=request.user, query=str(query)[:200]).delete()
+            else:
+                SearchHistory.objects.filter(user=request.user).delete()
+        return Response({'status': 'ok'})
+
+
 class TrendingProductsAPIView(APIView):
     """Returns top 20 products by trending_score, cached for 10 minutes."""
 
     def get(self, request):
-        products_data = cache.get("top_trending_product")
+        _CACHE_KEY = "top_trending_products"
+        products_data = cache.get(_CACHE_KEY)
 
         if not products_data:
             products = (
                 Product.objects.filter(status='published')
-                .order_by('-trending_score')[:20]
+                .order_by('-trending_score', '-views')[:20]
             )
-            # No request context — stores raw GHS prices
             products_data = list(TrendingProductSerializer(products, many=True, context={'request': request}).data)
-            cache.set("top_trending_products", products_data, timeout=600)
+            cache.set(_CACHE_KEY, products_data, timeout=600)
 
         currency = request.headers.get('X-Currency', 'GHS')
         rates = get_exchange_rates()

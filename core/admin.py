@@ -8,6 +8,14 @@ admin.site.register(Banners)
 admin.site.register(CurrencyRate)
 
 
+@admin.register(SearchHistory)
+class SearchHistoryAdmin(admin.ModelAdmin):
+    list_display  = ['user', 'query', 'searched_at']
+    list_filter   = ['searched_at']
+    search_fields = ['user__email', 'query']
+    readonly_fields = ['searched_at']
+
+
 @admin.register(PromoCard)
 class PromoCardAdmin(admin.ModelAdmin):
     list_display  = ['title', 'card_color', 'is_tall', 'position', 'is_active']

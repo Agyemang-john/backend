@@ -8,6 +8,8 @@ Models for homepage and promotional content:
 
 from django.db import models
 from django.utils.html import mark_safe
+from django.conf import settings
+from django.utils import timezone
 from vendor.models import *
 from product.models import *
 
@@ -260,6 +262,24 @@ class PromoCard(models.Model):
 
     def __str__(self):
         return self.title
+
+
+############################################################
+####################### SEARCH HISTORY ##################
+############################################################
+
+class SearchHistory(models.Model):
+    user        = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='search_history')
+    query       = models.CharField(max_length=200)
+    searched_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['-searched_at']
+        unique_together = ('user', 'query')
+        indexes = [models.Index(fields=['user', 'searched_at'])]
+
+    def __str__(self):
+        return f"{self.user_id} — {self.query}"
 
 
 ############################################################

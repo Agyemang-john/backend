@@ -3,7 +3,7 @@
 # Read-only — no editing, only deep data aggregation.
 
 from rest_framework import serializers
-from django.db.models import Sum, Count, Avg, F
+from django.db.models import Sum, Count, Avg, F, Q
 from django.db.models.functions import TruncDate, TruncWeek, TruncMonth
 from django.utils import timezone
 from datetime import timedelta
@@ -11,6 +11,7 @@ from datetime import timedelta
 from product.models import (
     Product, ProductImages, Variants, ProductReview,
     Wishlist, SavedProduct, ProductDeliveryOption,
+    ProductViewLog, ProductDailyStats,
 )
 from order.models import OrderProduct
 
@@ -128,6 +129,9 @@ class ProductDetailAnalyticsSerializer(serializers.ModelSerializer):
     # ── Sales trend (last 30 days, daily) ────────────────────────────────────
     sales_trend = serializers.SerializerMethodField()
 
+    # ── View analytics ───────────────────────────────────────────────────────
+    view_analytics = serializers.SerializerMethodField()
+
     class Meta:
         model  = Product
         fields = [
@@ -162,6 +166,9 @@ class ProductDetailAnalyticsSerializer(serializers.ModelSerializer):
             # Charts
             'order_status_breakdown',
             'sales_trend',
+
+            # View analytics
+            'view_analytics',
         ]
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -313,3 +320,104 @@ class ProductDetailAnalyticsSerializer(serializers.ModelSerializer):
             }
             for item in trend
         ]
+
+    def get_view_analytics(self, obj):
+        """
+        Returns view statistics at four granularities plus a 30-day daily
+        trend. Aggregated rows (ProductDailyStats) are used for speed on
+        historical days; today's live rows come from ProductViewLog directly.
+        Bot views are reported separately and excluded from the non-bot totals.
+        """
+        from datetime import date as _date
+
+        today = timezone.now().date()
+        week_start  = today - timedelta(days=6)
+        month_start = today - timedelta(days=29)
+
+        def _sum_logs(qs):
+            agg = qs.aggregate(
+                total=Count('id'),
+                unique=Count('id', filter=Q(is_returning=False, is_bot=False)),
+                returning=Count('id', filter=Q(is_returning=True, is_bot=False)),
+                bots=Count('id', filter=Q(is_bot=True)),
+            )
+            return {
+                'total':     (agg['total'] or 0) - (agg['bots'] or 0),
+                'unique':    agg['unique'] or 0,
+                'returning': agg['returning'] or 0,
+                'bots':      agg['bots'] or 0,
+            }
+
+        def _sum_stats(qs):
+            agg = qs.aggregate(
+                total=Sum('total_views'),
+                unique=Sum('unique_views'),
+                returning=Sum('returning_views'),
+                bots=Sum('bot_views'),
+            )
+            total = agg['total'] or 0
+            bots  = agg['bots'] or 0
+            return {
+                'total':     total - bots,   # non-bot total, matches _sum_logs
+                'unique':    agg['unique'] or 0,
+                'returning': agg['returning'] or 0,
+                'bots':      bots,
+            }
+
+        base_logs  = ProductViewLog.objects.filter(product=obj)
+        base_stats = ProductDailyStats.objects.filter(product=obj)
+
+        today_data  = _sum_logs(base_logs.filter(date=today))
+        week_data   = _combine(_sum_stats(base_stats.filter(date__range=(week_start, today - timedelta(days=1)))), today_data)
+        month_data  = _combine(_sum_stats(base_stats.filter(date__range=(month_start, today - timedelta(days=1)))), today_data)
+
+        all_time_non_bot = obj.views  # already bot-filtered in buffer_view_count
+
+        # 30-day daily trend: use aggregated stats for past days, live for today
+        daily_stats = {
+            row['date']: row
+            for row in base_stats.filter(date__range=(month_start, today - timedelta(days=1))).values(
+                'date', 'total_views', 'unique_views', 'returning_views', 'bot_views'
+            )
+        }
+        trend = []
+        for i in range(29, -1, -1):
+            d = today - timedelta(days=i)
+            if d == today:
+                row = today_data
+                trend.append({
+                    'date':      d.isoformat(),
+                    'total':     row['total'],
+                    'unique':    row['unique'],
+                    'returning': row['returning'],
+                    'bots':      row['bots'],
+                })
+            elif d in daily_stats:
+                s = daily_stats[d]
+                trend.append({
+                    'date':      d.isoformat(),
+                    'total':     s['total_views'] - s['bot_views'],
+                    'unique':    s['unique_views'],
+                    'returning': s['returning_views'],
+                    'bots':      s['bot_views'],
+                })
+            else:
+                trend.append({'date': d.isoformat(), 'total': 0, 'unique': 0, 'returning': 0, 'bots': 0})
+
+        return {
+            'today':    today_data,
+            'week':     week_data,
+            'month':    month_data,
+            'all_time': {'total': all_time_non_bot},
+            'trend':    trend,
+        }
+
+
+def _combine(stats_row: dict, today_row: dict) -> dict:
+    """Merge an aggregated historical dict with today's live dict."""
+    return {
+        'total':     stats_row['total']     + today_row['total'],
+        'unique':    stats_row['unique']    + today_row['unique'],
+        'returning': stats_row['returning'] + today_row['returning'],
+        'bots':      stats_row['bots']      + today_row['bots'],
+    }

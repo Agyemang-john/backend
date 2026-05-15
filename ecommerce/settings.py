@@ -7,6 +7,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 from corsheaders.defaults import default_headers
 from datetime import timedelta
+from celery.schedules import crontab
 # from urllib.parse import urlparse, parse_qsl
 
 # Quick-start development settings - unsuitable for production
@@ -332,6 +333,7 @@ CHANNEL_LAYERS = {
 RECENTLY_VIEWED_MAX = 10        # how many IDs to keep per user/session
 VIEW_DEDUP_TTL      = 86400     # seconds before same user can re-count a view (24h)
 RECENT_LIST_TTL     = 2592000   # seconds before the recent list expires (30 days)
+RETURN_WINDOW_TTL   = 2592000   # seconds for returning visitor detection window (30 days)
 
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
@@ -345,10 +347,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "product.tasks.flush_view_counts",
         "schedule": 180,
     },
-    # Recalculate trending scores every 30 minutes
+    # Recalculate trending scores every 4 hours (multi-signal bulk scoring)
     "update-trending-scores": {
         "task": "product.tasks.update_trending_scores",
-        "schedule": 1800,
+        "schedule": 14400,  # 4 hours
+        "options": {"expires": 13000},  # drop the task if the next one fires before this runs
     },
     # Recalculate category engagement hourly
     "update-category-engagement": {
@@ -369,6 +372,11 @@ CELERY_BEAT_SCHEDULE = {
     "expire-flash-sales": {
         "task": "product.tasks.expire_flash_sales",
         "schedule": 60,
+    },
+    # Aggregate yesterday's view logs into daily stats (runs at midnight UTC)
+    "aggregate-daily-view-stats": {
+        "task": "product.tasks.aggregate_daily_stats",
+        "schedule": crontab(hour=0, minute=5),
     },
 }
 

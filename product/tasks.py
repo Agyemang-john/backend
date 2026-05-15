@@ -1,8 +1,8 @@
 # tasks.py
 import redis
 from celery import shared_task
-from .models import Product, FrequentlyBoughtTogether, Brand, Category, Sub_Category, ProductView, FlashSale
-from .trending import calculate_trending_score
+from .models import Product, FrequentlyBoughtTogether, Brand, Category, Sub_Category, FlashSale, ProductViewLog, ProductDailyStats, RecentlyViewedProduct
+from .trending import compute_all_trending_scores
 from celery import shared_task
 from django.db.models import Sum
 from order.models import CartItem
@@ -99,12 +99,28 @@ def expire_flash_sales():
         logger.info(f"Expired {count} flash sale(s).")
 
 
-@shared_task
-def update_trending_scores():
-    for product in Product.objects.filter(status="published"):
-        score = calculate_trending_score(product)
-        product.trending_score = score
-        product.save()
+@shared_task(bind=True, max_retries=3, default_retry_delay=120, ignore_result=True)
+def update_trending_scores(self):
+    """
+    Recalculate trending_score for all published products in bulk.
+    Runs every 4 hours via Celery Beat.
+
+    Uses multi-signal scoring:
+      - Unique non-bot views: last 24 h (live), last 7 d, last 30 d
+      - Cart adds: last 7 days
+      - Confirmed purchases: last 7 days
+      - Quality baseline: avg_rating × log1p(review_count)
+    """
+    try:
+        count = compute_all_trending_scores()
+        logger.info("update_trending_scores: scored %d products", count)
+        # Bust the trending endpoint cache so the next request gets fresh data
+        from django.core.cache import cache
+        cache.delete("top_trending_product")
+        cache.delete("top_trending_products")
+    except Exception as exc:
+        logger.error("update_trending_scores failed: %s", exc)
+        raise self.retry(exc=exc)
 
 
 
@@ -356,4 +372,86 @@ def index_products_task(self, last_run=None):
     except Exception as e:
         print(f"Task failed: {str(e)}")
         self.retry(exc=e)
+
+
+# ── View analytics tasks ──────────────────────────────────────────────────────
+
+@shared_task(ignore_result=True)
+def log_view_event(product_id, visitor_key, user_id, is_bot, is_returning, device_type, date_str):
+    """
+    Write one ProductViewLog row. Called async from track_view() so the
+    product detail request is never blocked by a DB insert.
+    """
+    from datetime import date as _date
+    try:
+        parsed_date = _date.fromisoformat(date_str)
+        ProductViewLog.objects.create(
+            product_id=product_id,
+            visitor_key=visitor_key,
+            user_id=user_id,
+            is_bot=is_bot,
+            is_returning=is_returning,
+            device_type=device_type,
+            date=parsed_date,
+        )
+    except Exception as e:
+        logger.error("log_view_event: failed product=%s err=%s", product_id, e)
+
+
+@shared_task(ignore_result=True)
+def aggregate_daily_stats():
+    """
+    Materialise yesterday's ProductViewLog rows into ProductDailyStats.
+    Runs at midnight UTC via Celery Beat. Skips today so in-flight rows
+    are not double-counted.
+    """
+    from django.utils import timezone as tz
+    from django.db.models import Count, Q
+    from datetime import timedelta as _td
+    yesterday = (tz.now() - _td(days=1)).date()
+
+    rows = list(
+        ProductViewLog.objects
+        .filter(date=yesterday)
+        .values('product_id')
+        .annotate(
+            total=Count('id'),
+            unique=Count('id', filter=Q(is_returning=False, is_bot=False)),
+            returning=Count('id', filter=Q(is_returning=True, is_bot=False)),
+            bots=Count('id', filter=Q(is_bot=True)),
+        )
+    )
+    for row in rows:
+        ProductDailyStats.objects.update_or_create(
+            product_id=row['product_id'],
+            date=yesterday,
+            defaults={
+                'total_views':     row['total'],           # all views including bots
+                'unique_views':    row['unique'],          # non-bot new visitors
+                'returning_views': row['returning'],       # non-bot returning visitors
+                'bot_views':       row['bots'],
+            },
+        )
+    logger.info("aggregate_daily_stats: aggregated %d product(s) for %s", len(rows), yesterday)
+
+
+@shared_task(ignore_result=True)
+def sync_recently_viewed_db(user_id, product_id):
+    """
+    Upsert a RecentlyViewedProduct row for authenticated users.
+    Called from ProductDetailAPIView on EVERY page load (not gated by analytics
+    dedup) so viewed_at is always bumped and the most-recent product stays first.
+    """
+    try:
+        obj, created = RecentlyViewedProduct.objects.get_or_create(
+            user_id=user_id,
+            product_id=product_id,
+        )
+        if not created:
+            # Touch viewed_at (auto_now field) by calling save()
+            RecentlyViewedProduct.objects.filter(
+                user_id=user_id, product_id=product_id
+            ).update(viewed_at=timezone.now())
+    except Exception as e:
+        logger.error("sync_recently_viewed_db: user=%s product=%s err=%s", user_id, product_id, e)
 

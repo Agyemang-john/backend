@@ -24,6 +24,7 @@ urlpatterns = [
     # Utility or miscellaneous views
     path('recently-viewed/clear/', views.ClearRecentlyViewed.as_view(), name='clear'),
     path('recently-viewed/remove/', views.RemoveRecentlyViewedItem.as_view(), name='remove-item'),
+    path('recently-viewed/sync/', views.SyncRecentlyViewedView.as_view(), name='sync-recently-viewed'),
     path('recently-viewed-products/', views.RecentlyViewedProducts.as_view(), name='viewed'),
 
     path('recommendations/', views.CartRecommendationsAPIView.as_view(), name='cart-recommendations'),
