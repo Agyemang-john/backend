@@ -235,6 +235,8 @@ def convert_currency(product_data: dict, currency: str) -> dict:
 
 
 class ProductDetailAPIView(APIView):
+    permission_classes = [AllowAny]
+
     def get(self, request, sku, slug):
         try:
             variant_id = request.GET.get('variantid')
@@ -431,6 +433,84 @@ class MarkProductViewedAPIView(APIView):
         track_view(request, product.id)
 
         return Response({'status': 'ok'}, status=status.HTTP_200_OK)
+
+
+class ProductAuthStateAPIView(APIView):
+    """
+    GET /api/v1/product/<sku>/<slug>/auth-state/?variantid=<id>
+
+    Returns cart status, wishlist status, vendor follow state, and shipping
+    eligibility for the current user — logged-in OR guest.
+
+    Called client-side from the browser (ProductDetail.tsx useEffect) so the
+    browser automatically sends its session cookie, allowing Django to read
+    the guest cart from request.session["guest_cart"] just like any other view.
+    The main product endpoint stays cookie-free (ISR cacheable); this lightweight
+    endpoint delivers personalised state within ~100ms of page mount.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, sku, slug):
+        product = get_object_or_404(Product, sku=sku, slug=slug, status='published')
+
+        # Resolve the variant so the guest cart key matches what was stored.
+        variant_id = request.GET.get('variantid')
+        variant = None
+        if variant_id:
+            variant = Variants.objects.filter(id=variant_id, product=product).first()
+        if not variant:
+            variant = Variants.objects.filter(product=product).first()
+
+        if request.user.is_authenticated:
+            # ── Logged-in user: check DB cart ────────────────────────────────
+            cart_data = {'is_in_cart': False, 'cart_quantity': 0, 'cart_item_id': None}
+            try:
+                cart = Cart.objects.get(user=request.user)
+                cart_item = CartItem.objects.filter(
+                    cart=cart, product=product, variant=variant
+                ).only('id', 'quantity').first()
+                if cart_item:
+                    cart_data = {
+                        'is_in_cart': True,
+                        'cart_quantity': cart_item.quantity,
+                        'cart_item_id': cart_item.id,
+                    }
+            except Cart.DoesNotExist:
+                pass
+
+            wishlist_item   = Wishlist.objects.filter(user=request.user, product=product).first()
+            is_following    = product.vendor.followers.filter(id=request.user.id).exists()
+            follower_count  = product.vendor.followers.count()
+            can_ship, user_region = can_product_ship_to_user(request, product)
+
+            return Response({
+                **cart_data,
+                'is_wishlisted':    wishlist_item is not None,
+                'wishlist_item_id': wishlist_item.id if wishlist_item else None,
+                'is_following':     is_following,
+                'follower_count':   follower_count,
+                'can_ship':         can_ship,
+                'user_region':      user_region,
+            })
+
+        else:
+            # ── Guest: check session cart (browser sends sessionid cookie) ───
+            item_key = f"{product.id}_{variant.id if variant else 'none'}"
+            guest_cart = request.session.get("guest_cart", {})
+            quantity = guest_cart.get(item_key, 0)
+            can_ship, user_region = can_product_ship_to_user(request, product)
+
+            return Response({
+                'is_in_cart':       quantity > 0,
+                'cart_quantity':    quantity,
+                'cart_item_id':     None,
+                'is_wishlisted':    False,
+                'wishlist_item_id': None,
+                'is_following':     False,
+                'follower_count':   product.vendor.followers.count(),
+                'can_ship':         can_ship,
+                'user_region':      user_region,
+            })
 
 
 class SearchSuggestionsAPIView(APIView):

@@ -32,6 +32,7 @@ urlpatterns = [
     path('frequently-bought/', views.FrequentlyBoughtTogetherAPIView.as_view(), name='fbt'),
 
     # Product detail view (specific SKU and slug)
+    path('<sku>/<slug>/auth-state/', views.ProductAuthStateAPIView.as_view(), name='product-auth-state'),
     path('<sku>/<slug>/', views.ProductDetailAPIView.as_view(), name='product-detail-api'),
     path('recommendations/<sku>/<slug>/', views.ProductRecommendationsAPIView.as_view(), name='product-recommendations'),
 ]
