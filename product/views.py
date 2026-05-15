@@ -245,19 +245,12 @@ class ProductDetailAPIView(APIView):
             except Http404:
                 return Response({"error": "Product not found"}, status=status.HTTP_404_NOT_FOUND)
             
-            # Update recently-viewed (Redis list for everyone, DB for auth users).
-            # Must run on EVERY page load — not gated by the analytics dedup — so
-            # the ordering (newest first) stays correct even within a 24-hour window.
-            update_recently_viewed(request, product.id)
-            if request.user.is_authenticated:
-                try:
-                    from product.tasks import sync_recently_viewed_db
-                    sync_recently_viewed_db.delay(request.user.pk, product.id)
-                except Exception:
-                    pass
-
-            # Analytics view tracking — 24-hour dedup, bot detection, log event.
-            track_view(request, product.id)
+            # Tracking is intentionally omitted here.
+            # All view tracking (recently-viewed + analytics) is done client-side via
+            # POST /api/v1/product/mark-viewed/ from ProductDetail.tsx useEffect.
+            # This prevents Next.js SSR renders, ISR rebuilds, and <Link> prefetch
+            # requests from ghost-writing RecentlyViewedProduct rows for products
+            # the user never actually visited.
 
             # Optimize variant queries
             variant = None
@@ -406,6 +399,38 @@ class ProductDetailAPIView(APIView):
 
         return cart_data
 
+
+class MarkProductViewedAPIView(APIView):
+    """
+    POST /api/v1/product/mark-viewed/
+    Body: { "product_id": <int> }
+
+    Called exclusively from the browser (ProductDetail.tsx useEffect) so only
+    genuine user page visits are tracked — never SSR renders, ISR rebuilds, or
+    Next.js <Link> prefetch requests.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        product_id = request.data.get('product_id')
+        if not product_id:
+            return Response({'error': 'product_id required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            product = Product.objects.only('id').get(id=product_id, status='published')
+        except Product.DoesNotExist:
+            return Response({'error': 'Product not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        update_recently_viewed(request, product.id)
+        if request.user.is_authenticated:
+            try:
+                from product.tasks import sync_recently_viewed_db
+                sync_recently_viewed_db.delay(request.user.pk, product.id)
+            except Exception:
+                pass
+        track_view(request, product.id)
+
+        return Response({'status': 'ok'}, status=status.HTTP_200_OK)
 
 
 class SearchSuggestionsAPIView(APIView):

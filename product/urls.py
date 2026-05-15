@@ -27,6 +27,7 @@ urlpatterns = [
     path('recently-viewed/sync/', views.SyncRecentlyViewedView.as_view(), name='sync-recently-viewed'),
     path('recently-viewed-products/', views.RecentlyViewedProducts.as_view(), name='viewed'),
 
+    path('mark-viewed/', views.MarkProductViewedAPIView.as_view(), name='mark-viewed'),
     path('recommendations/', views.CartRecommendationsAPIView.as_view(), name='cart-recommendations'),
     path('frequently-bought/', views.FrequentlyBoughtTogetherAPIView.as_view(), name='fbt'),
 
