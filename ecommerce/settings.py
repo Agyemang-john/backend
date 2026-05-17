@@ -348,11 +348,11 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": 180,
     },
     # Recalculate trending scores every 4 hours (multi-signal bulk scoring)
-    "update-trending-scores": {
-        "task": "product.tasks.update_trending_scores",
-        "schedule": 14400,  # 4 hours
-        "options": {"expires": 13000},  # drop the task if the next one fires before this runs
-    },
+    # "update-trending-scores": {
+    #     "task": "product.tasks.update_trending_scores",
+    #     "schedule": 14400,  # 4 hours
+    #     "options": {"expires": 13000},  # drop the task if the next one fires before this runs
+    # },
     # Recalculate category engagement hourly
     "update-category-engagement": {
         "task": "product.tasks.update_category_engagement_scores",
