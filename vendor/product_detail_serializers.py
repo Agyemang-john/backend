@@ -13,7 +13,7 @@ from product.models import (
     Wishlist, SavedProduct, ProductDeliveryOption,
     ProductViewLog, ProductDailyStats,
 )
-from order.models import OrderProduct
+from order.models import OrderProduct, CartItem
 
 
 # ── Gallery images ─────────────────────────────────────────────────────────────
@@ -129,6 +129,12 @@ class ProductDetailAnalyticsSerializer(serializers.ModelSerializer):
     # ── Sales trend (last 30 days, daily) ────────────────────────────────────
     sales_trend = serializers.SerializerMethodField()
 
+    # ── Cart quantity (all logged-in users) ───────────────────────────────────
+    total_in_carts = serializers.SerializerMethodField()
+
+    # ── Last activity timestamp ───────────────────────────────────────────────
+    last_activity = serializers.SerializerMethodField()
+
     # ── View analytics ───────────────────────────────────────────────────────
     view_analytics = serializers.SerializerMethodField()
 
@@ -162,6 +168,7 @@ class ProductDetailAnalyticsSerializer(serializers.ModelSerializer):
             # Engagement
             'wishlist_count', 'saved_count', 'review_count',
             'avg_rating', 'rating_distribution',
+            'total_in_carts',
 
             # Charts
             'order_status_breakdown',
@@ -169,6 +176,9 @@ class ProductDetailAnalyticsSerializer(serializers.ModelSerializer):
 
             # View analytics
             'view_analytics',
+
+            # Last activity
+            'last_activity',
         ]
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -268,6 +278,32 @@ class ProductDetailAnalyticsSerializer(serializers.ModelSerializer):
 
     def get_saved_count(self, obj):
         return SavedProduct.objects.filter(product=obj).count()
+
+    def get_total_in_carts(self, obj):
+        return CartItem.objects.filter(product=obj).aggregate(total=Sum('quantity'))['total'] or 0
+
+    def get_last_activity(self, obj):
+        from django.utils import timezone as tz
+        candidates = []
+
+        if obj.updated:
+            candidates.append(obj.updated)
+
+        last_order = OrderProduct.objects.filter(product=obj).order_by('-order__date_created').values_list('order__date_created', flat=True).first()
+        if last_order:
+            candidates.append(last_order)
+
+        last_review = ProductReview.objects.filter(product=obj).order_by('-date').values_list('date', flat=True).first()
+        if last_review:
+            candidates.append(last_review)
+
+        last_view = ProductViewLog.objects.filter(product=obj).order_by('-viewed_at').values_list('viewed_at', flat=True).first()
+        if last_view:
+            candidates.append(last_view)
+
+        if not candidates:
+            return None
+        return max(candidates).isoformat()
 
     def get_review_count(self, obj):
         return ProductReview.objects.filter(product=obj, status=True).count()

@@ -30,7 +30,7 @@ class OrderStatusSerializer(serializers.Serializer):
 class EngagementSerializer(serializers.Serializer):
     total_views = serializers.IntegerField()
     wishlist_count = serializers.IntegerField()
-    saved_count = serializers.IntegerField()
+    cart_quantity = serializers.IntegerField()
     review_count = serializers.IntegerField()
     avg_rating = serializers.FloatField()
 

@@ -174,3 +174,120 @@ def send_vendor_sms(self, vendor_id, is_approved):
     except Exception as e:
         logger.error(f"SMS sending failed for vendor {vendor_id}: {str(e)}")
         raise self.retry(exc=e, countdown=60)
+
+
+# ── Vendor view analytics tasks ──────────────────────────────────────────────
+
+@shared_task(ignore_result=True)
+def log_vendor_view_event(vendor_id, visitor_key, user_id, is_bot, is_returning, device_type, date_str):
+    """Write one VendorViewLog row. Called async so the store response is never blocked."""
+    from datetime import date as _date
+    from .models import VendorViewLog
+    try:
+        VendorViewLog.objects.create(
+            vendor_id=vendor_id,
+            visitor_key=visitor_key,
+            user_id=user_id,
+            is_bot=is_bot,
+            is_returning=is_returning,
+            device_type=device_type,
+            date=_date.fromisoformat(date_str),
+        )
+    except Exception as e:
+        logger.error("log_vendor_view_event: failed vendor=%s err=%s", vendor_id, e)
+
+
+@shared_task(ignore_result=True)
+def flush_vendor_view_counts():
+    """
+    Drain Redis vendor view-count buffers (vendor:views:buf:{id}) into Vendor.views.
+    Runs every 3 minutes via Celery Beat — same pattern as product flush_view_counts.
+    """
+    try:
+        from django_redis import get_redis_connection
+        conn = get_redis_connection("default")
+    except Exception:
+        logger.warning("flush_vendor_view_counts: Redis unavailable, skipping")
+        return
+
+    updates: dict[int, int] = {}
+    cursor = 0
+
+    while True:
+        try:
+            cursor, keys = conn.scan(cursor, match="vendor:views:buf:*", count=500)
+        except Exception as e:
+            logger.error("flush_vendor_view_counts: SCAN error: %s", e)
+            break
+
+        for raw_key in keys:
+            key = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
+            try:
+                vendor_id = int(key.split(":")[-1])
+            except ValueError:
+                continue
+            try:
+                try:
+                    raw = conn.getdel(key)
+                except AttributeError:
+                    pipe = conn.pipeline()
+                    pipe.get(key)
+                    pipe.delete(key)
+                    raw, _ = pipe.execute()
+                if raw:
+                    updates[vendor_id] = updates.get(vendor_id, 0) + int(raw)
+            except Exception as e:
+                logger.error("flush_vendor_view_counts: error on key %s: %s", key, e)
+
+        if cursor == 0:
+            break
+
+    if not updates:
+        return
+
+    from django.db import transaction
+    from django.db.models import F
+    from .models import Vendor
+    with transaction.atomic():
+        for vendor_id, delta in updates.items():
+            Vendor.objects.filter(id=vendor_id).update(views=F('views') + delta)
+
+    logger.info("flush_vendor_view_counts: flushed %d vendor(s), total delta %d",
+                len(updates), sum(updates.values()))
+
+
+@shared_task(ignore_result=True)
+def aggregate_vendor_daily_stats():
+    """
+    Materialise yesterday's VendorViewLog rows into VendorDailyStats.
+    Runs at 00:10 UTC via Celery Beat.
+    """
+    from django.utils import timezone as tz
+    from django.db.models import Count, Q
+    from datetime import timedelta as _td
+    from .models import VendorViewLog, VendorDailyStats
+
+    yesterday = (tz.now() - _td(days=1)).date()
+    rows = list(
+        VendorViewLog.objects
+        .filter(date=yesterday)
+        .values('vendor_id')
+        .annotate(
+            total=Count('id'),
+            unique=Count('id', filter=Q(is_returning=False, is_bot=False)),
+            returning=Count('id', filter=Q(is_returning=True, is_bot=False)),
+            bots=Count('id', filter=Q(is_bot=True)),
+        )
+    )
+    for row in rows:
+        VendorDailyStats.objects.update_or_create(
+            vendor_id=row['vendor_id'],
+            date=yesterday,
+            defaults={
+                'total_views':     row['total'],
+                'unique_views':    row['unique'],
+                'returning_views': row['returning'],
+                'bot_views':       row['bots'],
+            },
+        )
+    logger.info("aggregate_vendor_daily_stats: aggregated %d vendor(s) for %s", len(rows), yesterday)

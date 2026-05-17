@@ -13,7 +13,7 @@ from product.models import Product, Variants
 from rest_framework import status, generics, permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.exceptions import NotFound, APIException, PermissionDenied
 from rest_framework.throttling import UserRateThrottle
@@ -62,12 +62,12 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Analytics — require Basic plan minimum
-# Vendors on Free get a 403 with upgrade_url in the body.
+# Analytics — open to all verified vendors
+# Store traffic (/store-views/) still requires Basic plan.
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SalesSummaryView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor, RequireBasicPlan]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor]
 
     def get(self, request):
         try:
@@ -106,7 +106,7 @@ class SalesSummaryView(APIView):
 
 
 class SalesTrendView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor, RequireBasicPlan]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor]
 
     def get(self, request):
         try:
@@ -163,7 +163,7 @@ class SalesTrendView(APIView):
 
 
 class TopProductsView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor, RequireBasicPlan]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor]
 
     def get(self, request):
         try:
@@ -182,7 +182,7 @@ class TopProductsView(APIView):
 
 
 class OrderStatusView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor, RequireBasicPlan]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor]
 
     def get(self, request):
         try:
@@ -199,7 +199,7 @@ class OrderStatusView(APIView):
 
 
 class EngagementView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor, RequireBasicPlan]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor]
 
     def get(self, request):
         try:
@@ -210,15 +210,113 @@ class EngagementView(APIView):
         data = {
             'total_views':    vendor.views,
             'wishlist_count': Wishlist.objects.filter(product__vendor=vendor).count(),
-            'saved_count':    SavedProduct.objects.filter(product__vendor=vendor).count(),
+            'cart_quantity':  CartItem.objects.filter(product__vendor=vendor).aggregate(total=Sum('quantity'))['total'] or 0,
             'review_count':   ProductReview.objects.filter(product__vendor=vendor).count(),
             'avg_rating':     ProductReview.objects.filter(product__vendor=vendor).aggregate(Avg('rating'))['rating__avg'] or 0,
         }
         return Response(EngagementSerializer(data).data)
 
 
-class DeliveryPerformanceView(APIView):
+class StoreViewAnalyticsView(APIView):
+    """
+    GET /api/v1/vendor/store-views/
+    Returns time-bucketed store-page view analytics using VendorViewLog (today,
+    live) and VendorDailyStats (historical, materialised at midnight).
+    """
     permission_classes = [IsAuthenticated, IsVerifiedVendor, RequireBasicPlan]
+
+    def get(self, request):
+        try:
+            vendor = Vendor.objects.get(user=request.user)
+        except Vendor.DoesNotExist:
+            return Response({'error': 'Vendor not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        from .models import VendorViewLog, VendorDailyStats
+        from django.db.models import Count, Q
+        from datetime import timedelta as _td
+
+        today       = timezone.now().date()
+        week_start  = today - _td(days=6)
+        month_start = today - _td(days=29)
+
+        def _sum_logs(qs):
+            agg = qs.aggregate(
+                total=Count('id'),
+                unique=Count('id', filter=Q(is_returning=False, is_bot=False)),
+                returning=Count('id', filter=Q(is_returning=True, is_bot=False)),
+                bots=Count('id', filter=Q(is_bot=True)),
+            )
+            return {
+                'total':     (agg['total'] or 0) - (agg['bots'] or 0),
+                'unique':    agg['unique'] or 0,
+                'returning': agg['returning'] or 0,
+                'bots':      agg['bots'] or 0,
+            }
+
+        def _sum_stats(qs):
+            agg = qs.aggregate(
+                total=Sum('total_views'), unique=Sum('unique_views'),
+                returning=Sum('returning_views'), bots=Sum('bot_views'),
+            )
+            total = agg['total'] or 0
+            bots  = agg['bots'] or 0
+            return {'total': total - bots, 'unique': agg['unique'] or 0,
+                    'returning': agg['returning'] or 0, 'bots': bots}
+
+        def _combine(s, t):
+            return {k: s[k] + t[k] for k in s}
+
+        base_logs  = VendorViewLog.objects.filter(vendor=vendor)
+        base_stats = VendorDailyStats.objects.filter(vendor=vendor)
+
+        today_data = _sum_logs(base_logs.filter(date=today))
+        week_data  = _combine(_sum_stats(base_stats.filter(date__range=(week_start,  today - _td(days=1)))), today_data)
+        month_data = _combine(_sum_stats(base_stats.filter(date__range=(month_start, today - _td(days=1)))), today_data)
+
+        # 30-day daily trend (aggregated history + live today)
+        daily_stats = {
+            row['date']: row
+            for row in base_stats.filter(date__range=(month_start, today - _td(days=1))).values(
+                'date', 'total_views', 'unique_views', 'returning_views', 'bot_views'
+            )
+        }
+        trend = []
+        for i in range(29, -1, -1):
+            d = today - _td(days=i)
+            if d == today:
+                trend.append({'date': d.isoformat(), **today_data})
+            elif d in daily_stats:
+                s = daily_stats[d]
+                trend.append({
+                    'date':      d.isoformat(),
+                    'total':     s['total_views'] - s['bot_views'],
+                    'unique':    s['unique_views'],
+                    'returning': s['returning_views'],
+                    'bots':      s['bot_views'],
+                })
+            else:
+                trend.append({'date': d.isoformat(), 'total': 0, 'unique': 0, 'returning': 0, 'bots': 0})
+
+        # Device breakdown (last 30 days, bots excluded)
+        device_counts = (
+            base_logs.filter(date__range=(month_start, today), is_bot=False)
+            .values('device_type')
+            .annotate(count=Count('id'))
+        )
+        device_breakdown = {row['device_type']: row['count'] for row in device_counts}
+
+        return Response({
+            'today':            today_data,
+            'week':             week_data,
+            'month':            month_data,
+            'all_time':         {'total': vendor.views},
+            'trend':            trend,
+            'device_breakdown': device_breakdown,
+        })
+
+
+class DeliveryPerformanceView(APIView):
+    permission_classes = [IsAuthenticated, IsVerifiedVendor]
 
     def get(self, request):
         try:
@@ -481,7 +579,6 @@ class VendorDetailView(APIView):
             }
             cache.set(cache_key, cached_data, timeout=60 * 60)
 
-        self._increment_view_if_needed(request, vendor)
         return Response({
             **cached_data,
             'followers_count': vendor.followers.count(),
@@ -501,12 +598,30 @@ class VendorDetailView(APIView):
             is_following = True
         return Response({'is_following': is_following, 'followers_count': vendor.followers.count()})
 
-    def _increment_view_if_needed(self, request, vendor):
-        viewed_cookie = request.headers.get('X-Recently-Viewed-Vendors', '')
-        viewed_ids    = [v.strip() for v in viewed_cookie.split(',') if v.strip()]
-        if str(vendor.id) not in viewed_ids:
-            Vendor.objects.filter(id=vendor.id).update(views=F('views') + 1)
-            vendor.refresh_from_db(fields=['views'])
+
+class MarkVendorViewedAPIView(APIView):
+    """
+    POST /api/v1/vendor/seller-detail/mark-viewed/
+    Body: { "slug": "<vendor-slug>" }
+
+    Called exclusively from the browser (SellerDetail useEffect) so only
+    genuine page visits are tracked — never SSR renders or ISR rebuilds.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        slug = request.data.get('slug')
+        if not slug:
+            return Response({'error': 'slug required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            vendor = Vendor.objects.only('id').get(slug=slug)
+        except Vendor.DoesNotExist:
+            return Response({'error': 'Vendor not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        from .utils import track_vendor_view
+        track_vendor_view(request, vendor.id)
+        return Response({'status': 'ok'}, status=status.HTTP_200_OK)
 
 
 class VendorProductsView(APIView):

@@ -487,3 +487,55 @@ class BulkUploadJob(models.Model):
 
     def __str__(self):
         return f"BulkUploadJob({self.id}) vendor={self.vendor_id} status={self.status}"
+
+
+# ── Store view tracking ──────────────────────────────────────────────────────
+
+class VendorViewLog(models.Model):
+    """
+    One row per deduplicated store-page view, written async via Celery.
+    Mirrors ProductViewLog for the vendor store profile.
+    Bot views are stored but excluded from Vendor.views total.
+    """
+    DEVICE_CHOICES = [
+        ('mobile',  'Mobile'),
+        ('tablet',  'Tablet'),
+        ('desktop', 'Desktop'),
+        ('unknown', 'Unknown'),
+    ]
+
+    vendor       = models.ForeignKey(Vendor, on_delete=models.CASCADE, related_name='view_logs')
+    visitor_key  = models.CharField(max_length=100)   # "u:{id}" or "v:{uuid}"
+    user         = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
+    )
+    is_bot       = models.BooleanField(default=False)
+    is_returning = models.BooleanField(default=False)
+    device_type  = models.CharField(max_length=10, choices=DEVICE_CHOICES, default='unknown')
+    date         = models.DateField()
+    viewed_at    = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['vendor', 'date']),
+            models.Index(fields=['vendor', 'is_bot', 'date']),
+            models.Index(fields=['visitor_key', 'vendor']),
+        ]
+        ordering = ['-viewed_at']
+
+
+class VendorDailyStats(models.Model):
+    """
+    Daily materialized aggregate of VendorViewLog rows.
+    Written by aggregate_vendor_daily_stats at midnight UTC.
+    """
+    vendor           = models.ForeignKey(Vendor, on_delete=models.CASCADE, related_name='daily_stats')
+    date             = models.DateField()
+    total_views      = models.PositiveIntegerField(default=0)
+    unique_views     = models.PositiveIntegerField(default=0)
+    returning_views  = models.PositiveIntegerField(default=0)
+    bot_views        = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        unique_together = ('vendor', 'date')
+        indexes = [models.Index(fields=['vendor', 'date'])]

@@ -14,7 +14,7 @@ from celery.schedules import crontab
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-8gpxy)w^wzbxel%al+0+63j_fr*c@16gf*q_y=#&#m_@4%zv@g'
+SECRET_KEY = config('SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = config("DEBUG", default=False, cast=bool)
@@ -378,6 +378,94 @@ CELERY_BEAT_SCHEDULE = {
         "task": "product.tasks.aggregate_daily_stats",
         "schedule": crontab(hour=0, minute=5),
     },
+    # Flush Redis vendor view-count buffers → DB every 3 minutes
+    "flush-vendor-view-counts": {
+        "task": "vendor.tasks.flush_vendor_view_counts",
+        "schedule": 180,
+    },
+    # Flush Redis brand view-count buffers → DB every 3 minutes
+    "flush-brand-view-counts": {
+        "task": "product.tasks.flush_brand_view_counts",
+        "schedule": 180,
+    },
+    # Flush Redis subcategory view-count buffers → DB every 3 minutes
+    "flush-subcategory-view-counts": {
+        "task": "product.tasks.flush_subcategory_view_counts",
+        "schedule": 180,
+    },
+    # Aggregate yesterday's vendor view logs into daily stats
+    "aggregate-vendor-daily-view-stats": {
+        "task": "vendor.tasks.aggregate_vendor_daily_stats",
+        "schedule": crontab(hour=0, minute=10),
+    },
+
+    # Recalculate subcategory engagement hourly (same cadence as category + brand)
+    "update-subcategory-engagement": {
+        "task": "product.tasks.update_subcategory_engagement_scores",
+        "schedule": 3600,  # 1 hour
+    },
+
+    # Re-index all published products into Elasticsearch every 4 hours.
+    # Keeps search results fresh without hammering ES on every product save.
+    # Drop the task if the previous run is still going (expires < schedule).
+    # "index-products": {
+    #     "task": "product.tasks.index_products_task",
+    #     "schedule": 14400,  # 4 hours
+    #     "options": {"expires": 13000},
+    # },
+
+    # Delete media files that are no longer referenced by any DB record.
+    # Runs once a week (Sunday at 02:00 UTC) to keep storage costs down.
+    "cleanup-orphaned-files": {
+        "task": "core.tasks.cleanup_orphaned_files_task",
+        "schedule": crontab(day_of_week="sunday", hour=2, minute=0),
+    },
+
+    # Pay out all vendors with verified MoMo accounts for delivered orders.
+    # Runs every 2 days at 03:00 UTC. Only orders not yet paid out are included.
+    # "batch-payouts": {
+    #     "task": "payments.tasks.batch_payouts",
+    #     "schedule": 172800,  # 2 days in seconds (172800 = 2 × 24 × 3600)
+    # },
+
+    # ── Vendor subscription lifecycle tasks ───────────────────────────────────
+    # These three tasks run on a crontab schedule defined in the
+    # SubscriptionEmailConfig singleton (admin → Payments → Email & Schedule Config).
+    # When an admin saves that config, _update_periodic_tasks() overwrites the
+    # django-celery-beat PeriodicTask rows in the DB — so the new times take
+    # effect immediately without touching settings.py or restarting workers.
+    #
+    # The times below are the DEFAULTS (UTC) — they must match the defaults
+    # in SubscriptionEmailConfig so the initial DB entry is correct on first run.
+    # The key names must be IDENTICAL to the 'name' field used in
+    # _update_periodic_tasks() so update_or_create() finds the right row.
+
+    # Queues a charge_vendor_for_renewal task for every active auto-renewing
+    # subscription whose end_date falls renewal_advance_days from now (default 1 day).
+    # Runs daily at 08:00 UTC (matches SubscriptionEmailConfig.run_renewals_hour default).
+    "subscriptions.process_renewals": {
+        "task": "subscriptions.process_renewals",
+        "schedule": crontab(hour=8, minute=0),
+    },
+
+    # Sends expiry warning emails + SMS to vendors whose subscription is
+    # ending in expiry_warning_days (default 7) or second_warning_days (default 3).
+    # auto_renew=OFF → urgent "please renew" message.
+    # auto_renew=ON  → informational "you'll be charged soon" heads-up.
+    # Runs daily at 09:00 UTC (matches SubscriptionEmailConfig.run_expiry_check_hour default).
+    "subscriptions.warn_expiring_soon": {
+        "task": "subscriptions.warn_expiring_soon",
+        "schedule": crontab(hour=9, minute=0),
+    },
+
+    # Safety net: finds any active subscription whose end_date has already
+    # passed (charge failed and retries exhausted), marks it expired, downgrades
+    # the vendor to Free, and fires the expired email + SMS.
+    # Runs daily at 00:30 UTC (matches SubscriptionEmailConfig.run_expire_old_hour default).
+    "subscriptions.expire_old_subscriptions": {
+        "task": "subscriptions.expire_old_subscriptions",
+        "schedule": crontab(hour=0, minute=30),
+    },
 }
 
 #SIMPLE JWT CONFIGURATION
@@ -435,29 +523,39 @@ CORS_ALLOW_METHODS = [
 CORS_ALLOW_CREDENTIALS = True
 
 CSRF_TRUSTED_ORIGINS = [
-    "https://negromart.com",      # frontend domain
-    "https://www.negromart.com",
-    "https://seller.negromart.com",
-    "https://corporate.negromart.com",
-    "http://localhost:3000",
-    "https://api.negromart.com",
-]
-
-
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",  # Next.js dev
-    "http://127.0.0.1:3000",
     "https://negromart.com",
     "https://www.negromart.com",
     "https://seller.negromart.com",
     "https://corporate.negromart.com",
-    "https://frontend-sigma-khaki-70.vercel.app",  # Next.js frontend URL
+    "https://api.negromart.com",
+]
+
+if DEBUG:
+    CSRF_TRUSTED_ORIGINS += [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
+
+CORS_ALLOWED_ORIGINS = [
+    "https://negromart.com",
+    "https://www.negromart.com",
+    "https://seller.negromart.com",
+    "https://corporate.negromart.com",
     "https://negromart-space.sfo3.cdn.digitaloceanspaces.com",
     "https://negromart-space.sfo3.digitaloceanspaces.com",
-    "http://172.22.176.1:8000",
-    "http://localhost:8082",
-    "exp://10.142.141.54:8082",
 ]
+
+if DEBUG:
+    # Development-only origins — never active in production
+    CORS_ALLOWED_ORIGINS += [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://172.22.176.1:8000",
+        "http://localhost:8082",
+        "exp://10.142.141.54:8082",
+        "https://frontend-sigma-khaki-70.vercel.app",  # remove once a stable staging URL exists
+    ]
 
 
 CORS_ALLOW_HEADERS = list(default_headers) + [

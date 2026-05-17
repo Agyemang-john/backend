@@ -168,57 +168,204 @@ def generate_fbt():
     return f"Generated {rules.shape[0]} association rules"
 
 
+@shared_task(ignore_result=True)
+def flush_brand_view_counts():
+    """
+    Drains Redis brand view-count buffers (brand:views:buf:{id}) into Brand.views.
+    Runs every 3 minutes via Celery Beat — same pattern as flush_view_counts().
+    """
+    try:
+        from django_redis import get_redis_connection
+        conn = get_redis_connection("default")
+    except Exception:
+        logger.warning("flush_brand_view_counts: Redis unavailable, skipping")
+        return
+
+    updates: dict[int, int] = {}
+    cursor = 0
+
+    while True:
+        try:
+            cursor, keys = conn.scan(cursor, match="brand:views:buf:*", count=500)
+        except Exception as e:
+            logger.error("flush_brand_view_counts: SCAN error: %s", e)
+            break
+
+        for raw_key in keys:
+            key = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
+            try:
+                brand_id = int(key.split(":")[-1])
+            except ValueError:
+                continue
+            try:
+                try:
+                    raw = conn.getdel(key)
+                except AttributeError:
+                    pipe = conn.pipeline()
+                    pipe.get(key)
+                    pipe.delete(key)
+                    raw, _ = pipe.execute()
+                if raw:
+                    updates[brand_id] = updates.get(brand_id, 0) + int(raw)
+            except Exception as e:
+                logger.error("flush_brand_view_counts: error on key %s: %s", key, e)
+
+        if cursor == 0:
+            break
+
+    if not updates:
+        return
+
+    from django.db import transaction
+    with transaction.atomic():
+        for brand_id, delta in updates.items():
+            Brand.objects.filter(id=brand_id).update(views=F(‘views’) + delta)
+
+    logger.info("flush_brand_view_counts: flushed %d brand(s), total delta %d",
+                len(updates), sum(updates.values()))
+
+
+@shared_task(ignore_result=True)
+def flush_subcategory_view_counts():
+    """
+    Drains Redis subcategory view-count buffers (cat:views:buf:{id}) into Sub_Category.views.
+    Runs every 3 minutes via Celery Beat — same pattern as flush_view_counts().
+    """
+    try:
+        from django_redis import get_redis_connection
+        conn = get_redis_connection("default")
+    except Exception:
+        logger.warning("flush_subcategory_view_counts: Redis unavailable, skipping")
+        return
+
+    updates: dict[int, int] = {}
+    cursor = 0
+
+    while True:
+        try:
+            cursor, keys = conn.scan(cursor, match="cat:views:buf:*", count=500)
+        except Exception as e:
+            logger.error("flush_subcategory_view_counts: SCAN error: %s", e)
+            break
+
+        for raw_key in keys:
+            key = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
+            try:
+                subcategory_id = int(key.split(":")[-1])
+            except ValueError:
+                continue
+            try:
+                try:
+                    raw = conn.getdel(key)
+                except AttributeError:
+                    pipe = conn.pipeline()
+                    pipe.get(key)
+                    pipe.delete(key)
+                    raw, _ = pipe.execute()
+                if raw:
+                    updates[subcategory_id] = updates.get(subcategory_id, 0) + int(raw)
+            except Exception as e:
+                logger.error("flush_subcategory_view_counts: error on key %s: %s", key, e)
+
+        if cursor == 0:
+            break
+
+    if not updates:
+        return
+
+    from django.db import transaction
+    with transaction.atomic():
+        for subcategory_id, delta in updates.items():
+            Sub_Category.objects.filter(id=subcategory_id).update(views=F(‘views’) + delta)
+
+    logger.info("flush_subcategory_view_counts: flushed %d subcategory(ies), total delta %d",
+                len(updates), sum(updates.values()))
+
+
 @shared_task
 def update_category_engagement_scores():
-    for category in Category.objects.all():
-        total_views = Product.published.filter(
-            sub_category__category=category
-        ).aggregate(score=Sum('views'))['score'] or 0
+    """
+    Category score = direct subcategory page views + product views inside the category.
 
-        category.engagement_score = total_views
-        category.save()
+    Direct subcategory page visits (tracked since the user explicitly browsed here)
+    are weighted more heavily than cumulative product views, which are a secondary
+    breadth signal. The parent Category row gets the aggregate of all its sub-categories.
+    """
+    for category in Category.objects.all():
+        # Sum of direct page visits across every sub-category of this category
+        sub_views = Sub_Category.objects.filter(
+            category=category
+        ).aggregate(total=Sum(‘views’))[‘total’] or 0
+
+        # Sum of all product views for products listed in this category
+        product_views = Product.published.filter(
+            sub_category__category=category
+        ).aggregate(total=Sum(‘views’))[‘total’] or 0
+
+        # Subcategory page visits are a stronger intent signal than product view counts
+        score = round((sub_views * 1.5) + (product_views * 0.1), 2)
+        category.engagement_score = score
+        category.save(update_fields=[‘engagement_score’])
+
     return "Category engagement scores updated."
 
 
 @shared_task
 def update_brand_engagement_scores():
-    brands = Brand.objects.all()
+    """
+    Brand score = brand page views + cart adds + actual purchases.
 
-    for brand in brands:
-        views = brand.views
+    Three signals, three different levels of buyer intent:
+      - brand page view  → awareness / interest          (weight 1×)
+      - cart add         → strong purchase intent        (weight 5×)
+      - confirmed order  → highest intent / conversion   (weight 10×)
 
-        # Count how many times this brand’s products appear in cart items
-        cart_mentions = CartItem.objects.filter(
-            product__brand=brand
-        ).count()
+    All three now use the properly-tracked Brand.views field (fed by
+    flush_brand_view_counts) rather than a stale integer.
+    """
+    from order.models import CartItem, OrderProduct
 
-        # Example: weighted formula
-        score = (0.6 * views) + (0.4 * cart_mentions)
+    for brand in Brand.objects.all():
+        brand_views   = brand.views
+        cart_mentions = CartItem.objects.filter(product__brand=brand).count()
+        order_count   = OrderProduct.objects.filter(product__brand=brand).count()
 
-        brand.engagement_score = round(score, 2)
-        brand.save()
+        score = round(
+            (brand_views   * 1.0) +
+            (cart_mentions * 5.0) +
+            (order_count   * 10.0),
+            2,
+        )
+        brand.engagement_score = score
+        brand.save(update_fields=[‘engagement_score’])
 
-    return "Engagement scores updated."
+    return "Brand engagement scores updated."
 
 
 @shared_task
 def update_subcategory_engagement_scores():
-    subcategories = Sub_Category.objects.all()
+    """
+    Subcategory score = direct page views + cart adds + actual purchases.
 
-    for subcategory in subcategories:
-        # Subcategory's direct view count
-        views = subcategory.views
+    Direct page visits now come from the Redis-buffered tracker wired into
+    CategoryProductListView, so Sub_Category.views reflects real human traffic.
+    Cart adds and purchases are stronger conversion signals layered on top.
+    """
+    from order.models import CartItem, OrderProduct
 
-        # Count how many times products in this subcategory appear in cart items
-        cart_mentions = CartItem.objects.filter(
-            product__sub_category=subcategory
-        ).count()
+    for subcategory in Sub_Category.objects.all():
+        views         = subcategory.views
+        cart_mentions = CartItem.objects.filter(product__sub_category=subcategory).count()
+        order_count   = OrderProduct.objects.filter(product__sub_category=subcategory).count()
 
-        # Weighted engagement score
-        score = (0.6 * views) + (0.4 * cart_mentions)
-
-        subcategory.engagement_score = round(score, 2)
-        subcategory.save()
+        score = round(
+            (views         * 1.0) +
+            (cart_mentions * 5.0) +
+            (order_count   * 10.0),
+            2,
+        )
+        subcategory.engagement_score = score
+        subcategory.save(update_fields=[‘engagement_score’])
 
     return "Subcategory engagement scores updated."
 

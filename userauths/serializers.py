@@ -108,9 +108,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             else:
                 user = User.objects.get(phone=identifier)
         except User.DoesNotExist:
-            raise serializers.ValidationError(
-                "Email not registered." if is_email else "Phone number not registered."
-            )
+            raise serializers.ValidationError("Invalid credentials.")
 
         # 3. Check if account is locked
         if user.failed_login_attempts >= MAX_FAILED_ATTEMPTS:
@@ -148,7 +146,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                     f"Too many failed attempts. Please try again after {LOCKOUT_TIME.seconds // 60} minutes."
                 )
 
-            raise serializers.ValidationError("Incorrect password.")
+            raise serializers.ValidationError("Invalid credentials.")
 
         user.failed_login_attempts = 0
         user.lockout_until = None

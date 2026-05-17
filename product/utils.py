@@ -299,6 +299,139 @@ def remove_recently_viewed(request, product_id: int) -> None:
         pass
 
 
+# ── Brand view tracking ──────────────────────────────────────────────────────
+
+_BRAND_FLUSH_LOCK_KEY = "brand:views:flush:lock"
+
+
+def buffer_brand_view_count(brand_id: int) -> None:
+    """
+    Increment the Redis brand view-count buffer.
+    Falls back to a direct DB update if Redis is unavailable.
+    The Celery Beat task flush_brand_view_counts() drains this buffer every 3 min.
+    """
+    conn = _get_redis()
+    if conn is None:
+        try:
+            from django.db.models import F
+            from product.models import Brand
+            Brand.objects.filter(id=brand_id).update(views=F('views') + 1)
+        except Exception:
+            logger.error("buffer_brand_view_count: DB fallback failed for brand %s", brand_id)
+        return
+    try:
+        pipe = conn.pipeline()
+        pipe.incr(f"brand:views:buf:{brand_id}")
+        pipe.expire(f"brand:views:buf:{brand_id}", VIEW_BUF_TTL)
+        pipe.set(_BRAND_FLUSH_LOCK_KEY, 1, nx=True, ex=FLUSH_LOCK_TTL)
+        results = pipe.execute()
+        flush_needed = bool(results[2])
+    except Exception:
+        logger.warning("buffer_brand_view_count: Redis error for brand %s", brand_id)
+        return
+
+    if flush_needed:
+        try:
+            from product.tasks import flush_brand_view_counts
+            flush_brand_view_counts.apply_async(countdown=FLUSH_LOCK_TTL)
+        except Exception:
+            logger.warning("buffer_brand_view_count: could not schedule flush_brand_view_counts")
+
+
+def track_brand_view(request, brand_id: int) -> None:
+    """
+    Track one brand page visit. Deduped per visitor per 24 h via Redis SET NX.
+    Non-bot views are buffered in Redis and flushed to Brand.views every 3 min.
+    Bots are silently skipped — they don't influence engagement scores.
+    """
+    visitor_key = _get_visitor_id(request)
+    if visitor_key is None:
+        return
+
+    conn = _get_redis()
+    if conn is None:
+        return
+
+    dedup_key = f"brand:view:dedup:{visitor_key}:{brand_id}"
+    try:
+        is_new = bool(conn.set(dedup_key, 1, nx=True, ex=VIEW_DEDUP_TTL))
+    except Exception:
+        logger.warning("track_brand_view: dedup Redis error brand=%s", brand_id)
+        return
+
+    if not is_new:
+        return  # same visitor within 24 h — skip
+
+    if not detect_bot(request):
+        buffer_brand_view_count(brand_id)
+
+
+# ── Subcategory view tracking ─────────────────────────────────────────────────
+
+_CAT_FLUSH_LOCK_KEY = "cat:views:flush:lock"
+
+
+def buffer_subcategory_view_count(subcategory_id: int) -> None:
+    """
+    Increment the Redis subcategory view-count buffer.
+    Falls back to a direct DB update if Redis is unavailable.
+    The Celery Beat task flush_subcategory_view_counts() drains this buffer every 3 min.
+    """
+    conn = _get_redis()
+    if conn is None:
+        try:
+            from django.db.models import F
+            from product.models import Sub_Category
+            Sub_Category.objects.filter(id=subcategory_id).update(views=F('views') + 1)
+        except Exception:
+            logger.error("buffer_subcategory_view_count: DB fallback failed for subcategory %s", subcategory_id)
+        return
+    try:
+        pipe = conn.pipeline()
+        pipe.incr(f"cat:views:buf:{subcategory_id}")
+        pipe.expire(f"cat:views:buf:{subcategory_id}", VIEW_BUF_TTL)
+        pipe.set(_CAT_FLUSH_LOCK_KEY, 1, nx=True, ex=FLUSH_LOCK_TTL)
+        results = pipe.execute()
+        flush_needed = bool(results[2])
+    except Exception:
+        logger.warning("buffer_subcategory_view_count: Redis error for subcategory %s", subcategory_id)
+        return
+
+    if flush_needed:
+        try:
+            from product.tasks import flush_subcategory_view_counts
+            flush_subcategory_view_counts.apply_async(countdown=FLUSH_LOCK_TTL)
+        except Exception:
+            logger.warning("buffer_subcategory_view_count: could not schedule flush_subcategory_view_counts")
+
+
+def track_subcategory_view(request, subcategory_id: int) -> None:
+    """
+    Track one subcategory page visit. Deduped per visitor per 24 h via Redis SET NX.
+    Non-bot views are buffered in Redis and flushed to Sub_Category.views every 3 min.
+    """
+    visitor_key = _get_visitor_id(request)
+    if visitor_key is None:
+        return
+
+    conn = _get_redis()
+    if conn is None:
+        return
+
+    dedup_key = f"cat:view:dedup:{visitor_key}:{subcategory_id}"
+    try:
+        is_new = bool(conn.set(dedup_key, 1, nx=True, ex=VIEW_DEDUP_TTL))
+    except Exception:
+        logger.warning("track_subcategory_view: dedup Redis error subcategory=%s", subcategory_id)
+        return
+
+    if not is_new:
+        return  # same visitor within 24 h — skip
+
+    if not detect_bot(request):
+        buffer_subcategory_view_count(subcategory_id)
+
+
 # ── GeoIP ────────────────────────────────────────────────────────────────────
 
 def get_region_with_geoip(ip):

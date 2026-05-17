@@ -32,6 +32,8 @@ from .views import (
     CheckCustomerAuth,
     ShipmentAPIView,
     TrackingEventAddAPIView,
+    MarkVendorViewedAPIView,
+    StoreViewAnalyticsView,
 )
 
 from vendor.bulk_upload_views import (
@@ -86,8 +88,10 @@ urlpatterns = [
     path('top-products/', TopProductsView.as_view(), name='top-products'),
     path('order-status/', OrderStatusView.as_view(), name='order-status'),
     path('engagement/', EngagementView.as_view(), name='engagement'),
+    path('store-views/', StoreViewAnalyticsView.as_view(), name='store-view-analytics'),
     path('delivery-performance/', DeliveryPerformanceView.as_view(), name='delivery-performance'),
 
+    path('seller-detail/mark-viewed/', MarkVendorViewedAPIView.as_view(), name='vendor-mark-viewed'),
     path('seller-detail/<slug:slug>/', VendorDetailView.as_view(), name='vendor-detail'),
     path('seller-detail/<slug:slug>/products/', VendorProductsView.as_view(), name='vendor-products'),
     path('seller-detail/<slug:slug>/reviews/', VendorReviewsView.as_view(), name='vendor-reviews'),

@@ -349,10 +349,22 @@ def charge_vendor_for_renewal(self, subscription_id: int):
             f'for sub={subscription_id}: {exc}'
         )
 
+        # On the very first failure, immediately alert the vendor so they can
+        # update their payment method before the next automatic retry tomorrow.
+        if self.request.retries == 0:
+            try:
+                _sub = VendorSubscription.objects.select_related('vendor').get(pk=subscription_id)
+                from .email_tasks import send_payment_method_required_email
+                send_payment_method_required_email.delay(_sub.vendor.id)
+            except Exception as notify_exc:
+                logger.error(
+                    f'Failed to send first-failure notification for sub={subscription_id}: {notify_exc}'
+                )
+
         if self.request.retries < max_retries - 1:
             raise self.retry(exc=exc)
 
-        # All retries exhausted — expire the subscription
+        # All retries exhausted — mark expired and notify the vendor
         logger.error(f'Renewal exhausted ({max_retries} attempts) for sub={subscription_id}. Expiring.')
         try:
             sub = VendorSubscription.objects.select_related('vendor').get(pk=subscription_id)

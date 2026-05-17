@@ -570,6 +570,11 @@ class CategoryProductListView(APIView):
                 return Response({"detail": "Category not found"}, status=404)
             cache.set(cache_key, category, 3600)
 
+        # Track subcategory page visit — deduped per visitor per 24 h, non-blocking.
+        # Buffers into Redis; flush_subcategory_view_counts() drains to DB every 3 min.
+        from product.utils import track_subcategory_view
+        track_subcategory_view(request, category.id)
+
         # ── Currency ───────────────────────────────────────────────────────────
         currency = request.headers.get('X-Currency', 'GHS')
         rates = get_exchange_rates()
@@ -731,6 +736,11 @@ class BrandProductListView(APIView):
             if not brand:
                 return Response({"detail": "Brand not found"}, status=404)
             cache.set(brand_cache_key, brand, 3600)
+
+        # Track brand page visit — deduped per visitor per 24 h, non-blocking.
+        # Buffers into Redis; flush_brand_view_counts() drains to DB every 3 min.
+        from product.utils import track_brand_view
+        track_brand_view(request, brand.id)
 
         # ── Parse filters ──────────────────────────────────────────────────────
         try:

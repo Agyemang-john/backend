@@ -2,54 +2,111 @@
 {% block title %}Your subscription expires in {{ days_left }} day{{ days_left|pluralize }} — Negromart{% endblock %}
 
 {% block hero %}
-  <div style="width:52px;height:52px;background:#fffbeb;border:1px solid #fcd34d;border-radius:50%;display:flex;align-items:center;justify-content:center;margin-bottom:20px">
-    <span style="font-size:24px">⏳</span>
+  <div style="width:52px;height:52px;background:{% if auto_renew %}#eff6ff{% else %}#fffbeb{% endif %};border:1px solid {% if auto_renew %}#93c5fd{% else %}#fcd34d{% endif %};border-radius:50%;display:flex;align-items:center;justify-content:center;margin-bottom:20px">
+    <span style="font-size:24px">{% if auto_renew %}🔄{% else %}⏳{% endif %}</span>
   </div>
   <h1 class="hero-title">
     {% if days_left == 1 %}
-      Expires tomorrow.
+      {% if auto_renew %}Renews tomorrow.{% else %}Expires tomorrow.{% endif %}
     {% else %}
-      {{ days_left }} days left.
+      {{ days_left }} days {% if auto_renew %}until renewal{% else %}left{% endif %}.
     {% endif %}
   </h1>
-  <p class="hero-sub">Hi {{ vendor_name }}, your <strong>{{ plan_name }}</strong> subscription expires on <strong>{{ end_date }}</strong>. Renew now to avoid any interruption.</p>
+  <p class="hero-sub">
+    Hi {{ vendor_name }}, your <strong>{{ plan_name }}</strong> subscription
+    {% if auto_renew %}
+      will renew automatically on <strong>{{ end_date }}</strong>.
+    {% else %}
+      expires on <strong>{{ end_date }}</strong>. Renew now to avoid any interruption.
+    {% endif %}
+  </p>
 {% endblock %}
 
 {% block body %}
-  <div class="alert alert-warning" style="display:flex;align-items:flex-start;gap:10px">
-    <span style="font-size:18px;flex-shrink:0">⚠️</span>
-    <span>
-      Auto-renewal is <strong>off</strong> for your account. Your subscription will <strong>not</strong> renew automatically on {{ end_date }}.
-      After expiry your store will be moved to the Free plan and certain features will be restricted.
-    </span>
-  </div>
 
-  <div class="info-box">
-    <div class="info-row">
-      <span class="info-label">Current plan</span>
-      <span class="info-value">{{ plan_name }}</span>
-    </div>
-    <div class="info-row">
-      <span class="info-label">Expires on</span>
-      <span class="info-value">{{ end_date }}</span>
-    </div>
-    <div class="info-row">
-      <span class="info-label">Days remaining</span>
-      <span class="info-value" style="color:{% if days_left <= 3 %}#dc2626{% else %}#d97706{% endif %};">
-        {{ days_left }} day{{ days_left|pluralize }}
+  {% if auto_renew %}
+    {# ── Auto-renew ON: informational heads-up ── #}
+    <div class="alert alert-success" style="display:flex;align-items:flex-start;gap:10px">
+      <span style="font-size:18px;flex-shrink:0">✅</span>
+      <span>
+        Auto-renewal is <strong>on</strong>. Your subscription will renew automatically on <strong>{{ end_date }}</strong>
+        and <strong>{{ amount }}</strong> will be charged to your saved payment method.
+        No action needed — just make sure your card or MoMo is up to date.
+        <a href="{{ billing_url }}" style="text-decoration:underline;color:inherit">Manage billing</a>.
       </span>
     </div>
-  </div>
 
-  <p style="font-size:14px;color:#475569;line-height:1.7;margin-bottom:24px">
-    Keep your store running at full speed. Renewing takes less than a minute and your products and data stay exactly as they are.
-  </p>
+    <div class="info-box">
+      <div class="info-row">
+        <span class="info-label">Current plan</span>
+        <span class="info-value">{{ plan_name }}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Renews on</span>
+        <span class="info-value">{{ end_date }}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Amount</span>
+        <span class="info-value">{{ amount }}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Days to renewal</span>
+        <span class="info-value" style="color:{% if days_left <= 3 %}#d97706{% else %}#166534{% endif %}">
+          {{ days_left }} day{{ days_left|pluralize }}
+        </span>
+      </div>
+    </div>
 
-  <div class="cta-wrap">
-    <a href="{{ subscribe_url }}" class="cta">Renew Now →</a>
-  </div>
+    <p style="font-size:14px;color:#475569;line-height:1.7;margin-bottom:24px">
+      If you no longer need this plan, you can cancel anytime from your billing dashboard
+      before the renewal date — your access continues until {{ end_date }}.
+    </p>
 
-  <p style="text-align:center;font-size:12px;color:#94a3b8;margin-top:12px">
-    Already renewed? You can safely ignore this email.
-  </p>
+    <div class="cta-wrap">
+      <a href="{{ billing_url }}" class="cta">Review Payment Method →</a>
+    </div>
+
+  {% else %}
+    {# ── Auto-renew OFF: urgent manual-renewal prompt ── #}
+    <div class="alert alert-warning" style="display:flex;align-items:flex-start;gap:10px">
+      <span style="font-size:18px;flex-shrink:0">⚠️</span>
+      <span>
+        Auto-renewal is <strong>off</strong> for your account. Your subscription will <strong>not</strong>
+        renew automatically on {{ end_date }}.
+        After expiry your store will be moved to the Free plan and certain features will be restricted.
+      </span>
+    </div>
+
+    <div class="info-box">
+      <div class="info-row">
+        <span class="info-label">Current plan</span>
+        <span class="info-value">{{ plan_name }}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Expires on</span>
+        <span class="info-value">{{ end_date }}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Days remaining</span>
+        <span class="info-value" style="color:{% if days_left <= 3 %}#dc2626{% else %}#d97706{% endif %}">
+          {{ days_left }} day{{ days_left|pluralize }}
+        </span>
+      </div>
+    </div>
+
+    <p style="font-size:14px;color:#475569;line-height:1.7;margin-bottom:24px">
+      Keep your store running at full speed. Renewing takes less than a minute and your
+      products and data stay exactly as they are.
+    </p>
+
+    <div class="cta-wrap">
+      <a href="{{ subscribe_url }}" class="cta">Renew Now →</a>
+    </div>
+
+    <p style="text-align:center;font-size:12px;color:#94a3b8;margin-top:12px">
+      Already renewed? You can safely ignore this email.
+    </p>
+
+  {% endif %}
+
 {% endblock %}
