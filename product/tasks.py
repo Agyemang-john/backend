@@ -219,7 +219,7 @@ def flush_brand_view_counts():
     from django.db import transaction
     with transaction.atomic():
         for brand_id, delta in updates.items():
-            Brand.objects.filter(id=brand_id).update(views=F(‘views’) + delta)
+            Brand.objects.filter(id=brand_id).update(views=F('views') + delta)
 
     logger.info("flush_brand_view_counts: flushed %d brand(s), total delta %d",
                 len(updates), sum(updates.values()))
@@ -276,7 +276,7 @@ def flush_subcategory_view_counts():
     from django.db import transaction
     with transaction.atomic():
         for subcategory_id, delta in updates.items():
-            Sub_Category.objects.filter(id=subcategory_id).update(views=F(‘views’) + delta)
+            Sub_Category.objects.filter(id=subcategory_id).update(views=F('views') + delta)
 
     logger.info("flush_subcategory_view_counts: flushed %d subcategory(ies), total delta %d",
                 len(updates), sum(updates.values()))
@@ -295,17 +295,17 @@ def update_category_engagement_scores():
         # Sum of direct page visits across every sub-category of this category
         sub_views = Sub_Category.objects.filter(
             category=category
-        ).aggregate(total=Sum(‘views’))[‘total’] or 0
+        ).aggregate(total=Sum('views'))['total'] or 0
 
         # Sum of all product views for products listed in this category
         product_views = Product.published.filter(
             sub_category__category=category
-        ).aggregate(total=Sum(‘views’))[‘total’] or 0
+        ).aggregate(total=Sum('views'))['total'] or 0
 
         # Subcategory page visits are a stronger intent signal than product view counts
         score = round((sub_views * 1.5) + (product_views * 0.1), 2)
         category.engagement_score = score
-        category.save(update_fields=[‘engagement_score’])
+        category.save(update_fields=['engagement_score'])
 
     return "Category engagement scores updated."
 
@@ -337,7 +337,7 @@ def update_brand_engagement_scores():
             2,
         )
         brand.engagement_score = score
-        brand.save(update_fields=[‘engagement_score’])
+        brand.save(update_fields=['engagement_score'])
 
     return "Brand engagement scores updated."
 
@@ -365,7 +365,7 @@ def update_subcategory_engagement_scores():
             2,
         )
         subcategory.engagement_score = score
-        subcategory.save(update_fields=[‘engagement_score’])
+        subcategory.save(update_fields=['engagement_score'])
 
     return "Subcategory engagement scores updated."
 
