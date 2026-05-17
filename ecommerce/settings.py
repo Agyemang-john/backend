@@ -462,10 +462,10 @@ CELERY_BEAT_SCHEDULE = {
     # passed (charge failed and retries exhausted), marks it expired, downgrades
     # the vendor to Free, and fires the expired email + SMS.
     # Runs daily at 00:30 UTC (matches SubscriptionEmailConfig.run_expire_old_hour default).
-    "subscriptions.expire_old_subscriptions": {
-        "task": "subscriptions.expire_old_subscriptions",
-        "schedule": crontab(hour=0, minute=30),
-    },
+    # "subscriptions.expire_old_subscriptions": {
+    #     "task": "subscriptions.expire_old_subscriptions",
+    #     "schedule": crontab(hour=0, minute=30),
+    # },
 }
 
 #SIMPLE JWT CONFIGURATION
