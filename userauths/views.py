@@ -1,7 +1,4 @@
 
-import hmac
-import logging
-
 from django.conf import settings
 from userauths.tokens import CustomVendorRefreshToken
 from rest_framework.views import APIView
@@ -14,7 +11,7 @@ from rest_framework_simplejwt.views import (
 )
 from .serializers import CustomTokenObtainPairSerializer, otp_token_generator
 from django.contrib.auth import get_user_model
-from .custom_throttles import LoginThrottle, AnonLoginThrottle
+from .custom_throttles import LoginThrottle
 from rest_framework.permissions import AllowAny
 from .tasks import send_otp
 from .vendor_serializers import VendorLoginSerializer
@@ -27,12 +24,6 @@ from userauths.serializers import RegisterSerializer
 from django.utils.http import urlsafe_base64_decode
 from django.contrib.auth.tokens import default_token_generator
 from django.utils import timezone
-
-logger = logging.getLogger(__name__)
-
-# Max OTP attempts before the cached OTP is invalidated (per 5-minute window)
-OTP_MAX_ATTEMPTS = 5
-OTP_ATTEMPT_TTL  = 300  # seconds
 
 class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
@@ -75,15 +66,13 @@ class ActivateEmailView(APIView):
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
-    permission_classes = [AllowAny]
-    throttle_classes = [LoginThrottle, AnonLoginThrottle]
+    permission_classes = [AllowAny]  # allow guests to login
+    # throttle_classes = [LoginThrottle, AnonLoginThrottle]
 
     def post(self, request, *args, **kwargs):
         response = super().post(request, *args, **kwargs)
 
-        ip = request.META.get("REMOTE_ADDR")
         if response.status_code == 200:
-            logger.info("customer.login_success ip=%s", ip)
             access_token = response.data.get("access")
             refresh_token = response.data.get("refresh")
 
@@ -201,86 +190,64 @@ class VendorTokenRefreshView(TokenRefreshView):
         return response
 
 class VendorTokenObtainPairView(TokenObtainPairView):
-    permission_classes = [AllowAny]
-    throttle_classes = [LoginThrottle, AnonLoginThrottle]
+    permission_classes = [AllowAny]  # allow guests to login
+    # throttle_classes = [LoginThrottle, AnonLoginThrottle]
 
     def post(self, request):
         serializer = VendorLoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        logger.info("vendor.otp_sent ip=%s", request.META.get("REMOTE_ADDR"))
         return Response({"detail": "OTP sent. Please verify to continue."}, status=200)
 
 class VendorOTPVerifyView(APIView):
     permission_classes = [AllowAny]
-    throttle_classes = [AnonLoginThrottle]
+    # throttle_classes = [LoginThrottle]
 
     def post(self, request, *args, **kwargs):
         email_or_phone = request.data.get("email")
-        otp = request.data.get("otp", "")
-        ip = request.META.get("REMOTE_ADDR")
+        otp = request.data.get("otp")
 
         try:
             user = User.objects.get(Q(email__iexact=email_or_phone) | Q(phone=email_or_phone))
+            if user.role != 'vendor':
+                return Response({'detail': 'OTP verification not required for this user.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            cached_data = cache.get(f"otp_{user.id}")
+            if cached_data and 'otp' in cached_data and 'timestamp' in cached_data:
+                if str(cached_data['otp']) == otp and not otp_token_generator._is_token_expired(cached_data['timestamp']):
+                    cache.delete(f"otp_{user.id}")
+                    refresh = CustomVendorRefreshToken.for_user(user)
+                    access_token = str(refresh.access_token)
+                    refresh_token = str(refresh)
+
+                    response = Response({'detail': 'Login successful.'}, status=status.HTTP_200_OK)
+                    # if response.status_code == 200 and 'vendor_access' in response.data:
+                    response.set_cookie(
+                        settings.VENDOR_ACCESS_AUTH_COOKIE,
+                        access_token,
+                        max_age=settings.VENDOR_AUTH_ACCESS_MAX_AGE,
+                        path=settings.VENDOR_AUTH_COOKIE_PATH,
+                        secure=settings.VENDOR_AUTH_COOKIE_SECURE,
+                        httponly=settings.VENDOR_AUTH_COOKIE_HTTP_ONLY,
+                        samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
+                        domain=settings.VENDOR_AUTH_COOKIE_DOMAIN
+                    )
+                    response.set_cookie(
+                        settings.VENDOR_REFRESH_AUTH_COOKIE,
+                        refresh_token,
+                        max_age=settings.VENDOR_AUTH_REFRESH_MAX_AGE,
+                        path=settings.VENDOR_AUTH_COOKIE_PATH,
+                        secure=settings.VENDOR_AUTH_COOKIE_SECURE,
+                        httponly=settings.VENDOR_AUTH_COOKIE_HTTP_ONLY,
+                        samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
+                        domain=settings.VENDOR_AUTH_COOKIE_DOMAIN
+                    )
+                    return response
+                else:
+                    return Response({'detail': 'Invalid or expired OTP.'}, status=status.HTTP_400_BAD_REQUEST)
+            else:
+                return Response({'detail': 'Invalid or expired OTP.'}, status=status.HTTP_400_BAD_REQUEST)
         except User.DoesNotExist:
-            logger.warning("vendor.otp_verify unknown_identifier ip=%s", ip)
-            return Response({'detail': 'Invalid credentials.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        if user.role != 'vendor':
-            return Response({'detail': 'Invalid credentials.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Per-user attempt counter — prevents OTP brute-force regardless of IP throttle
-        attempts_key = f"otp:attempts:{user.id}"
-        attempts = cache.get(attempts_key, 0)
-        if attempts >= OTP_MAX_ATTEMPTS:
-            logger.warning("vendor.otp_verify locked user=%s ip=%s", user.id, ip)
-            cache.delete(f"otp_{user.id}")  # invalidate the OTP so a new one must be requested
-            return Response(
-                {'detail': 'Too many invalid attempts. Please request a new OTP.'},
-                status=status.HTTP_429_TOO_MANY_REQUESTS,
-            )
-
-        cached_data = cache.get(f"otp_{user.id}")
-        if not (cached_data and 'otp' in cached_data and 'timestamp' in cached_data):
-            return Response({'detail': 'Invalid or expired OTP.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Constant-time comparison prevents timing attacks
-        otp_match = hmac.compare_digest(str(cached_data['otp']), str(otp))
-        if otp_match and not otp_token_generator._is_token_expired(cached_data['timestamp']):
-            cache.delete(f"otp_{user.id}")
-            cache.delete(attempts_key)
-            logger.info("vendor.login_success user=%s ip=%s", user.id, ip)
-
-            refresh = CustomVendorRefreshToken.for_user(user)
-            access_token = str(refresh.access_token)
-            refresh_token = str(refresh)
-
-            response = Response({'detail': 'Login successful.'}, status=status.HTTP_200_OK)
-            response.set_cookie(
-                settings.VENDOR_ACCESS_AUTH_COOKIE,
-                access_token,
-                max_age=settings.VENDOR_AUTH_ACCESS_MAX_AGE,
-                path=settings.VENDOR_AUTH_COOKIE_PATH,
-                secure=settings.VENDOR_AUTH_COOKIE_SECURE,
-                httponly=settings.VENDOR_AUTH_COOKIE_HTTP_ONLY,
-                samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
-                domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
-            )
-            response.set_cookie(
-                settings.VENDOR_REFRESH_AUTH_COOKIE,
-                refresh_token,
-                max_age=settings.VENDOR_AUTH_REFRESH_MAX_AGE,
-                path=settings.VENDOR_AUTH_COOKIE_PATH,
-                secure=settings.VENDOR_AUTH_COOKIE_SECURE,
-                httponly=settings.VENDOR_AUTH_COOKIE_HTTP_ONLY,
-                samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
-                domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
-            )
-            return response
-
-        # Failed attempt — increment counter
-        cache.set(attempts_key, attempts + 1, timeout=OTP_ATTEMPT_TTL)
-        logger.warning("vendor.otp_verify failed user=%s attempt=%d ip=%s", user.id, attempts + 1, ip)
-        return Response({'detail': 'Invalid or expired OTP.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'detail': 'User not found.'}, status=status.HTTP_400_BAD_REQUEST)
 
 class VendorOTPResendView(APIView):
     permission_classes = [AllowAny]
@@ -290,29 +257,19 @@ class VendorOTPResendView(APIView):
         email_or_phone = request.data.get('email')
         if not email_or_phone:
             return Response({'detail': 'Email or phone required.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Always return the same response to prevent account enumeration
-        generic_ok = Response({'detail': 'If an account exists, an OTP has been sent.'}, status=status.HTTP_200_OK)
-
         try:
             user = User.objects.get(Q(email__iexact=email_or_phone) | Q(phone=email_or_phone))
+            if user.role != 'vendor':
+                return Response({'detail': 'OTP verification not required for this user.'}, status=status.HTTP_400_BAD_REQUEST)
+            otp = otp_token_generator.make_token(user)
+            cache.set(f"otp_{user.id}", {'otp': otp, 'timestamp': time.time()}, timeout=600)
+            # Send OTP via Celery task (Arkesel for SMS, Django for email)
+            recipient = user.email if '@' in email_or_phone else user.phone
+            is_email = '@' in email_or_phone
+            send_otp.delay(recipient, otp, is_email)
+            return Response({'detail': 'OTP sent to your email or phone.'}, status=status.HTTP_200_OK)
         except User.DoesNotExist:
-            logger.info("vendor.otp_resend unknown_identifier ip=%s", request.META.get("REMOTE_ADDR"))
-            return generic_ok  # same response — no enumeration
-
-        if user.role != 'vendor':
-            return generic_ok
-
-        # Reset attempt counter so vendor can try again with the new OTP
-        cache.delete(f"otp:attempts:{user.id}")
-
-        otp = otp_token_generator.make_token(user)
-        cache.set(f"otp_{user.id}", {'otp': otp, 'timestamp': time.time()}, timeout=600)
-        recipient = user.email if '@' in email_or_phone else user.phone
-        is_email = '@' in email_or_phone
-        send_otp.delay(recipient, otp, is_email)
-        logger.info("vendor.otp_resend user=%s ip=%s", user.id, request.META.get("REMOTE_ADDR"))
-        return generic_ok
+            return Response({'detail': 'User not found.'}, status=status.HTTP_400_BAD_REQUEST)
 
 class VendorTokenVerifyView(TokenVerifyView):
     permission_classes = [AllowAny]
