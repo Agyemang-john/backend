@@ -34,13 +34,19 @@ class AddProductReviewView(APIView):
 
         if not self.user_has_purchased_product(request.user, product.id):
             return Response(
-                {'detail': 'You must purchase the product before reviewing it.'},
+                {'detail': 'You must purchase and receive this product before reviewing it.'},
                 status=status.HTTP_403_FORBIDDEN
+            )
+
+        if ProductReview.objects.filter(user=request.user, product=product).exists():
+            return Response(
+                {'detail': 'You have already reviewed this product.'},
+                status=status.HTTP_409_CONFLICT
             )
 
         serializer = ProductReviewSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
-            serializer.save() 
+            serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -483,6 +489,10 @@ class ProductAuthStateAPIView(APIView):
             follower_count  = product.vendor.followers.count()
             can_ship, user_region = can_product_ship_to_user(request, product)
 
+            has_reviewed = ProductReview.objects.filter(
+                user=request.user, product=product
+            ).exists()
+
             return Response({
                 **cart_data,
                 'is_wishlisted':    wishlist_item is not None,
@@ -491,6 +501,7 @@ class ProductAuthStateAPIView(APIView):
                 'follower_count':   follower_count,
                 'can_ship':         can_ship,
                 'user_region':      user_region,
+                'has_reviewed':     has_reviewed,
             })
 
         else:

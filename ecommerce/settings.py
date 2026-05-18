@@ -348,11 +348,11 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": 180,
     },
     # Recalculate trending scores every 4 hours (multi-signal bulk scoring)
-    # "update-trending-scores": {
-    #     "task": "product.tasks.update_trending_scores",
-    #     "schedule": 14400,  # 4 hours
-    #     "options": {"expires": 13000},  # drop the task if the next one fires before this runs
-    # },
+    "update-trending-scores": {
+        "task": "product.tasks.update_trending_scores",
+        "schedule": 14400,  # 4 hours
+        "options": {"expires": 13000},  # drop the task if the next one fires before this runs
+    },
     # Recalculate category engagement hourly
     "update-category-engagement": {
         "task": "product.tasks.update_category_engagement_scores",
@@ -462,10 +462,10 @@ CELERY_BEAT_SCHEDULE = {
     # passed (charge failed and retries exhausted), marks it expired, downgrades
     # the vendor to Free, and fires the expired email + SMS.
     # Runs daily at 00:30 UTC (matches SubscriptionEmailConfig.run_expire_old_hour default).
-    # "subscriptions.expire_old_subscriptions": {
-    #     "task": "subscriptions.expire_old_subscriptions",
-    #     "schedule": crontab(hour=0, minute=30),
-    # },
+    "subscriptions.expire_old_subscriptions": {
+        "task": "subscriptions.expire_old_subscriptions",
+        "schedule": crontab(hour=0, minute=30),
+    },
 }
 
 #SIMPLE JWT CONFIGURATION

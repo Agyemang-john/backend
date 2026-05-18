@@ -38,7 +38,7 @@ from .signup_serializers import VendorSignupSerializer
 from .hour_serializers import OpeningHourSerializer
 from .about_serializers import AboutSerializer
 from .payment_serializers import VendorPaymentMethodSerializer, PayoutSerializer
-from .product_serializers import ProductSerializer, ProductReviewSerializer
+from .product_serializers import ProductSerializer, ProductReviewSerializer, VendorProductListSerializer
 from .order_serializers import VendorOrderSerializer, OrderSerializer
 
 from core.serializers import VendorSerializer as VendorDetail, ProductReviewSerializer as ReviewDetail
@@ -561,7 +561,7 @@ class VendorSignupAPIView(APIView):
 class VendorDetailView(APIView):
     def get(self, request, slug):
         vendor     = get_object_or_404(Vendor, slug=slug)
-        cache_key  = f"vendor_metadata:{slug}"
+        cache_key  = f"vendor_metadata_v2:{slug}"
         cached_data = cache.get(cache_key)
 
         if not cached_data:
@@ -570,10 +570,21 @@ class VendorDetailView(APIView):
             today_operating_hours = OpeningHour.objects.filter(vendor=vendor, day=today).first()
             reviews_qs           = ProductReview.objects.filter(vendor=vendor, status=True)
             avg_rating           = reviews_qs.aggregate(avg=Avg('rating'))['avg'] or 0.0
+            review_count         = reviews_qs.count()
+            # Group half-star ratings into whole-star buckets:
+            # 1★ = 0.5–1.4, 2★ = 1.5–2.4, 3★ = 2.5–3.4, 4★ = 3.5–4.4, 5★ = 4.5–5.0
+            rating_distribution = {}
+            for star in range(1, 6):
+                low  = (star - 0.5) if star > 1 else 0.5
+                high = star + 0.4
+                rating_distribution[star] = reviews_qs.filter(
+                    rating__gte=low, rating__lte=high
+                ).count()
             cached_data = {
                 'vendor':                VendorDetail(vendor, context={'request': request}).data,
                 'average_rating':        round(avg_rating, 2),
-                'review_count':          reviews_qs.count(),
+                'review_count':          review_count,
+                'rating_distribution':   rating_distribution,
                 'opening_hours':         OpeningHourSerializer(opening_hours, many=True).data,
                 'today_operating_hours': OpeningHourSerializer(today_operating_hours).data,
             }
@@ -627,7 +638,7 @@ class MarkVendorViewedAPIView(APIView):
 class VendorProductsView(APIView):
     def get(self, request, slug):
         vendor    = get_object_or_404(Vendor, slug=slug)
-        PAGE_SIZE = 6
+        PAGE_SIZE = 8
         try:
             page = int(request.GET.get('page', 1))
         except (ValueError, TypeError):
@@ -644,7 +655,7 @@ class VendorProductsView(APIView):
         for product in paged:
             product_variants = Variants.objects.filter(product=product).select_related('color', 'size')
             products_data.append({
-                'product':        ProductSerializer(product, context={'request': request}).data,
+                'product':        VendorProductListSerializer(product, context={'request': request}).data,
                 'average_rating': product.avg_rating,
                 'review_count':   product.review_count,
                 'variants':       VariantsSerializer(product_variants, many=True, context={'request': request}).data,

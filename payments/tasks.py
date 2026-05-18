@@ -10,6 +10,7 @@ from decimal import Decimal
 from django.contrib.contenttypes.models import ContentType
 from notification.models import Notification
 from address.models import Address
+from . import email_tasks  # noqa: F401 — registers subscriptions.* task names with Celery
 
 logger = get_task_logger(__name__)
 

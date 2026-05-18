@@ -100,7 +100,7 @@ class ProductReviewSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ProductReview
-        fields = ['review', 'rating', 'product', 'user', 'date', 'product_image']  # Include 'user' as read-only
+        fields = ['id', 'review', 'rating', 'product', 'user', 'date', 'product_image']
         extra_kwargs = {'user': {'read_only': True}}
     
     def get_product_image(self, obj):
@@ -115,7 +115,7 @@ class ProductReviewSerializer(serializers.ModelSerializer):
         if ProductReview.objects.filter(user=user, product=product).exists():
             raise serializers.ValidationError("You have already reviewed this product.")
 
-        review = ProductReview.objects.create(user=user, **validated_data)
+        review = ProductReview.objects.create(user=user, vendor=product.vendor, **validated_data)
 
         # Notify the vendor about the new review
         try:

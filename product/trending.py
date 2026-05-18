@@ -80,7 +80,7 @@ def compute_all_trending_scores() -> int:
     # ── Signal 4: cart adds in last 7 days ───────────────────────────────────
     cart_7d: dict[int, int] = dict(
         CartItem.objects
-        .filter(added__gte=ago_24h - timedelta(days=6))
+        .filter(created_at__gte=ago_24h - timedelta(days=6))
         .values('product_id')
         .annotate(cnt=Count('id'))
         .values_list('product_id', 'cnt')

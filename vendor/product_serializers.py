@@ -2,6 +2,7 @@ from rest_framework import serializers
 from django.utils.text import slugify
 from product.models import Product, ProductImages, Variants, ProductDeliveryOption, DeliveryOption, Sub_Category, Brand, Color, Size
 from address.models import Country
+from decimal import Decimal
 import json
 
 # Helper serializers
@@ -304,3 +305,41 @@ class ProductReviewSerializer(serializers.ModelSerializer):
             # Build absolute URL for product_image
             representation['product_image'] = request.build_absolute_uri(representation['product_image'])
         return representation
+
+
+class VendorProductListSerializer(serializers.ModelSerializer):
+    """
+    Read-only serializer for the seller store products list.
+    Returns currency-converted prices based on the X-Currency request header.
+    """
+    sub_category = SubCategorySerializer(read_only=True)
+    currency = serializers.SerializerMethodField()
+    price = serializers.SerializerMethodField()
+    old_price = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = ['id', 'title', 'slug', 'sku', 'image', 'sub_category',
+                  'currency', 'price', 'old_price']
+
+    def _get_currency(self, obj):
+        request = self.context.get('request')
+        return request.headers.get('X-Currency', 'GHS') if request else 'GHS'
+
+    def _get_rate(self, currency):
+        from core.service import get_exchange_rates
+        rates = get_exchange_rates()
+        return Decimal(str(rates.get(currency, 1)))
+
+    def get_currency(self, obj):
+        return self._get_currency(obj)
+
+    def get_price(self, obj):
+        currency = self._get_currency(obj)
+        return round(obj.price * self._get_rate(currency), 2)
+
+    def get_old_price(self, obj):
+        if not obj.old_price:
+            return None
+        currency = self._get_currency(obj)
+        return round(obj.old_price * self._get_rate(currency), 2)
