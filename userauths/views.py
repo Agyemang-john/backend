@@ -15,7 +15,6 @@ from .custom_throttles import LoginThrottle
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from .tasks import send_otp
 from .vendor_serializers import VendorLoginSerializer
-from django.core.cache import cache
 from django.db.models import Q, F
 User = get_user_model()
 import time
@@ -212,98 +211,122 @@ class VendorTokenObtainPairView(TokenObtainPairView):
         serializer.is_valid(raise_exception=True)
         return Response({"detail": "OTP sent. Please verify to continue."}, status=200)
 
+import logging as _logging
+_otp_logger = _logging.getLogger('otp')
+
+
 class VendorOTPVerifyView(APIView):
     permission_classes = [AllowAny]
     throttle_classes = [LoginThrottle]
 
     def post(self, request, *args, **kwargs):
+        from .models import OTPRecord
         email_or_phone = request.data.get("email")
         otp = request.data.get("otp")
 
+        if not email_or_phone or not otp:
+            return Response(
+                {'detail': 'Email/phone and OTP are required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         try:
             user = User.objects.get(Q(email__iexact=email_or_phone) | Q(phone=email_or_phone))
-            if user.role != 'vendor':
-                return Response({'detail': 'OTP verification not required for this user.'}, status=status.HTTP_400_BAD_REQUEST)
-
-            cached_data = cache.get(f"otp_{user.id}")
-            if cached_data and 'otp' in cached_data and 'timestamp' in cached_data:
-                if str(cached_data['otp']) == otp and not otp_token_generator._is_token_expired(cached_data['timestamp']):
-                    cache.delete(f"otp_{user.id}")
-                    refresh = CustomVendorRefreshToken.for_user(user)
-                    access_token = str(refresh.access_token)
-                    refresh_token = str(refresh)
-
-                    # Register device session (jti is inside the refresh token payload)
-                    try:
-                        jti = refresh.payload.get('jti')
-                        if jti:
-                            register_session(user, jti, request, is_vendor=True)
-                    except Exception:
-                        pass
-
-                    response = Response({'detail': 'Login successful.'}, status=status.HTTP_200_OK)
-
-                    # Fire async activity tracking (login event + last_seen update)
-                    try:
-                        from vendor.tasks import log_vendor_activity
-                        from vendor.models import Vendor
-                        from django.core.cache import cache as dj_cache
-                        from django_redis import get_redis_connection
-                        vendor = Vendor.objects.filter(user=user).first()
-                        if vendor:
-                            ip = (
-                                request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
-                                or request.META.get('REMOTE_ADDR')
-                            )
-                            ua = request.META.get('HTTP_USER_AGENT', '')[:500]
-                            was_auto_closed = vendor.inactivity_auto_closed
-                            log_vendor_activity.delay(vendor.pk, 'login', ip, ua)
-                            Vendor.objects.filter(pk=vendor.pk).update(
-                                last_login_at=timezone.now(),
-                                last_seen_at=timezone.now(),
-                                total_login_count=vendor.total_login_count + 1,
-                                inactivity_auto_closed=False,
-                            )
-                            # Warm the middleware uid→vid cache and seed last_seen in Redis
-                            try:
-                                conn = get_redis_connection("default")
-                                conn.set(f"vendor:uid_vid:{user.id}", vendor.pk, ex=86400)
-                                conn.set(f"vendor:last_seen:{vendor.pk}", int(time.time()), ex=86400)
-                            except Exception:
-                                pass
-                            if was_auto_closed:
-                                log_vendor_activity.delay(vendor.pk, 'auto_reopen', ip, ua)
-                    except Exception:
-                        pass
-
-                    # if response.status_code == 200 and 'vendor_access' in response.data:
-                    response.set_cookie(
-                        settings.VENDOR_ACCESS_AUTH_COOKIE,
-                        access_token,
-                        max_age=settings.VENDOR_AUTH_ACCESS_MAX_AGE,
-                        path=settings.VENDOR_AUTH_COOKIE_PATH,
-                        secure=settings.VENDOR_AUTH_COOKIE_SECURE,
-                        httponly=settings.VENDOR_AUTH_COOKIE_HTTP_ONLY,
-                        samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
-                        domain=settings.VENDOR_AUTH_COOKIE_DOMAIN
-                    )
-                    response.set_cookie(
-                        settings.VENDOR_REFRESH_AUTH_COOKIE,
-                        refresh_token,
-                        max_age=settings.VENDOR_AUTH_REFRESH_MAX_AGE,
-                        path=settings.VENDOR_AUTH_COOKIE_PATH,
-                        secure=settings.VENDOR_AUTH_COOKIE_SECURE,
-                        httponly=settings.VENDOR_AUTH_COOKIE_HTTP_ONLY,
-                        samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
-                        domain=settings.VENDOR_AUTH_COOKIE_DOMAIN
-                    )
-                    return response
-                else:
-                    return Response({'detail': 'Invalid or expired OTP.'}, status=status.HTTP_400_BAD_REQUEST)
-            else:
-                return Response({'detail': 'Invalid or expired OTP.'}, status=status.HTTP_400_BAD_REQUEST)
         except User.DoesNotExist:
             return Response({'detail': 'User not found.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if user.role != 'vendor':
+            return Response(
+                {'detail': 'OTP verification not required for this user.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Fetch the most recent unused, non-expired OTP record from DB
+        otp_record = OTPRecord.objects.filter(
+            user=user,
+            is_used=False,
+            expires_at__gt=timezone.now(),
+        ).order_by('-created_at').first()
+
+        if otp_record is None:
+            _otp_logger.warning("OTP verify: no valid record for user=%s", user.pk)
+            return Response({'detail': 'Invalid or expired OTP.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not otp_record.verify(otp):
+            _otp_logger.warning(
+                "OTP verify: mismatch or expired for user=%s (expired=%s)",
+                user.pk, otp_record.is_expired(),
+            )
+            return Response({'detail': 'Invalid or expired OTP.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # OTP is valid — issue tokens
+        _otp_logger.info("OTP verify: success for user=%s", user.pk)
+        refresh = CustomVendorRefreshToken.for_user(user)
+        access_token = str(refresh.access_token)
+        refresh_token = str(refresh)
+
+        # Register device session
+        try:
+            jti = refresh.payload.get('jti')
+            if jti:
+                register_session(user, jti, request, is_vendor=True)
+        except Exception:
+            pass
+
+        response = Response({'detail': 'Login successful.'}, status=status.HTTP_200_OK)
+
+        # Fire async activity tracking (login event + last_seen update)
+        try:
+            from vendor.tasks import log_vendor_activity
+            from vendor.models import Vendor
+            from django_redis import get_redis_connection
+            vendor = Vendor.objects.filter(user=user).first()
+            if vendor:
+                ip = (
+                    request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
+                    or request.META.get('REMOTE_ADDR')
+                )
+                ua = request.META.get('HTTP_USER_AGENT', '')[:500]
+                was_auto_closed = vendor.inactivity_auto_closed
+                log_vendor_activity.delay(vendor.pk, 'login', ip, ua)
+                Vendor.objects.filter(pk=vendor.pk).update(
+                    last_login_at=timezone.now(),
+                    last_seen_at=timezone.now(),
+                    total_login_count=vendor.total_login_count + 1,
+                    inactivity_auto_closed=False,
+                )
+                try:
+                    conn = get_redis_connection("default")
+                    conn.set(f"vendor:uid_vid:{user.id}", vendor.pk, ex=86400)
+                    conn.set(f"vendor:last_seen:{vendor.pk}", int(time.time()), ex=86400)
+                except Exception:
+                    pass
+                if was_auto_closed:
+                    log_vendor_activity.delay(vendor.pk, 'auto_reopen', ip, ua)
+        except Exception:
+            pass
+
+        response.set_cookie(
+            settings.VENDOR_ACCESS_AUTH_COOKIE,
+            access_token,
+            max_age=settings.VENDOR_AUTH_ACCESS_MAX_AGE,
+            path=settings.VENDOR_AUTH_COOKIE_PATH,
+            secure=settings.VENDOR_AUTH_COOKIE_SECURE,
+            httponly=settings.VENDOR_AUTH_COOKIE_HTTP_ONLY,
+            samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
+            domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
+        )
+        response.set_cookie(
+            settings.VENDOR_REFRESH_AUTH_COOKIE,
+            refresh_token,
+            max_age=settings.VENDOR_AUTH_REFRESH_MAX_AGE,
+            path=settings.VENDOR_AUTH_COOKIE_PATH,
+            secure=settings.VENDOR_AUTH_COOKIE_SECURE,
+            httponly=settings.VENDOR_AUTH_COOKIE_HTTP_ONLY,
+            samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
+            domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
+        )
+        return response
 
 class VendorOTPResendView(APIView):
     permission_classes = [AllowAny]
@@ -317,12 +340,13 @@ class VendorOTPResendView(APIView):
             user = User.objects.get(Q(email__iexact=email_or_phone) | Q(phone=email_or_phone))
             if user.role != 'vendor':
                 return Response({'detail': 'OTP verification not required for this user.'}, status=status.HTTP_400_BAD_REQUEST)
+            from .models import OTPRecord
             otp = otp_token_generator.generate_otp()
-            cache.set(f"otp_{user.id}", {'otp': otp, 'timestamp': time.time()}, timeout=600)
-            # Send OTP via Celery task (Arkesel for SMS, Django for email)
+            OTPRecord.create_for_user(user, otp)
             recipient = user.email if '@' in email_or_phone else user.phone
             is_email = '@' in email_or_phone
             send_otp.delay(recipient, otp, is_email)
+            _otp_logger.info("OTP resend: new OTP issued for user=%s", user.pk)
             return Response({'detail': 'OTP sent to your email or phone.'}, status=status.HTTP_200_OK)
         except User.DoesNotExist:
             return Response({'detail': 'User not found.'}, status=status.HTTP_400_BAD_REQUEST)

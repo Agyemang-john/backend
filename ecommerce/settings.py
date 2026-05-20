@@ -352,6 +352,11 @@ CELERY_ENABLE_UTC = True
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 
 CELERY_BEAT_SCHEDULE = {
+    # Purge expired / used OTP records every 30 minutes
+    "cleanup-expired-otps": {
+        "task": "userauths.tasks.cleanup_expired_otps",
+        "schedule": 1800,  # 30 minutes
+    },
     # Flush Redis view-count buffers → DB every 3 minutes
     "flush-view-counts": {
         "task": "product.tasks.flush_view_counts",

@@ -201,6 +201,57 @@ class MailMessage(models.Model):
         return self.title
 
 
+class OTPRecord(models.Model):
+    """
+    Database-backed OTP storage.
+
+    Replaces Redis cache for OTP persistence so that transient Redis failures
+    (connection pool exhaustion, auth errors, eviction under memory pressure)
+    never silently break the login flow.  The database is ACID-compliant and
+    will never return None for a record that was just inserted.
+    """
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='otp_records',
+    )
+    otp = models.CharField(max_length=10)       # stored as string — no int/str comparison risk
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    is_used = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'is_used', 'expires_at']),
+        ]
+
+    def is_expired(self) -> bool:
+        return timezone.now() > self.expires_at
+
+    def verify(self, submitted_otp) -> bool:
+        """Check the OTP and mark it used atomically. Returns True on success."""
+        if self.is_used or self.is_expired():
+            return False
+        if self.otp == str(submitted_otp).strip():
+            self.is_used = True
+            self.save(update_fields=['is_used'])
+            return True
+        return False
+
+    @classmethod
+    def create_for_user(cls, user, otp_value, ttl_minutes: int = 10):
+        """Invalidate any pending OTPs for this user then create a fresh one."""
+        from datetime import timedelta
+        cls.objects.filter(user=user, is_used=False).delete()
+        return cls.objects.create(
+            user=user,
+            otp=str(otp_value),
+            expires_at=timezone.now() + timedelta(minutes=ttl_minutes),
+        )
+
+
 class UserSession(models.Model):
     """One row per active login session. session_key = jti of the refresh token."""
 

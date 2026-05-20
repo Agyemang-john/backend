@@ -59,6 +59,23 @@ def send_otp(recipient, otp, is_email=True):
             raise
 
 
+@shared_task(ignore_result=True)
+def cleanup_expired_otps():
+    """
+    Delete OTPRecord rows that are expired or already used.
+    Keeps the table small. Runs every 30 minutes via Celery Beat.
+    """
+    from django.utils import timezone
+    from userauths.models import OTPRecord
+    deleted, _ = OTPRecord.objects.filter(
+        expires_at__lt=timezone.now()
+    ).delete()
+    used_deleted, _ = OTPRecord.objects.filter(is_used=True).delete()
+    total = deleted + used_deleted
+    if total:
+        logger.info("cleanup_expired_otps: removed %d stale OTP records", total)
+
+
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
 def send_activation_email_task(self, user_data, activation_link):
     subject = "Activate Your Account"

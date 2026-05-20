@@ -1,5 +1,4 @@
 from rest_framework import serializers
-from django.core.cache import cache
 from django.core.validators import validate_email
 from django.core.exceptions import ValidationError
 from django.utils import timezone
@@ -9,10 +8,8 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .models import User
 from datetime import timedelta
 import random
-import time
 
-from .models import User
-from .tasks import send_otp  # assuming you use Celery for OTP sending
+from .tasks import send_otp
 class OTPTokenGenerator:
     token_ttl = timedelta(minutes=10)
 
@@ -97,9 +94,10 @@ class VendorLoginSerializer(serializers.Serializer):
         user.lockout_until = None
         user.save(update_fields=["failed_login_attempts", "lockout_until"])
 
-        # OTP generation — store Unix float so _is_token_expired works reliably
+        # OTP generation — stored in DB so Redis failures never break login
         otp = otp_token_generator.generate_otp()
-        cache.set(f"otp_{user.id}", {'otp': otp, 'timestamp': time.time()}, 600)
+        from .models import OTPRecord
+        OTPRecord.create_for_user(user, otp)
 
         recipient = user.email if is_email else user.phone
         send_otp.delay(recipient, otp, is_email)
