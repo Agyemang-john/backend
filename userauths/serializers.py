@@ -158,6 +158,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         refresh["role"] = user.role
         refresh["is_active"] = user.is_active
         refresh["is_staff"] = user.is_staff
+        refresh["token_version"] = user.token_version
         return {
             "refresh": str(refresh),
             "access": str(refresh.access_token),
@@ -170,31 +171,70 @@ class CustomerCustomTokenRefreshSerializer(TokenRefreshSerializer):
     refresh = serializers.CharField(required=False, write_only=True)
 
     def validate(self, attrs):
-        # 1. Get token from cookie if not in body
         refresh_token = attrs.get("refresh") or self.context["request"].COOKIES.get("refresh")
         if not refresh_token:
             raise serializers.ValidationError("No refresh token found")
 
         attrs["refresh"] = refresh_token
+
+        # Decode the incoming refresh token for pre-validation
+        from rest_framework_simplejwt.tokens import RefreshToken as _RT
+        try:
+            old_refresh = _RT(refresh_token)
+        except Exception:
+            raise serializers.ValidationError("Invalid refresh token.")
+
+        user_id = old_refresh.payload.get("user_id")
+        jti = old_refresh.payload.get("jti")
+
+        if user_id:
+            try:
+                user = User.objects.only(
+                    "role", "is_active", "is_staff", "token_version"
+                ).get(id=user_id)
+            except User.DoesNotExist:
+                raise serializers.ValidationError("User not found.")
+
+            # token_version check — catches "logout all devices"
+            token_version = old_refresh.payload.get("token_version")
+            if token_version is not None and token_version != user.token_version:
+                raise serializers.ValidationError(
+                    "Your session was revoked. Please log in again."
+                )
+
+            # Session existence check (graceful migration: skip if user has no sessions yet)
+            if jti:
+                from .models import UserSession
+                session_exists = UserSession.objects.filter(
+                    session_key=jti, is_vendor_session=False
+                ).exists()
+                if not session_exists:
+                    has_any = UserSession.objects.filter(
+                        user_id=user_id, is_vendor_session=False
+                    ).exists()
+                    if has_any:
+                        raise serializers.ValidationError(
+                            "Session revoked. Please log in again."
+                        )
+                    # Migration path: first refresh after feature deploy — create session
+                    from .session_utils import register_session
+                    register_session(user, jti, self.context["request"], is_vendor=False)
+                else:
+                    from .session_utils import touch_session
+                    touch_session(jti)
+
         data = super().validate(attrs)
 
-        refresh = getattr(self, "token", None)
-        if not refresh:
-            from rest_framework_simplejwt.tokens import RefreshToken
-            refresh = RefreshToken(refresh_token)
-
-        # use original token as fallback
-
+        # Re-add custom claims to the new access token
+        refresh = _RT(refresh_token)
         access = refresh.access_token
-
-        # 4. Add your custom claims
-        user_id = refresh.payload.get("user_id")
         if user_id:
             try:
                 user = User.objects.only("role", "is_active", "is_staff").get(id=user_id)
                 access["role"] = user.role or "customer"
                 access["is_active"] = user.is_active
                 access["is_staff"] = user.is_staff
+                access["token_version"] = user.token_version
             except User.DoesNotExist:
                 pass
 

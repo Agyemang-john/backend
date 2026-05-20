@@ -432,6 +432,73 @@ def track_subcategory_view(request, subcategory_id: int) -> None:
         buffer_subcategory_view_count(subcategory_id)
 
 
+# ── Category view tracking ────────────────────────────────────────────────────
+
+_MAINCAT_FLUSH_LOCK_KEY = "maincat:views:flush:lock"
+
+
+def buffer_category_view_count(category_id: int) -> None:
+    """
+    Increment the Redis category view-count buffer.
+    Falls back to a direct DB update if Redis is unavailable.
+    The Celery Beat task flush_category_view_counts() drains this buffer every 3 min.
+    """
+    conn = _get_redis()
+    if conn is None:
+        try:
+            from django.db.models import F
+            from product.models import Category
+            Category.objects.filter(id=category_id).update(views=F('views') + 1)
+        except Exception:
+            logger.error("buffer_category_view_count: DB fallback failed for category %s", category_id)
+        return
+    try:
+        pipe = conn.pipeline()
+        pipe.incr(f"maincat:views:buf:{category_id}")
+        pipe.expire(f"maincat:views:buf:{category_id}", VIEW_BUF_TTL)
+        pipe.set(_MAINCAT_FLUSH_LOCK_KEY, 1, nx=True, ex=FLUSH_LOCK_TTL)
+        results = pipe.execute()
+        flush_needed = bool(results[2])
+    except Exception:
+        logger.warning("buffer_category_view_count: Redis error for category %s", category_id)
+        return
+
+    if flush_needed:
+        try:
+            from product.tasks import flush_category_view_counts
+            flush_category_view_counts.apply_async(countdown=FLUSH_LOCK_TTL)
+        except Exception:
+            logger.warning("buffer_category_view_count: could not schedule flush_category_view_counts")
+
+
+def track_category_view(request, category_id: int) -> None:
+    """
+    Track one Category page visit. Deduped per visitor per 24 h via Redis SET NX.
+    Non-bot views are buffered in Redis and flushed to Category.views every 3 min.
+    Bots are silently skipped — they don't influence engagement scores.
+    """
+    visitor_key = _get_visitor_id(request)
+    if visitor_key is None:
+        return
+
+    conn = _get_redis()
+    if conn is None:
+        return
+
+    dedup_key = f"maincat:view:dedup:{visitor_key}:{category_id}"
+    try:
+        is_new = bool(conn.set(dedup_key, 1, nx=True, ex=VIEW_DEDUP_TTL))
+    except Exception:
+        logger.warning("track_category_view: dedup Redis error category=%s", category_id)
+        return
+
+    if not is_new:
+        return  # same visitor within 24 h — skip
+
+    if not detect_bot(request):
+        buffer_category_view_count(category_id)
+
+
 # ── GeoIP ────────────────────────────────────────────────────────────────────
 
 def get_region_with_geoip(ip):

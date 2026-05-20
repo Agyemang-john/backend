@@ -1,7 +1,7 @@
 import random
+import time
 from datetime import timedelta
 from django.core.cache import cache
-from django.utils import timezone
 from django.utils.http import urlsafe_base64_encode
 from django.contrib.auth.tokens import default_token_generator
 from django.utils.encoding import force_bytes
@@ -11,13 +11,14 @@ class OTPTokenGenerator:
 
     def generate_otp(self):
         return random.randint(10000, 99999)
-    
-    def _is_token_expired(self, timestamp):
-        expiration_time = self._num_minutes(self.token_ttl)
-        return timezone.now() > (timestamp + timedelta(minutes=expiration_time))
 
-    def _num_minutes(self, td):
-        return td.days * 24 * 60 + td.seconds // 60 + td.microseconds / 60e6
+    def _is_token_expired(self, timestamp):
+        """
+        timestamp must be a Unix float (time.time()).
+        Returns True if the OTP is older than token_ttl.
+        """
+        ttl_seconds = self.token_ttl.total_seconds()
+        return time.time() > (timestamp + ttl_seconds)
 
 otp_token_generator = OTPTokenGenerator()
 

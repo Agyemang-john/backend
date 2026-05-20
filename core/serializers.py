@@ -114,6 +114,34 @@ class TopEngagedCategorySerializer(serializers.ModelSerializer):
         return SubCategorySerializer(subcategories, many=True, context=self.context).data
 
 
+class PopularCategorySerializer(serializers.ModelSerializer):
+    """
+    Lightweight card serializer for the homepage Popular Categories grid.
+    Returns image URLs suitable for display in a 4-column grid.
+    """
+    image = serializers.SerializerMethodField()
+    main_image = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Category
+        fields = ['id', 'title', 'slug', 'image', 'main_image', 'engagement_score']
+
+    def _build_url(self, request, image_field):
+        if not image_field:
+            return None
+        try:
+            url = image_field.url
+            return request.build_absolute_uri(url) if request else url
+        except Exception:
+            return None
+
+    def get_image(self, obj):
+        return self._build_url(self.context.get('request'), obj.image)
+
+    def get_main_image(self, obj):
+        return self._build_url(self.context.get('request'), obj.main_image)
+
+
 class CategoryWithSubcategoriesSerializer(serializers.ModelSerializer):
     image = serializers.ImageField(use_url=True)
     subcategories = serializers.SerializerMethodField()
@@ -129,7 +157,7 @@ class CategoryWithSubcategoriesSerializer(serializers.ModelSerializer):
     
     def get_products(self, obj):
         # Get all published products under this category
-        products = list(Product.objects.filter(sub_category__category=obj, status='published'))
+        products = list(Product.published.filter(sub_category__category=obj))
 
         # Shuffle the list
         random.shuffle(products)

@@ -78,6 +78,13 @@ class Notification(models.Model):
         ("support_reply", "Support Ticket Reply"),
         ("verification_update", "Account Verification Update"),
         ("subscription_reminder", "Subscription Expiring Soon"),
+
+        # ── Inactivity / Activity ──
+        ("vendor_inactivity_warning", "Inactivity Warning"),
+        ("vendor_auto_closed",        "Shop Auto-Closed (Inactivity)"),
+        ("vendor_shop_reopened",      "Shop Reopened"),
+        ("vendor_shop_paused",        "Shop Paused by Seller"),
+        ("vendor_shop_resumed",       "Shop Resumed by Seller"),
     ]
 
     recipient = models.ForeignKey(

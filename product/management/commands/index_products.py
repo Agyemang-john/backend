@@ -103,8 +103,8 @@ class Command(BaseCommand):
 
     def index_products(self, es):
         try:
-            # Only index published products
-            products = Product.objects.filter(status="published")
+            # Only index published products from active vendors
+            products = Product.published.all()
             total = products.count()
             success = 0
 

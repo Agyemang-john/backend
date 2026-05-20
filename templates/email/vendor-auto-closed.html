@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Your Negromart Shop Has Been Temporarily Closed</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #f4f4f4; margin: 0; padding: 0; }
+    .wrapper { max-width: 600px; margin: 30px auto; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,.1); }
+    .header { background: #37474f; padding: 28px 32px; text-align: center; }
+    .header h1 { color: #fff; margin: 0; font-size: 22px; }
+    .body { padding: 32px; color: #333; }
+    .body p { line-height: 1.7; margin: 0 0 16px; }
+    .notice { background: #eceff1; border-left: 4px solid #37474f; padding: 16px 20px; border-radius: 4px; margin: 20px 0; }
+    .cta { text-align: center; margin: 28px 0; }
+    .cta a { background: #1976d2; color: #fff; padding: 14px 32px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 16px; display: inline-block; }
+    .footer { background: #f9f9f9; padding: 20px 32px; text-align: center; color: #888; font-size: 13px; border-top: 1px solid #eee; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="header">
+      <h1>🔒 Your Shop Has Been Temporarily Closed</h1>
+    </div>
+    <div class="body">
+      <p>Hi <strong>{{ vendor_name }}</strong>,</p>
+      <p>
+        Your Negromart shop has been <strong>temporarily closed</strong> because we haven't detected
+        any activity in the last <strong>{{ days_inactive }} day(s)</strong>.
+      </p>
+      <div class="notice">
+        <strong>What does this mean?</strong><br/>
+        Your shop is currently hidden from customers. Your products, orders, settings,
+        and payout history are all safely stored — nothing has been deleted.
+      </div>
+      <p>
+        <strong>To reopen your shop instantly</strong>, simply log back in to your seller dashboard.
+        Your shop will be visible to customers again immediately after you log in.
+      </p>
+      <div class="cta">
+        <a href="{{ login_url }}">Reopen My Shop →</a>
+      </div>
+      <p style="font-size:13px; color:#666;">
+        If you believe this is a mistake or need assistance, contact us at
+        <a href="mailto:support@negromart.com">support@negromart.com</a>.
+      </p>
+    </div>
+    <div class="footer">
+      <p>© Negromart &bull; <a href="mailto:support@negromart.com">support@negromart.com</a></p>
+    </div>
+  </div>
+</body>
+</html>

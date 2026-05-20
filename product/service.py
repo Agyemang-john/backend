@@ -44,12 +44,12 @@ def get_recommended_products(request):
         trending = CartItem.objects.filter(
             created_at__gte=last_week
         ).values('product_id').annotate(count=Count('product_id')).order_by('-count')[:10]
-        return Product.objects.filter(id__in=[t['product_id'] for t in trending])
+        return Product.published.filter(id__in=[t['product_id'] for t in trending])
 
     # Category-based recommendations from current cart
     categories = Product.objects.filter(id__in=cart_product_ids).values_list('sub_category', flat=True).distinct()
     if categories:
-        category_recs = Product.objects.filter(
+        category_recs = Product.published.filter(
             sub_category__in=categories
         ).exclude(id__in=cart_product_ids)[:10]
         recommended_ids.update(category_recs.values_list('id', flat=True))
@@ -74,14 +74,14 @@ def get_recommended_products(request):
             .values('product_id').annotate(count=Count('product_id')).order_by('-count')[:10]
         recommended_ids.update([t['product_id'] for t in trending])
 
-    return Product.objects.filter(id__in=list(recommended_ids)[:10]).distinct()
+    return Product.published.filter(id__in=list(recommended_ids)[:10]).distinct()
 
 
 def get_trending_products():
     last_week = timezone.now() - timedelta(days=7)
     trending = CartItem.objects.filter(created_at__gte=last_week)\
         .values('product_id').annotate(count=Count('product_id')).order_by('-count')[:10]
-    return Product.objects.filter(id__in=[t['product_id'] for t in trending])
+    return Product.published.filter(id__in=[t['product_id'] for t in trending])
 
 
 def get_cart_based_recommendations(product_id):
@@ -89,7 +89,7 @@ def get_cart_based_recommendations(product_id):
     related = CartItem.objects.filter(cart_id__in=related_cart_ids)\
         .exclude(product_id=product_id)\
         .values('product_id').annotate(freq=Count('product_id')).order_by('-freq')[:10]
-    return Product.objects.filter(id__in=[r['product_id'] for r in related])
+    return Product.published.filter(id__in=[r['product_id'] for r in related])
 
 
 def get_fbt_recommendations(cart_product_ids):
@@ -102,4 +102,4 @@ def get_fbt_recommendations(cart_product_ids):
     counter = Counter(recommended)
     top_ids = [item[0] for item in counter.most_common(10)]
     final_ids = [pid for pid in top_ids if pid not in cart_product_ids]
-    return Product.objects.filter(id__in=final_ids)
+    return Product.published.filter(id__in=final_ids)

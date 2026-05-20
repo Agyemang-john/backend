@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Your Negromart Shop Is Live Again!</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #f4f4f4; margin: 0; padding: 0; }
+    .wrapper { max-width: 600px; margin: 30px auto; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,.1); }
+    .header { background: #2e7d32; padding: 28px 32px; text-align: center; }
+    .header h1 { color: #fff; margin: 0; font-size: 22px; }
+    .body { padding: 32px; color: #333; }
+    .body p { line-height: 1.7; margin: 0 0 16px; }
+    .notice { background: #f1f8e9; border-left: 4px solid #2e7d32; padding: 16px 20px; border-radius: 4px; margin: 20px 0; }
+    .effects { background: #f9f9f9; border-radius: 6px; padding: 16px 20px; margin: 16px 0; }
+    .effects ul { margin: 8px 0 0; padding-left: 20px; }
+    .effects li { margin-bottom: 6px; color: #555; font-size: 14px; line-height: 1.6; }
+    .cta { text-align: center; margin: 28px 0; }
+    .cta a { background: #2e7d32; color: #fff; padding: 14px 32px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 16px; display: inline-block; }
+    .footer { background: #f9f9f9; padding: 20px 32px; text-align: center; color: #888; font-size: 13px; border-top: 1px solid #eee; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="header">
+      <h1>🟢 Your Shop Is Live Again!</h1>
+    </div>
+    <div class="body">
+      <p>Hi <strong>{{ vendor_name }}</strong>,</p>
+      <p>
+        Great news — your Negromart shop is back online and visible to customers right now.
+      </p>
+      <div class="notice">
+        <strong>Your shop is now live:</strong>
+      </div>
+      <div class="effects">
+        <ul>
+          <li>All your published products are visible in search and category listings.</li>
+          <li>Customers can add your items to their cart, wishlist, and place orders.</li>
+          <li>Your store page is accessible to all shoppers on Negromart.</li>
+        </ul>
+      </div>
+      <p>
+        Head to your dashboard to check your latest orders and keep your store running smoothly.
+      </p>
+      <div class="cta">
+        <a href="{{ login_url }}">Go to My Dashboard →</a>
+      </div>
+    </div>
+    <div class="footer">
+      <p>© Negromart &bull; <a href="mailto:support@negromart.com">support@negromart.com</a></p>
+    </div>
+  </div>
+</body>
+</html>

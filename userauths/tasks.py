@@ -3,11 +3,17 @@ from django.core.mail import send_mail, EmailMultiAlternatives
 from django.template.loader import render_to_string
 from django.conf import settings
 import logging
-# from arkesel_python import ArkeselSMS
-from userauths.arkesel_client import ArkeselSMS
-sms_client = ArkeselSMS()
 
 logger = logging.getLogger('otp')
+
+_sms_client = None
+
+def _get_sms_client():
+    global _sms_client
+    if _sms_client is None:
+        from userauths.arkesel_client import ArkeselSMS
+        _sms_client = ArkeselSMS()
+    return _sms_client
 
 
 @shared_task(max_retries=3, retry_backoff=True)
@@ -38,7 +44,7 @@ def send_otp(recipient, otp, is_email=True):
             raise
     else:
         try:
-            response = sms_client.send_sms(
+            response = _get_sms_client().send_sms(
                 sender=settings.ARKESEL_SENDER,
                 message=f'Your OTP is: {otp}. It expires in 10 minutes.',
                 recipients=[recipient],

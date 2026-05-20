@@ -104,7 +104,11 @@ class Sub_Category(models.Model):
 
 class PublishedManager(models.Manager):
     def get_queryset(self):
-        return super().get_queryset().filter(status='published')
+        return super().get_queryset().filter(
+            status='published',
+            vendor__shop_paused=False,
+            vendor__is_suspended=False,
+        )
 
 def vendor_directory_path(instance, filename):
     return 'vendors/vendor_{0}/{1}'.format(instance.vendor.id, filename)
@@ -717,7 +721,7 @@ class Collection(models.Model):
                 is_active=True, start_time__lte=now, end_time__gte=now
             ).values_list('product_id', flat=True)
             return Product.published.filter(id__in=ids)
-        return self.products.filter(status='published')
+        return self.products.filter(status='published', vendor__shop_paused=False, vendor__is_suspended=False)
 
 
 ############################################################

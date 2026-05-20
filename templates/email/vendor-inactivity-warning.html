@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>{% if urgent %}Action Required{% else %}Heads Up{% endif %}: Your Negromart Shop</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #f4f4f4; margin: 0; padding: 0; }
+    .wrapper { max-width: 600px; margin: 30px auto; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,.1); }
+    .header { background: {% if urgent %}#d32f2f{% else %}#f57c00{% endif %}; padding: 28px 32px; text-align: center; }
+    .header h1 { color: #fff; margin: 0; font-size: 22px; }
+    .body { padding: 32px; color: #333; }
+    .body p { line-height: 1.7; margin: 0 0 16px; }
+    .countdown { background: {% if urgent %}#ffebee{% else %}#fff3e0{% endif %}; border-left: 4px solid {% if urgent %}#d32f2f{% else %}#f57c00{% endif %}; padding: 16px 20px; border-radius: 4px; margin: 20px 0; font-size: 18px; font-weight: bold; color: {% if urgent %}#c62828{% else %}#e65100{% endif %}; }
+    .cta { text-align: center; margin: 28px 0; }
+    .cta a { background: #1976d2; color: #fff; padding: 14px 32px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 16px; display: inline-block; }
+    .footer { background: #f9f9f9; padding: 20px 32px; text-align: center; color: #888; font-size: 13px; border-top: 1px solid #eee; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="header">
+      <h1>{% if urgent %}⚠️ Urgent: Shop Closure Imminent{% else %}Heads Up: Inactivity Notice{% endif %}</h1>
+    </div>
+    <div class="body">
+      <p>Hi <strong>{{ vendor_name }}</strong>,</p>
+      <p>
+        We noticed that your Negromart shop has been inactive for <strong>{{ days_inactive }} day(s)</strong>.
+        To keep your shop visible to customers, you must log in at least once every
+        <strong>{{ inactivity_days }} days</strong>.
+      </p>
+      <div class="countdown">
+        ⏳ {{ days_left }} day(s) remaining before your shop is automatically closed.
+      </div>
+      <p>
+        Logging in takes just a few seconds and instantly resets the inactivity timer.
+        Your products, orders, and settings will all remain intact.
+      </p>
+      <div class="cta">
+        <a href="{{ login_url }}">Log In Now →</a>
+      </div>
+      <p style="font-size:13px; color:#666;">
+        If your shop is automatically closed, it will reopen as soon as you log back in.
+        No data will be lost.
+      </p>
+    </div>
+    <div class="footer">
+      <p>© Negromart &bull; <a href="mailto:support@negromart.com">support@negromart.com</a></p>
+    </div>
+  </div>
+</body>
+</html>

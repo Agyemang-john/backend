@@ -18,6 +18,7 @@ from PIL import Image
 from io import BytesIO
 from rest_framework_simplejwt.tokens import RefreshToken
 import re
+import uuid
 
 ROLE_CHOICES = (
     ('vendor', 'Vendor'),
@@ -85,7 +86,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_superuser = models.BooleanField(default=False)
     failed_login_attempts = models.PositiveIntegerField(default=0)
     lockout_until = models.DateTimeField(null=True, blank=True)
-
+    token_version = models.PositiveIntegerField(default=0)
 
     auth_provider = models.CharField(max_length=50, default=AUTH_PROVIDER.get('email'))
 
@@ -198,6 +199,42 @@ class MailMessage(models.Model):
 
     def __str__(self):
         return self.title
+
+
+class UserSession(models.Model):
+    """One row per active login session. session_key = jti of the refresh token."""
+
+    DEVICE_CHOICES = [
+        ('desktop', 'Desktop'),
+        ('mobile', 'Mobile'),
+        ('tablet', 'Tablet'),
+        ('unknown', 'Unknown'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        User,
+        related_name='sessions',
+        on_delete=models.CASCADE,
+    )
+    session_key = models.CharField(max_length=128, unique=True, db_index=True)
+    device_type = models.CharField(max_length=10, choices=DEVICE_CHOICES, default='unknown')
+    device_name = models.CharField(max_length=200, default='Unknown Device')
+    browser = models.CharField(max_length=100, blank=True)
+    os = models.CharField(max_length=100, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    is_vendor_session = models.BooleanField(default=False)
+    last_activity = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-last_activity']
+        indexes = [
+            models.Index(fields=['user', 'is_vendor_session']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} — {self.device_name} ({self.ip_address})"
 
 
 

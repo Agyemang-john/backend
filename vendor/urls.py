@@ -34,6 +34,10 @@ from .views import (
     TrackingEventAddAPIView,
     MarkVendorViewedAPIView,
     StoreViewAnalyticsView,
+    VendorHeartbeatAPIView,
+    VendorActivityLogAPIView,
+    VendorShopStatusToggleAPIView,
+    VendorNotificationPrefsView,
 )
 
 from vendor.bulk_upload_views import (
@@ -90,6 +94,16 @@ urlpatterns = [
     path('engagement/', EngagementView.as_view(), name='engagement'),
     path('store-views/', StoreViewAnalyticsView.as_view(), name='store-view-analytics'),
     path('delivery-performance/', DeliveryPerformanceView.as_view(), name='delivery-performance'),
+
+    # Shop on/off toggle (seller-controlled)
+    path('shop/status/', VendorShopStatusToggleAPIView.as_view(), name='vendor-shop-status'),
+
+    # Notification preferences
+    path('notification-preferences/', VendorNotificationPrefsView.as_view(), name='vendor-notification-prefs'),
+
+    # Activity tracking
+    path('activity/heartbeat/', VendorHeartbeatAPIView.as_view(), name='vendor-heartbeat'),
+    path('activity/log/', VendorActivityLogAPIView.as_view(), name='vendor-activity-log'),
 
     path('seller-detail/mark-viewed/', MarkVendorViewedAPIView.as_view(), name='vendor-mark-viewed'),
     path('seller-detail/<slug:slug>/', VendorDetailView.as_view(), name='vendor-detail'),

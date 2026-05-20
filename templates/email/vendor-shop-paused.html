@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Your Negromart Shop Has Been Paused</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #f4f4f4; margin: 0; padding: 0; }
+    .wrapper { max-width: 600px; margin: 30px auto; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,.1); }
+    .header { background: #f57c00; padding: 28px 32px; text-align: center; }
+    .header h1 { color: #fff; margin: 0; font-size: 22px; }
+    .body { padding: 32px; color: #333; }
+    .body p { line-height: 1.7; margin: 0 0 16px; }
+    .notice { background: #fff8e1; border-left: 4px solid #f57c00; padding: 16px 20px; border-radius: 4px; margin: 20px 0; }
+    .effects { background: #f9f9f9; border-radius: 6px; padding: 16px 20px; margin: 16px 0; }
+    .effects ul { margin: 8px 0 0; padding-left: 20px; }
+    .effects li { margin-bottom: 6px; color: #555; font-size: 14px; line-height: 1.6; }
+    .cta { text-align: center; margin: 28px 0; }
+    .cta a { background: #1976d2; color: #fff; padding: 14px 32px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 16px; display: inline-block; }
+    .footer { background: #f9f9f9; padding: 20px 32px; text-align: center; color: #888; font-size: 13px; border-top: 1px solid #eee; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="header">
+      <h1>⏸ Your Shop Has Been Paused</h1>
+    </div>
+    <div class="body">
+      <p>Hi <strong>{{ vendor_name }}</strong>,</p>
+      <p>
+        You have successfully paused your Negromart shop. Your shop is now temporarily
+        hidden from customers.
+      </p>
+      <div class="notice">
+        <strong>While your shop is paused:</strong>
+      </div>
+      <div class="effects">
+        <ul>
+          <li>Your products will not appear in search results or category listings.</li>
+          <li>Customers cannot add your items to their cart, wishlist, or place orders.</li>
+          <li>Your existing orders, payout history, and product catalogue are all untouched.</li>
+        </ul>
+      </div>
+      <p>
+        Whenever you are ready to sell again, simply log in to your seller dashboard
+        and toggle your shop back to <strong>Live</strong> — everything goes live instantly.
+      </p>
+      <div class="cta">
+        <a href="{{ login_url }}">Go to My Dashboard →</a>
+      </div>
+      <p style="font-size:13px; color:#666;">
+        If you did not pause your shop or have any concerns, please contact us at
+        <a href="mailto:support@negromart.com">support@negromart.com</a>.
+      </p>
+    </div>
+    <div class="footer">
+      <p>© Negromart &bull; <a href="mailto:support@negromart.com">support@negromart.com</a></p>
+    </div>
+  </div>
+</body>
+</html>

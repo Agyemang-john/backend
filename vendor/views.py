@@ -1,6 +1,7 @@
 # vendor/views.py
 
 import json
+from django.conf import settings
 from django.core.cache import cache
 from datetime import date
 from django.shortcuts import get_object_or_404
@@ -17,6 +18,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.exceptions import NotFound, APIException, PermissionDenied
 from rest_framework.throttling import UserRateThrottle
+from userauths.custom_throttles import VendorHeartbeatThrottle
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django_filters.rest_framework import DjangoFilterBackend
@@ -57,8 +59,134 @@ from payments.subscription_permissions import (
 )
 
 from dateutil.parser import parse
-import requests, logging, difflib, re
+import requests, logging, difflib, re, time
 logger = logging.getLogger(__name__)
+
+
+# ── Activity tracking helpers ─────────────────────────────────────────────────
+
+def _get_client_ip(request):
+    xff = request.META.get('HTTP_X_FORWARDED_FOR')
+    if xff:
+        return xff.split(',')[0].strip()
+    return request.META.get('REMOTE_ADDR')
+
+
+class VendorHeartbeatAPIView(APIView):
+    """
+    POST /api/v1/vendor/activity/heartbeat/
+    Called by the seller dashboard every ~10 minutes while the tab is open.
+    Updates Redis last_seen key and logs a heartbeat event (once per hour max).
+    """
+    permission_classes = [IsAuthenticated]
+    throttle_classes   = [VendorHeartbeatThrottle]
+
+    def post(self, request):
+        try:
+            vendor = request.user.vendor_user
+        except Exception:
+            return Response({'detail': 'Vendor not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Write to Redis (middleware skips this path, so we do it here)
+        try:
+            from django_redis import get_redis_connection
+            conn = get_redis_connection("default")
+            conn.set(f"vendor:last_seen:{vendor.pk}", int(time.time()), ex=86400)
+
+            # Rate-limit heartbeat log writes to once per hour per vendor
+            hb_key = f"vendor:hb_logged:{vendor.pk}"
+            if not conn.exists(hb_key):
+                from .tasks import log_vendor_activity
+                log_vendor_activity.delay(
+                    vendor.pk, 'heartbeat',
+                    ip_address=_get_client_ip(request),
+                    user_agent=request.META.get('HTTP_USER_AGENT', '')[:500],
+                )
+                conn.set(hb_key, 1, ex=3600)
+        except Exception:
+            pass
+
+        return Response({'status': 'ok'})
+
+
+class VendorShopStatusToggleAPIView(APIView):
+    """
+    PATCH /api/v1/vendor/shop/status/
+    Body: { "paused": true | false }
+    Lets a verified seller voluntarily pause or resume their shop.
+    Pausing hides all products from the storefront; resuming re-lists them instantly.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request):
+        try:
+            vendor = request.user.vendor_user
+        except Exception:
+            return Response({'detail': 'Vendor not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        pause = request.data.get('paused')
+        if pause is None:
+            return Response({'detail': '`paused` field is required (true or false).'}, status=status.HTTP_400_BAD_REQUEST)
+
+        pausing = bool(pause)
+
+        if pausing == vendor.shop_paused:
+            return Response({
+                'shop_paused': vendor.shop_paused,
+                'detail': 'No change — shop is already in that state.',
+            })
+
+        update_fields = {'shop_paused': pausing}
+        if pausing:
+            update_fields['shop_paused_at'] = timezone.now()
+        else:
+            update_fields['shop_paused_at'] = None
+
+        Vendor.objects.filter(pk=vendor.pk).update(**update_fields)
+
+        from .models import VendorActivityLog
+        from .tasks import notify_shop_status_change
+        VendorActivityLog.objects.create(
+            vendor=vendor,
+            event_type='profile_update',
+            ip_address=_get_client_ip(request),
+            user_agent=request.META.get('HTTP_USER_AGENT', '')[:500],
+            metadata={'action': 'shop_paused' if pausing else 'shop_resumed'},
+        )
+        notify_shop_status_change.delay(vendor.pk, pausing)
+
+        return Response({
+            'shop_paused': pausing,
+            'detail': 'Shop paused — your products are hidden.' if pausing else 'Shop is live again — your products are visible.',
+        })
+
+
+class VendorActivityLogAPIView(APIView):
+    """
+    GET /api/v1/vendor/activity/log/
+    Returns the vendor's own recent activity log (last 60 events).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            vendor = request.user.vendor_user
+        except Exception:
+            return Response({'detail': 'Vendor not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        from .models import VendorActivityLog
+        logs = VendorActivityLog.objects.filter(vendor=vendor)[:60]
+        data = [
+            {
+                'event_type': log.event_type,
+                'event_label': log.get_event_type_display(),
+                'ip_address': log.ip_address,
+                'metadata': log.metadata,
+                'created_at': log.created_at,
+            }
+            for log in logs
+        ]
+        return Response(data)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -510,16 +638,31 @@ class VendorStatusAPIView(APIView):
         user = request.user
         try:
             vendor = user.vendor_user
+            inactivity_days = getattr(settings, 'VENDOR_INACTIVITY_DAYS', 30)
+            now = timezone.now()
+            reference = vendor.last_seen_at or vendor.last_login_at or vendor.created_at
+            days_inactive = (now - reference).days if reference else None
+            days_until_close = (inactivity_days - days_inactive) if days_inactive is not None else None
+
             return Response({
                 'is_vendor': True,
                 'vendor_status': vendor.status,
                 'vendor_slug': vendor.slug,
+                'shop_paused': vendor.shop_paused,
+                'shop_paused_at': vendor.shop_paused_at,
+                'inactivity_auto_closed': vendor.inactivity_auto_closed,
+                'last_seen_at': vendor.last_seen_at,
+                'last_login_at': vendor.last_login_at,
+                'total_login_count': vendor.total_login_count,
+                'days_inactive': days_inactive,
+                'days_until_inactivity_close': max(days_until_close, 0) if days_until_close is not None else None,
             })
         except Vendor.DoesNotExist:
             return Response({
                 'is_vendor': False,
                 'vendor_status': None,
                 'vendor_slug': None,
+                'inactivity_auto_closed': False,
             })
 
 
@@ -644,7 +787,7 @@ class VendorProductsView(APIView):
         except (ValueError, TypeError):
             page = 1
 
-        products = Product.objects.filter(vendor=vendor, status='published').order_by('-date')
+        products = Product.published.filter(vendor=vendor).order_by('-date')
 
         total_items = products.count()
         total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -1358,3 +1501,39 @@ class VendorDeletionRequestView(APIView):
                 {'detail': 'Failed to submit request. Please contact support@negromart.com directly.'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+class VendorNotificationPrefsView(APIView):
+    """GET / PATCH vendor notification preferences stored as a JSON blob on the Vendor row."""
+    permission_classes = [IsAuthenticated]
+
+    DEFAULTS = {
+        'new_order': True,
+        'order_status_change': True,
+        'payment_received': True,
+        'new_review': True,
+        'low_stock': True,
+        'system_alerts': True,
+        'marketing': False,
+    }
+    ALLOWED_KEYS = frozenset(DEFAULTS)
+
+    def _merged(self, vendor):
+        return {**self.DEFAULTS, **{k: v for k, v in vendor.notification_prefs.items() if k in self.ALLOWED_KEYS}}
+
+    def get(self, request):
+        vendor = get_object_or_404(Vendor, user=request.user)
+        return Response(self._merged(vendor))
+
+    def patch(self, request):
+        vendor = get_object_or_404(Vendor, user=request.user)
+        updates = {
+            k: bool(v)
+            for k, v in request.data.items()
+            if k in self.ALLOWED_KEYS and isinstance(v, bool)
+        }
+        if not updates:
+            return Response({'detail': 'No valid preference keys provided.'}, status=status.HTTP_400_BAD_REQUEST)
+        vendor.notification_prefs = {**vendor.notification_prefs, **updates}
+        vendor.save(update_fields=['notification_prefs'])
+        return Response(self._merged(vendor))

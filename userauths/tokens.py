@@ -40,14 +40,12 @@ class OTPTokenGenerator(PasswordResetTokenGenerator):
         )
 
     def _is_token_expired(self, timestamp):
-        """
-        Check if the timestamp is older than TOKEN_TTL minutes.
-        """
-        expiration_time = self._num_minutes(self.token_ttl)
-        return timezone.now() > (timestamp + timedelta(minutes=expiration_time))
-
-    def _num_minutes(self, td):
-        return td.days * 24 * 60 + td.seconds // 60 + td.microseconds / 60e6
+        """Accepts a Unix float (time.time()). Returns True if past token_ttl."""
+        import time as _time
+        if isinstance(timestamp, (int, float)):
+            return _time.time() > timestamp + self.token_ttl.total_seconds()
+        # Fallback for legacy datetime values
+        return timezone.now() > (timestamp + self.token_ttl)
 
 otp_token_generator = OTPTokenGenerator()
 
@@ -61,6 +59,7 @@ class CustomVendorRefreshToken(RefreshToken):
         token["role"] = user.role
         token["is_staff"] = user.is_staff
         token["is_active"] = user.is_active
+        token["token_version"] = user.token_version
 
         # Add is_verified_vendor
         token["is_verified_vendor"] = False

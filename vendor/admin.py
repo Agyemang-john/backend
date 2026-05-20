@@ -3,11 +3,28 @@ from vendor.models import *
 from .tasks import send_vendor_approval_email, send_vendor_sms
 
 
+class VendorActivityLogInline(admin.TabularInline):
+    model = VendorActivityLog
+    extra = 0
+    readonly_fields = ('event_type', 'ip_address', 'user_agent', 'metadata', 'created_at')
+    can_delete = False
+    max_num = 20
+    ordering = ('-created_at',)
+
+
 class VendorAdmin(admin.ModelAdmin):
-    list_display = ('name', 'email', 'contact', 'status', 'is_approved', 'is_suspended', 'is_subscribed', 'subscription_end_date', 'is_featured')
+    list_display = (
+        'name', 'email', 'contact', 'status', 'is_approved', 'is_suspended',
+        'is_subscribed', 'subscription_end_date', 'is_featured',
+        'inactivity_auto_closed', 'last_seen_at', 'last_login_at',
+    )
     list_editable = ('is_featured', 'is_approved', 'is_suspended',)
-    list_filter = ('status', 'is_approved', 'is_suspended', 'vendor_type', 'country')
+    list_filter = (
+        'status', 'is_approved', 'is_suspended', 'vendor_type', 'country',
+        'inactivity_auto_closed',
+    )
     search_fields = ('name', 'email', 'contact')
+    inlines = [VendorActivityLogInline]
 
     fieldsets = (
         ('Basic Information', {
@@ -22,9 +39,24 @@ class VendorAdmin(admin.ModelAdmin):
         ('Analytics', {
             'fields': ('followers', 'is_featured', 'is_manufacturer', 'views')
         }),
-    )   
+        ('Shop Status', {
+            'fields': ('shop_paused', 'shop_paused_at'),
+        }),
+        ('Activity Tracking', {
+            'fields': (
+                'last_login_at', 'last_seen_at', 'last_logout_at',
+                'total_login_count', 'inactivity_auto_closed', 'inactivity_closed_at',
+            ),
+            'classes': ('collapse',),
+        }),
+    )
 
-    actions = ['approve_vendors', 'reject_vendors', 'suspend_vendors']
+    readonly_fields = (
+        'last_login_at', 'last_seen_at', 'last_logout_at',
+        'total_login_count', 'inactivity_closed_at', 'shop_paused_at',
+    )
+
+    actions = ['approve_vendors', 'reject_vendors', 'suspend_vendors', 'reopen_inactive_shops']
 
     def approve_vendors(self, request, queryset):
         """Approve selected vendors and send notifications."""
@@ -77,6 +109,25 @@ class VendorAdmin(admin.ModelAdmin):
 
     suspend_vendors.short_description = "Suspend selected vendors"
 
+    def reopen_inactive_shops(self, request, queryset):
+        """Manually reopen shops that were auto-closed due to inactivity."""
+        from .models import VendorActivityLog
+        from django.utils import timezone as tz
+        count = 0
+        for vendor in queryset.filter(inactivity_auto_closed=True):
+            vendor.inactivity_auto_closed = False
+            vendor.inactivity_closed_at = None
+            vendor.save(update_fields=['inactivity_auto_closed', 'inactivity_closed_at', 'modified_at'])
+            VendorActivityLog.objects.create(
+                vendor=vendor,
+                event_type='manual_reopen',
+                metadata={'reopened_by': str(request.user)},
+            )
+            count += 1
+        self.message_user(request, f"{count} shop(s) reopened.")
+
+    reopen_inactive_shops.short_description = "Reopen auto-closed shops (inactivity)"
+
     def get_fields(self, request, obj=None):
         # super() may return a tuple which is immutable — convert to list
         fields = list(super().get_fields(request, obj))
@@ -94,6 +145,21 @@ class VendorProfileAdmin(admin.ModelAdmin):
 class OpeningHourAdmin(admin.ModelAdmin):
     list_display = ('vendor', 'day', 'from_hour', 'to_hour', 'is_closed')
     list_filter = ('is_closed', 'day')
+
+
+@admin.register(VendorActivityLog)
+class VendorActivityLogAdmin(admin.ModelAdmin):
+    list_display  = ('vendor', 'event_type', 'ip_address', 'created_at')
+    list_filter   = ('event_type',)
+    search_fields = ('vendor__name', 'ip_address')
+    readonly_fields = ('vendor', 'event_type', 'ip_address', 'user_agent', 'metadata', 'created_at')
+    ordering      = ('-created_at',)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
 
 admin.site.register(Vendor, VendorAdmin)

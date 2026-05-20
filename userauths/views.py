@@ -12,11 +12,11 @@ from rest_framework_simplejwt.views import (
 from .serializers import CustomTokenObtainPairSerializer, otp_token_generator
 from django.contrib.auth import get_user_model
 from .custom_throttles import LoginThrottle
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from .tasks import send_otp
 from .vendor_serializers import VendorLoginSerializer
 from django.core.cache import cache
-from django.db.models import Q
+from django.db.models import Q, F
 User = get_user_model()
 import time
 from rest_framework import generics
@@ -24,6 +24,7 @@ from userauths.serializers import RegisterSerializer
 from django.utils.http import urlsafe_base64_decode
 from django.contrib.auth.tokens import default_token_generator
 from django.utils import timezone
+from .session_utils import register_session, get_client_ip
 
 class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
@@ -75,6 +76,19 @@ class CustomTokenObtainPairView(TokenObtainPairView):
         if response.status_code == 200:
             access_token = response.data.get("access")
             refresh_token = response.data.get("refresh")
+
+            # Register device session
+            if refresh_token:
+                try:
+                    from rest_framework_simplejwt.tokens import RefreshToken as _RT
+                    rt = _RT(refresh_token)
+                    jti = rt.payload.get('jti')
+                    user_id = rt.payload.get('user_id')
+                    if jti and user_id:
+                        user = User.objects.get(id=user_id)
+                        register_session(user, jti, request, is_vendor=False)
+                except Exception:
+                    pass
 
             # Set HTTP-only cookies
             response.set_cookie(
@@ -200,7 +214,7 @@ class VendorTokenObtainPairView(TokenObtainPairView):
 
 class VendorOTPVerifyView(APIView):
     permission_classes = [AllowAny]
-    # throttle_classes = [LoginThrottle]
+    throttle_classes = [LoginThrottle]
 
     def post(self, request, *args, **kwargs):
         email_or_phone = request.data.get("email")
@@ -219,7 +233,49 @@ class VendorOTPVerifyView(APIView):
                     access_token = str(refresh.access_token)
                     refresh_token = str(refresh)
 
+                    # Register device session (jti is inside the refresh token payload)
+                    try:
+                        jti = refresh.payload.get('jti')
+                        if jti:
+                            register_session(user, jti, request, is_vendor=True)
+                    except Exception:
+                        pass
+
                     response = Response({'detail': 'Login successful.'}, status=status.HTTP_200_OK)
+
+                    # Fire async activity tracking (login event + last_seen update)
+                    try:
+                        from vendor.tasks import log_vendor_activity
+                        from vendor.models import Vendor
+                        from django.core.cache import cache as dj_cache
+                        from django_redis import get_redis_connection
+                        vendor = Vendor.objects.filter(user=user).first()
+                        if vendor:
+                            ip = (
+                                request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
+                                or request.META.get('REMOTE_ADDR')
+                            )
+                            ua = request.META.get('HTTP_USER_AGENT', '')[:500]
+                            was_auto_closed = vendor.inactivity_auto_closed
+                            log_vendor_activity.delay(vendor.pk, 'login', ip, ua)
+                            Vendor.objects.filter(pk=vendor.pk).update(
+                                last_login_at=timezone.now(),
+                                last_seen_at=timezone.now(),
+                                total_login_count=vendor.total_login_count + 1,
+                                inactivity_auto_closed=False,
+                            )
+                            # Warm the middleware uid→vid cache and seed last_seen in Redis
+                            try:
+                                conn = get_redis_connection("default")
+                                conn.set(f"vendor:uid_vid:{user.id}", vendor.pk, ex=86400)
+                                conn.set(f"vendor:last_seen:{vendor.pk}", int(time.time()), ex=86400)
+                            except Exception:
+                                pass
+                            if was_auto_closed:
+                                log_vendor_activity.delay(vendor.pk, 'auto_reopen', ip, ua)
+                    except Exception:
+                        pass
+
                     # if response.status_code == 200 and 'vendor_access' in response.data:
                     response.set_cookie(
                         settings.VENDOR_ACCESS_AUTH_COOKIE,
@@ -261,7 +317,7 @@ class VendorOTPResendView(APIView):
             user = User.objects.get(Q(email__iexact=email_or_phone) | Q(phone=email_or_phone))
             if user.role != 'vendor':
                 return Response({'detail': 'OTP verification not required for this user.'}, status=status.HTTP_400_BAD_REQUEST)
-            otp = otp_token_generator.make_token(user)
+            otp = otp_token_generator.generate_otp()
             cache.set(f"otp_{user.id}", {'otp': otp, 'timestamp': time.time()}, timeout=600)
             # Send OTP via Celery task (Arkesel for SMS, Django for email)
             recipient = user.email if '@' in email_or_phone else user.phone
@@ -285,8 +341,38 @@ class VendorTokenVerifyView(TokenVerifyView):
 
 class VendorLogoutView(APIView):
     def post(self, request, *args, **kwargs):
+        # Fire async logout activity before clearing auth
+        if request.user.is_authenticated and getattr(request.user, 'role', None) == 'vendor':
+            try:
+                from vendor.tasks import log_vendor_activity
+                from vendor.models import Vendor
+                vendor = Vendor.objects.filter(user=request.user).first()
+                if vendor:
+                    ip = (
+                        request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
+                        or request.META.get('REMOTE_ADDR')
+                    )
+                    ua = request.META.get('HTTP_USER_AGENT', '')[:500]
+                    log_vendor_activity.delay(vendor.pk, 'logout', ip, ua)
+                    Vendor.objects.filter(pk=vendor.pk).update(last_logout_at=timezone.now())
+            except Exception:
+                pass
+
+        # Delete current device session
+        refresh_cookie = request.COOKIES.get(settings.VENDOR_REFRESH_AUTH_COOKIE)
+        if refresh_cookie:
+            try:
+                from rest_framework_simplejwt.tokens import RefreshToken as _RT
+                rt = _RT(refresh_cookie)
+                jti = rt.payload.get('jti')
+                if jti:
+                    from .models import UserSession
+                    UserSession.objects.filter(session_key=jti).delete()
+            except Exception:
+                pass
+
         response = Response(status=status.HTTP_204_NO_CONTENT)
-        
+
         # Delete cookies using only supported args
         response.delete_cookie(
             settings.VENDOR_ACCESS_AUTH_COOKIE,
@@ -300,3 +386,167 @@ class VendorLogoutView(APIView):
         )
         return response
 
+
+# ── Session management views ──────────────────────────────────────────────────
+
+def _get_current_jti(request, cookie_name: str):
+    """Return the jti of the refresh token in the given cookie, or None."""
+    token_str = request.COOKIES.get(cookie_name)
+    if not token_str:
+        return None
+    try:
+        from rest_framework_simplejwt.tokens import RefreshToken as _RT
+        return _RT(token_str).payload.get('jti')
+    except Exception:
+        return None
+
+
+def _session_to_dict(session, current_jti) -> dict:
+    return {
+        'id': str(session.id),
+        'device_type': session.device_type,
+        'device_name': session.device_name,
+        'browser': session.browser,
+        'os': session.os,
+        'ip_address': session.ip_address,
+        'last_activity': session.last_activity,
+        'created_at': session.created_at,
+        'is_current': session.session_key == current_jti,
+    }
+
+
+class VendorSessionListView(APIView):
+    """GET /api/v1/auth/vendor/sessions/"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .models import UserSession
+        current_jti = _get_current_jti(request, settings.VENDOR_REFRESH_AUTH_COOKIE)
+        sessions = UserSession.objects.filter(
+            user=request.user, is_vendor_session=True
+        ).order_by('-last_activity')
+        return Response([_session_to_dict(s, current_jti) for s in sessions])
+
+
+class VendorSessionRevokeView(APIView):
+    """DELETE /api/v1/auth/vendor/sessions/<uuid>/"""
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, session_id):
+        from .models import UserSession
+        current_jti = _get_current_jti(request, settings.VENDOR_REFRESH_AUTH_COOKIE)
+        try:
+            session = UserSession.objects.get(
+                id=session_id, user=request.user, is_vendor_session=True
+            )
+        except UserSession.DoesNotExist:
+            return Response({'detail': 'Session not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if current_jti and session.session_key == current_jti:
+            return Response(
+                {'detail': 'Cannot revoke your current session. Use "Log out" instead.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        session.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class VendorLogoutAllView(APIView):
+    """POST /api/v1/auth/vendor/logout-all/"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .models import UserSession
+        # Incrementing token_version immediately invalidates every existing JWT
+        User.objects.filter(pk=request.user.pk).update(
+            token_version=F('token_version') + 1
+        )
+        UserSession.objects.filter(user=request.user, is_vendor_session=True).delete()
+
+        response = Response({'detail': 'Logged out from all devices.'}, status=status.HTTP_200_OK)
+        response.delete_cookie(
+            settings.VENDOR_ACCESS_AUTH_COOKIE,
+            path=settings.VENDOR_AUTH_COOKIE_PATH,
+            domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
+        )
+        response.delete_cookie(
+            settings.VENDOR_REFRESH_AUTH_COOKIE,
+            path=settings.VENDOR_AUTH_COOKIE_PATH,
+            domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
+        )
+        return response
+
+
+class VendorLogoutOtherSessionsView(APIView):
+    """POST /api/v1/auth/vendor/logout-other-sessions/"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .models import UserSession
+        current_jti = _get_current_jti(request, settings.VENDOR_REFRESH_AUTH_COOKIE)
+        qs = UserSession.objects.filter(user=request.user, is_vendor_session=True)
+        if current_jti:
+            qs = qs.exclude(session_key=current_jti)
+        count = qs.count()
+        qs.delete()
+        return Response(
+            {'detail': f'Logged out from {count} other device(s).'},
+            status=status.HTTP_200_OK,
+        )
+
+
+# Customer session management (mirrors vendor pattern for buyer accounts)
+
+class CustomerSessionListView(APIView):
+    """GET /api/v1/auth/sessions/"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .models import UserSession
+        current_jti = _get_current_jti(request, 'refresh')
+        sessions = UserSession.objects.filter(
+            user=request.user, is_vendor_session=False
+        ).order_by('-last_activity')
+        return Response([_session_to_dict(s, current_jti) for s in sessions])
+
+
+class CustomerSessionRevokeView(APIView):
+    """DELETE /api/v1/auth/sessions/<uuid>/"""
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, session_id):
+        from .models import UserSession
+        current_jti = _get_current_jti(request, 'refresh')
+        try:
+            session = UserSession.objects.get(
+                id=session_id, user=request.user, is_vendor_session=False
+            )
+        except UserSession.DoesNotExist:
+            return Response({'detail': 'Session not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if current_jti and session.session_key == current_jti:
+            return Response(
+                {'detail': 'Cannot revoke your current session. Use "Log out" instead.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        session.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class CustomerLogoutAllView(APIView):
+    """POST /api/v1/auth/logout-all/"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .models import UserSession
+        User.objects.filter(pk=request.user.pk).update(
+            token_version=F('token_version') + 1
+        )
+        UserSession.objects.filter(user=request.user, is_vendor_session=False).delete()
+
+        response = Response({'detail': 'Logged out from all devices.'}, status=status.HTTP_200_OK)
+        response.delete_cookie('access', path=settings.AUTH_COOKIE_PATH, domain=settings.AUTH_COOKIE_DOMAIN)
+        response.delete_cookie('refresh', path=settings.AUTH_COOKIE_PATH, domain=settings.AUTH_COOKIE_DOMAIN)
+        return response

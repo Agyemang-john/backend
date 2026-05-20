@@ -101,8 +101,7 @@ def compute_all_trending_scores() -> int:
 
     # ── Fetch all published products (avg_rating / review_count denormalized) ─
     products = list(
-        Product.objects.filter(status='published')
-        .only('id', 'avg_rating', 'review_count')
+        Product.published.only('id', 'avg_rating', 'review_count')
     )
 
     # ── Compute and stage bulk updates ────────────────────────────────────────

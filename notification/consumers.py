@@ -1,6 +1,7 @@
 # notification/consumers.py
 import json
 import logging
+from django.core.serializers.json import DjangoJSONEncoder
 from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.db import database_sync_to_async
 from .models import Notification
@@ -40,7 +41,7 @@ class NotificationCountConsumer(AsyncWebsocketConsumer):
         await self.accept()
         # Send current count immediately on connect
         count = await get_unread_count_for(self.user)
-        await self.send(text_data=json.dumps({"type": "unread_count", "count": count}))
+        await self.send(text_data=json.dumps({"type": "unread_count", "count": count}, cls=DjangoJSONEncoder))
 
     async def disconnect(self, close_code):
         if hasattr(self, "group_name"):
@@ -55,14 +56,14 @@ class NotificationCountConsumer(AsyncWebsocketConsumer):
             "type": "unread_count",
             "count": count,
             "trigger_toast": True,
-        }))
+        }, cls=DjangoJSONEncoder))
 
     async def count_updated(self, event):
         """Count changed (e.g. user marked something read elsewhere)."""
         await self.send(text_data=json.dumps({
             "type": "unread_count",
             "count": event["count"],
-        }))
+        }, cls=DjangoJSONEncoder))
 
 
 # ── Full-list consumer ────────────────────────────────────────────────────────
@@ -148,7 +149,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         await self.send(text_data=json.dumps({
             "type": "unread_count",
             "count": event["count"],
-        }))
+        }, cls=DjangoJSONEncoder))
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -159,4 +160,4 @@ class NotificationConsumer(AsyncWebsocketConsumer):
             "type": "refresh_list",
             "notifications": notifications,
             "unread_count": count,
-        }))
+        }, cls=DjangoJSONEncoder))

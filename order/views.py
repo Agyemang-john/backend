@@ -42,6 +42,13 @@ class AddToCartView(APIView):
         variant = get_object_or_404(Variants, id=variant_id, product=product) if variant_id else None
         item_key = f"{product.id}_{variant.id if variant else 'none'}"
 
+        # Reject if the seller has paused their shop
+        if product.vendor and product.vendor.shop_paused:
+            return Response(
+                {"error": "This seller's shop is temporarily closed. Please check back later."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         # Resolve flash sale price if a valid flash_sale_id is provided
         flash_sale_price = None
         if flash_sale_id:

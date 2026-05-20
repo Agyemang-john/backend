@@ -166,13 +166,21 @@ class CategoryDetailView(APIView):
     def get(self, request, slug):
         cache_key = f'category_detail_{slug}'
         cached_data = cache.get(cache_key)
-        
+
         if cached_data is None:
             category = get_object_or_404(Category, slug=slug)
             serializer = CategoryWithSubcategoriesSerializer(category, context={'request': request})
             cached_data = serializer.data
-            cache.set(cache_key, cached_data, timeout=60 * 60)  # Cache for 15 minutes
-        
+            cache.set(cache_key, cached_data, timeout=60 * 60)
+        else:
+            category = Category.objects.filter(slug=slug).first()
+
+        # Track visit — deduped per visitor per 24 h, non-blocking.
+        # Buffers into Redis; flush_category_view_counts() drains to DB every 3 min.
+        if category:
+            from product.utils import track_category_view
+            track_category_view(request, category.id)
+
         return Response(cached_data, status=status.HTTP_200_OK)
 
 
@@ -202,24 +210,23 @@ class MainAPIView(APIView):
 
         if not cached_data:
             new_products_qs = (
-                Product.objects.filter(status='published', product_type="new")
+                Product.published.filter(product_type="new")
                 .order_by('-date')[:9]
             )
             most_popular_qs = (
-                Product.objects.filter(status='published')
+                Product.published.all()
                 .order_by('-trending_score', '-views')[:8]
             )
-            category = Category.objects.order_by('-engagement_score').first()
             top_brands = Brand.objects.order_by('-engagement_score')[:4]
             subcategories = Sub_Category.objects.order_by('-engagement_score')[:4]
+            popular_categories = Category.objects.order_by('-engagement_score')[:4]
 
             cached_data = {
-                # Wrap each new product so average_rating/review_count travel with it
                 "new_products": list(HomepageProductSerializer(new_products_qs, many=True, context={'request': request}).data),
                 "most_popular": list(HomepageProductSerializer(most_popular_qs, many=True, context={'request': request}).data),
                 "brands": BrandSerializer(top_brands, many=True, context={'request': request}).data,
                 "subcategories": SubCategorySerializer(subcategories, many=True, context={'request': request}).data,
-                "category": TopEngagedCategorySerializer(category, context={'request': request}).data if category else None,
+                "popular_categories": PopularCategorySerializer(popular_categories, many=True, context={'request': request}).data,
             }
             cache.set(cache_key, cached_data, timeout=600)
 
@@ -230,9 +237,9 @@ class MainAPIView(APIView):
         response_data = {
             "new_products": _apply_currency(cached_data["new_products"], currency, rates),
             "most_popular": _apply_currency(cached_data["most_popular"], currency, rates),
-            "brands": cached_data["brands"],           # no prices
-            "subcategories": cached_data["subcategories"],  # no prices
-            "category": cached_data["category"],            # no prices
+            "brands": cached_data["brands"],
+            "subcategories": cached_data["subcategories"],
+            "popular_categories": cached_data["popular_categories"],
         }
 
         return Response(response_data, status=status.HTTP_200_OK)
@@ -471,7 +478,7 @@ class TrendingProductsAPIView(APIView):
 
         if not products_data:
             products = (
-                Product.objects.filter(status='published')
+                Product.published.all()
                 .order_by('-trending_score', '-views')[:20]
             )
             products_data = list(TrendingProductSerializer(products, many=True, context={'request': request}).data)
@@ -533,7 +540,7 @@ class DealsAPIView(APIView):
 
         if not products_data:
             products = (
-                Product.objects.filter(status="published", old_price__isnull=False)
+                Product.published.filter(old_price__isnull=False)
                 .filter(old_price__gt=F("price"))
                 .annotate(
                     discount_pct=ExpressionWrapper(

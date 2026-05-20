@@ -9,6 +9,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .models import User
 from datetime import timedelta
 import random
+import time
 
 from .models import User
 from .tasks import send_otp  # assuming you use Celery for OTP sending
@@ -19,11 +20,8 @@ class OTPTokenGenerator:
         return random.randint(10000, 99999)
 
     def _is_token_expired(self, timestamp):
-        expiration_time = self._num_minutes(self.token_ttl)
-        return timezone.now() > (timestamp + timedelta(minutes=expiration_time))
-
-    def _num_minutes(self, td):
-        return td.days * 24 * 60 + td.seconds // 60 + td.microseconds / 60e6
+        """Accepts a Unix float (time.time()). Returns True if past token_ttl."""
+        return time.time() > timestamp + self.token_ttl.total_seconds()
 
 otp_token_generator = OTPTokenGenerator()
 
@@ -99,10 +97,9 @@ class VendorLoginSerializer(serializers.Serializer):
         user.lockout_until = None
         user.save(update_fields=["failed_login_attempts", "lockout_until"])
 
-        # OTP generation
+        # OTP generation — store Unix float so _is_token_expired works reliably
         otp = otp_token_generator.generate_otp()
-        timestamp = timezone.now()
-        cache.set(f"otp_{user.id}", {'otp': otp, 'timestamp': timestamp}, 600)
+        cache.set(f"otp_{user.id}", {'otp': otp, 'timestamp': time.time()}, 600)
 
         recipient = user.email if is_email else user.phone
         send_otp.delay(recipient, otp, is_email)
@@ -113,12 +110,44 @@ from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from .tokens import CustomVendorRefreshToken
 class CustomTokenRefreshSerializer(TokenRefreshSerializer):
     def validate(self, attrs):
-        # Get old refresh token
         old_refresh = RefreshToken(attrs["refresh"])
         user_id = old_refresh.get("user_id")
-        user = User.objects.get(id=user_id)
+        jti = old_refresh.payload.get("jti")
 
-        # Generate new access token with custom claims
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            raise serializers.ValidationError("User not found.")
+
+        # token_version check — catches "logout all devices"
+        token_version = old_refresh.payload.get("token_version")
+        if token_version is not None and token_version != user.token_version:
+            raise serializers.ValidationError(
+                "Your session was revoked. Please log in again."
+            )
+
+        # Session existence check (graceful migration: skip if user has no sessions yet)
+        if jti:
+            from .models import UserSession
+            session_exists = UserSession.objects.filter(
+                session_key=jti, is_vendor_session=True
+            ).exists()
+            if not session_exists:
+                has_any = UserSession.objects.filter(
+                    user_id=user_id, is_vendor_session=True
+                ).exists()
+                if has_any:
+                    raise serializers.ValidationError(
+                        "Session revoked. Please log in again."
+                    )
+                # Migration path: first refresh after feature deploy — create session
+                from .session_utils import register_session
+                register_session(user, jti, self.context["request"], is_vendor=True)
+            else:
+                from .session_utils import touch_session
+                touch_session(jti)
+
+        # Generate new access token with updated custom claims
         new_token = CustomVendorRefreshToken.for_user(user)
         access_token = str(new_token.access_token)
 

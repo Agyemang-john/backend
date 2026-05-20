@@ -14,7 +14,7 @@ class NotificationSerializer(serializers.ModelSerializer):
         fields = ["id", "verb", "verb_display", "data", "is_read", "created_at", "time_ago", "url"]
 
     def get_time_ago(self, obj):
-        return naturaltime(obj.created_at)
+        return str(naturaltime(obj.created_at))
 
     def get_url(self, obj):
         return obj.data.get("url", "#")

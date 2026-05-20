@@ -282,31 +282,111 @@ def flush_subcategory_view_counts():
                 len(updates), sum(updates.values()))
 
 
+@shared_task(ignore_result=True)
+def flush_category_view_counts():
+    """
+    Drains Redis category view-count buffers (maincat:views:buf:{id}) into Category.views.
+    Runs every 3 minutes via Celery Beat — same pattern as flush_subcategory_view_counts().
+    """
+    try:
+        from django_redis import get_redis_connection
+        conn = get_redis_connection("default")
+    except Exception:
+        logger.warning("flush_category_view_counts: Redis unavailable, skipping")
+        return
+
+    updates: dict[int, int] = {}
+    cursor = 0
+
+    while True:
+        try:
+            cursor, keys = conn.scan(cursor, match="maincat:views:buf:*", count=500)
+        except Exception as e:
+            logger.error("flush_category_view_counts: SCAN error: %s", e)
+            break
+
+        for raw_key in keys:
+            key = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
+            try:
+                category_id = int(key.split(":")[-1])
+            except ValueError:
+                continue
+            try:
+                try:
+                    raw = conn.getdel(key)
+                except AttributeError:
+                    pipe = conn.pipeline()
+                    pipe.get(key)
+                    pipe.delete(key)
+                    raw, _ = pipe.execute()
+                if raw:
+                    updates[category_id] = updates.get(category_id, 0) + int(raw)
+            except Exception as e:
+                logger.error("flush_category_view_counts: error on key %s: %s", key, e)
+
+        if cursor == 0:
+            break
+
+    if not updates:
+        return
+
+    from django.db import transaction
+    with transaction.atomic():
+        for category_id, delta in updates.items():
+            Category.objects.filter(id=category_id).update(views=F('views') + delta)
+
+    logger.info("flush_category_view_counts: flushed %d category(ies), total delta %d",
+                len(updates), sum(updates.values()))
+
+
 @shared_task
 def update_category_engagement_scores():
     """
-    Category score = direct subcategory page views + product views inside the category.
+    Category engagement score — five signals, ordered by buyer intent:
 
-    Direct subcategory page visits (tracked since the user explicitly browsed here)
-    are weighted more heavily than cumulative product views, which are a secondary
-    breadth signal. The parent Category row gets the aggregate of all its sub-categories.
+      3.0 × direct category page visits  (user explicitly browsed this category)
+      1.5 × subcategory page visits       (browsed a sub-section of this category)
+      0.1 × product views                 (breadth / awareness signal)
+      5.0 × cart adds                     (strong purchase intent)
+     10.0 × purchases                     (confirmed conversion — highest weight)
+
+    Busts the TopEngagedCategoryView cache so the homepage reflects the fresh score.
     """
+    from order.models import CartItem, OrderProduct
+    from django.core.cache import cache as _cache
+
     for category in Category.objects.all():
-        # Sum of direct page visits across every sub-category of this category
+        category_views = category.views
+
         sub_views = Sub_Category.objects.filter(
             category=category
         ).aggregate(total=Sum('views'))['total'] or 0
 
-        # Sum of all product views for products listed in this category
         product_views = Product.published.filter(
             sub_category__category=category
         ).aggregate(total=Sum('views'))['total'] or 0
 
-        # Subcategory page visits are a stronger intent signal than product view counts
-        score = round((sub_views * 1.5) + (product_views * 0.1), 2)
+        cart_adds = CartItem.objects.filter(
+            product__sub_category__category=category
+        ).count()
+
+        purchases = OrderProduct.objects.filter(
+            product__sub_category__category=category
+        ).count()
+
+        score = round(
+            (category_views * 3.0) +
+            (sub_views      * 1.5) +
+            (product_views  * 0.1) +
+            (cart_adds      * 5.0) +
+            (purchases      * 10.0),
+            2,
+        )
         category.engagement_score = score
         category.save(update_fields=['engagement_score'])
 
+    _cache.delete("top_engaged_category")
+    _cache.delete("homepage_main_v1")
     return "Category engagement scores updated."
 
 
@@ -345,27 +425,36 @@ def update_brand_engagement_scores():
 @shared_task
 def update_subcategory_engagement_scores():
     """
-    Subcategory score = direct page views + cart adds + actual purchases.
+    Subcategory engagement score — four signals, ordered by buyer intent:
 
-    Direct page visits now come from the Redis-buffered tracker wired into
-    CategoryProductListView, so Sub_Category.views reflects real human traffic.
-    Cart adds and purchases are stronger conversion signals layered on top.
+      3.0 × direct subcategory page visits  (user explicitly browsed this subcategory)
+      0.1 × product views                   (breadth / awareness signal)
+      5.0 × cart adds                       (strong purchase intent)
+     10.0 × purchases                       (confirmed conversion — highest weight)
     """
     from order.models import CartItem, OrderProduct
 
     for subcategory in Sub_Category.objects.all():
-        views         = subcategory.views
-        cart_mentions = CartItem.objects.filter(product__sub_category=subcategory).count()
-        order_count   = OrderProduct.objects.filter(product__sub_category=subcategory).count()
+        sub_views = subcategory.views
+
+        product_views = Product.published.filter(
+            sub_category=subcategory
+        ).aggregate(total=Sum('views'))['total'] or 0
+
+        cart_adds = CartItem.objects.filter(product__sub_category=subcategory).count()
+        purchases = OrderProduct.objects.filter(product__sub_category=subcategory).count()
 
         score = round(
-            (views         * 1.0) +
-            (cart_mentions * 5.0) +
-            (order_count   * 10.0),
+            (sub_views    * 3.0) +
+            (product_views * 0.1) +
+            (cart_adds     * 5.0) +
+            (purchases     * 10.0),
             2,
         )
         subcategory.engagement_score = score
         subcategory.save(update_fields=['engagement_score'])
+
+    return "Subcategory engagement scores updated."
 
     return "Subcategory engagement scores updated."
 
@@ -457,7 +546,7 @@ def index_products_task(self, last_run=None):
 
     def index_products(es):
         try:
-            query = Product.objects.filter(status="published")
+            query = Product.published.all()
             if last_run:
                 try:
                     last_run_dt = timezone.datetime.fromisoformat(last_run)

@@ -25,7 +25,9 @@ class VendorManager(models.Manager):
             is_approved=True,
             is_suspended=False,
             is_subscribed=True,
-            subscription_end_date__gte=today
+            subscription_end_date__gte=today,
+            inactivity_auto_closed=False,
+            shop_paused=False,
         )
 
     def needs_review(self):
@@ -180,6 +182,25 @@ class Vendor(models.Model):
     modified_at = models.DateTimeField(auto_now=True)
     views = models.PositiveIntegerField(default=0, help_text="Number of views on vendor profile.")
 
+    # Voluntary shop pause (seller-controlled)
+    shop_paused = models.BooleanField(default=False, help_text="Seller has manually paused the shop. Products hidden, no new orders.")
+    shop_paused_at = models.DateTimeField(null=True, blank=True, help_text="When the seller last paused the shop.")
+
+    # Activity tracking
+    last_login_at = models.DateTimeField(null=True, blank=True, help_text="Last successful login timestamp.")
+    last_seen_at = models.DateTimeField(null=True, blank=True, help_text="Last API activity timestamp (buffered via Redis).")
+    last_logout_at = models.DateTimeField(null=True, blank=True, help_text="Last logout timestamp.")
+    total_login_count = models.PositiveIntegerField(default=0, help_text="Cumulative login count.")
+    inactivity_auto_closed = models.BooleanField(default=False, help_text="True when shop was auto-closed due to inactivity.")
+    inactivity_closed_at = models.DateTimeField(null=True, blank=True, help_text="When the shop was auto-closed for inactivity.")
+
+    # Notification preferences (keys map to frontend GROUPS)
+    notification_prefs = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Vendor notification preferences, e.g. {new_order: true, marketing: false}.",
+    )
+
     def __str__(self):
         return self.name
 
@@ -251,6 +272,9 @@ class Vendor(models.Model):
         verbose_name_plural = "Vendors"
         indexes = [
             models.Index(fields=['name', 'status']),
+            models.Index(fields=['last_seen_at']),
+            models.Index(fields=['inactivity_auto_closed']),
+            models.Index(fields=['shop_paused']),
         ]
 
 
@@ -539,3 +563,38 @@ class VendorDailyStats(models.Model):
     class Meta:
         unique_together = ('vendor', 'date')
         indexes = [models.Index(fields=['vendor', 'date'])]
+
+
+class VendorActivityLog(models.Model):
+    """
+    Immutable audit log: one row per notable vendor event (login, logout, heartbeat, etc.).
+    Written async via Celery; never updated after creation.
+    """
+    EVENT_CHOICES = [
+        ('login',          'Login'),
+        ('logout',         'Logout'),
+        ('heartbeat',      'Heartbeat'),
+        ('product_action', 'Product Action'),
+        ('order_action',   'Order Action'),
+        ('profile_update', 'Profile Update'),
+        ('auto_close',     'Auto-Closed (Inactivity)'),
+        ('auto_reopen',    'Auto-Reopened (Login)'),
+        ('manual_reopen',  'Manual Reopen (Admin)'),
+    ]
+
+    vendor     = models.ForeignKey(Vendor, on_delete=models.CASCADE, related_name='activity_logs')
+    event_type = models.CharField(max_length=30, choices=EVENT_CHOICES)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=500, blank=True)
+    metadata   = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['vendor', 'created_at']),
+            models.Index(fields=['vendor', 'event_type']),
+        ]
+
+    def __str__(self):
+        return f"{self.vendor.name} — {self.event_type} @ {self.created_at:%Y-%m-%d %H:%M}"

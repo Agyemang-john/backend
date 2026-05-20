@@ -69,6 +69,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'vendor.middleware.VendorActivityMiddleware',
 ]
 
 ROOT_URLCONF = 'ecommerce.urls'
@@ -233,11 +234,13 @@ REST_FRAMEWORK = {
 
     "DEFAULT_THROTTLE_RATES": {
         # Browsing (guests)
-        "anon": "4000/day",     # enough for product browsing/search
+        "anon": "4000/day",
         # Browsing (logged-in)
-        "user": "100000/day",     # generous since users are trusted
+        "user": "100000/day",
         "auth_refresh": "30/min",
         "auth_verify": "100/min",
+        # Seller dashboard heartbeat (automated, fires every ~10 min)
+        "vendor_heartbeat": "30/hour",
     },
 }
 
@@ -335,6 +338,13 @@ VIEW_DEDUP_TTL      = 86400     # seconds before same user can re-count a view (
 RECENT_LIST_TTL     = 2592000   # seconds before the recent list expires (30 days)
 RETURN_WINDOW_TTL   = 2592000   # seconds for returning visitor detection window (30 days)
 
+# Vendor inactivity settings
+# Auto-close a shop after this many days without any API activity or login.
+VENDOR_INACTIVITY_DAYS = int(config("VENDOR_INACTIVITY_DAYS", default=30))
+# Send warnings this many days BEFORE the auto-close threshold.
+# [7, 3] means: warn at day 23 (7 days left) and day 27 (3 days left).
+VENDOR_INACTIVITY_WARN_DAYS = [7, 3]
+
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_TIMEZONE = "UTC"
@@ -391,6 +401,11 @@ CELERY_BEAT_SCHEDULE = {
     # Flush Redis subcategory view-count buffers → DB every 3 minutes
     "flush-subcategory-view-counts": {
         "task": "product.tasks.flush_subcategory_view_counts",
+        "schedule": 180,
+    },
+    # Flush Redis category view-count buffers → DB every 3 minutes
+    "flush-category-view-counts": {
+        "task": "product.tasks.flush_category_view_counts",
         "schedule": 180,
     },
     # Aggregate yesterday's vendor view logs into daily stats
@@ -465,6 +480,18 @@ CELERY_BEAT_SCHEDULE = {
     "subscriptions.expire_old_subscriptions": {
         "task": "subscriptions.expire_old_subscriptions",
         "schedule": crontab(hour=0, minute=30),
+    },
+
+    # ── Vendor activity / inactivity tasks ───────────────────────────────────
+    # Flush Redis `vendor:last_seen:{id}` keys → Vendor.last_seen_at every 5 min.
+    "flush-vendor-last-seen": {
+        "task": "vendor.tasks.flush_vendor_last_seen",
+        "schedule": 300,
+    },
+    # Check for inactive vendors daily at 01:00 UTC; warn, then auto-close.
+    "check-inactive-vendors": {
+        "task": "vendor.tasks.check_inactive_vendors",
+        "schedule": crontab(hour=1, minute=0),
     },
 }
 

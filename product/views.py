@@ -541,7 +541,7 @@ class SearchSuggestionsAPIView(APIView):
         search_query = SearchQuery(query, search_type="plain")  # could also use 'phrase' or 'websearch'
 
         suggestions_qs = (
-            Product.objects.filter(status="published")
+            Product.published.all()
             .annotate(rank=SearchRank(F("search_vector"), search_query))
             .filter(rank__gt=0.0)
             .select_related("sub_category")
@@ -618,8 +618,8 @@ class CategoryProductListView(APIView):
         price_range_key = f"price_range:{slug}"
         unfiltered_price_range = cache.get(price_range_key)
         if not unfiltered_price_range:
-            unfiltered_price_range = Product.objects.filter(
-                status="published", sub_category=category
+            unfiltered_price_range = Product.published.filter(
+                sub_category=category
             ).aggregate(min_price_unfiltered=Min('price'), max_price_unfiltered=Max('price'))
             cache.set(price_range_key, unfiltered_price_range, 3600)
 
@@ -627,8 +627,8 @@ class CategoryProductListView(APIView):
         max_price_unfiltered = unfiltered_price_range.get('max_price_unfiltered') or Decimal('0')
 
         # ── Base queryset (no annotations — uses stored avg_rating/review_count) ─
-        base_qs = Product.objects.filter(
-            status="published", sub_category=category
+        base_qs = Product.published.filter(
+            sub_category=category
         ).select_related('brand', 'vendor', 'sub_category').prefetch_related(
             Prefetch(
                 'variants',
@@ -776,8 +776,8 @@ class BrandProductListView(APIView):
         }
 
         # ── Base queryset (uses stored avg_rating — no Avg JOIN) ───────────────
-        base_qs = Product.objects.filter(
-            status="published", brand=brand
+        base_qs = Product.published.filter(
+            brand=brand
         ).select_related("vendor", "brand", "sub_category").prefetch_related(
             Prefetch(
                 'variants',
@@ -934,8 +934,8 @@ class ProductSearchAPIView(APIView):
         # ── Build base search queryset using stored search_vector (GIN index) ──
         search_query = SearchQuery(query, config='english')
         base_qs = (
-            Product.objects
-            .filter(status="published", search_vector=search_query)
+            Product.published
+            .filter(search_vector=search_query)
             .annotate(rank=SearchRank('search_vector', search_query))
             .select_related("brand", "vendor", "sub_category")
             .prefetch_related(
@@ -1176,7 +1176,7 @@ class CartRecommendationsAPIView(APIView):
             related = get_cart_based_recommendations(pid)
             bought_together_set.update(related.values_list('id', flat=True))
 
-        bought_together = Product.objects.filter(
+        bought_together = Product.published.filter(
             id__in=bought_together_set
         ).exclude(id__in=cart_product_ids)[:10]
 
