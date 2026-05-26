@@ -46,9 +46,20 @@ def parse_device_info(ua_string: str) -> dict:
         os_ver = (ua.os.version_string or '').split('.')[0]
         os_name = f"{os_fam} {os_ver}".strip()
 
+        # For mobile/tablet show the hardware model when available
+        device_brand = (ua.device.brand or '').strip()
+        device_model = (ua.device.model or '').strip()
+        device_hw = f"{device_brand} {device_model}".strip()
+        generic = device_hw.lower() in ('', 'other', 'generic smartphone', 'generic tablet', 'generic')
+
+        if device_type in ('mobile', 'tablet') and device_hw and not generic:
+            device_name = f"{device_hw} · {browser}"
+        else:
+            device_name = f"{browser} on {os_name}"
+
         return {
             'device_type': device_type,
-            'device_name': f"{browser} on {os_name}"[:200],
+            'device_name': device_name[:200],
             'browser': browser[:100],
             'os': os_name[:100],
         }

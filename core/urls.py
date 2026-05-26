@@ -23,4 +23,5 @@ urlpatterns = [
     path('trending-products/', TrendingProductsAPIView.as_view(), name='trending-products'),
     path('cart-suggested-products/', SuggestedCartProductsAPIView.as_view(), name='cart-suggested-products'),
     path('deals/', DealsAPIView.as_view(), name='deals'),
+    path('community/links/', SocialLinksView.as_view(), name='community-links'),
 ]

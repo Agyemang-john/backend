@@ -287,4 +287,53 @@ class SearchHistory(models.Model):
 ############################################################
 
 
+############################################################
+##################### COMMUNITY / SOCIAL LINKS ############
+############################################################
 
+PLATFORM_CHOICES = [
+    ('whatsapp',  'WhatsApp'),
+    ('telegram',  'Telegram'),
+    ('facebook',  'Facebook'),
+    ('instagram', 'Instagram'),
+    ('twitter',   'Twitter / X'),
+    ('youtube',   'YouTube'),
+    ('linkedin',  'LinkedIn'),
+    ('tiktok',    'TikTok'),
+    ('discord',   'Discord'),
+    ('pinterest', 'Pinterest'),
+    ('snapchat',  'Snapchat'),
+    ('other',     'Other'),
+]
+
+LINK_CATEGORY_CHOICES = [
+    ('community', 'Community Group'),   # WhatsApp channel, Telegram group, Discord, Facebook group
+    ('social',    'Social Media'),      # Instagram, YouTube, LinkedIn, TikTok, Twitter
+]
+
+
+class SocialLink(models.Model):
+    platform     = models.CharField(max_length=20, choices=PLATFORM_CHOICES)
+    category     = models.CharField(
+        max_length=10, choices=LINK_CATEGORY_CHOICES, default='social',
+        help_text="'Community' = interactive groups (WhatsApp/Telegram/Discord); 'Social' = follow pages (Instagram/YouTube/etc.)"
+    )
+    label        = models.CharField(max_length=100, help_text="Display name on the card, e.g. 'WhatsApp Channel'")
+    url          = models.URLField(max_length=500)
+    description  = models.CharField(max_length=200, blank=True, help_text="Short tagline, e.g. 'Get exclusive deals first'")
+    member_count = models.CharField(max_length=40, blank=True, help_text="e.g. '12K+ members' — leave blank to hide")
+    is_active    = models.BooleanField(default=True)
+    order        = models.PositiveIntegerField(default=0, help_text="Lower = shown first within the category")
+    created_at   = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['category', 'order', 'platform']
+        indexes = [
+            models.Index(fields=['is_active', 'category']),
+            models.Index(fields=['order']),
+        ]
+        verbose_name = 'Social / Community Link'
+        verbose_name_plural = 'Social / Community Links'
+
+    def __str__(self):
+        return f"{self.get_platform_display()} — {self.label}"

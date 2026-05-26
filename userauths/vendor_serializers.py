@@ -7,18 +7,9 @@ from django.contrib.auth import authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
 from .models import User
 from datetime import timedelta
-import random
 
 from .tasks import send_otp
-class OTPTokenGenerator:
-    token_ttl = timedelta(minutes=10)
-
-    def generate_otp(self):
-        return random.randint(10000, 99999)
-
-    def _is_token_expired(self, timestamp):
-        """Accepts a Unix float (time.time()). Returns True if past token_ttl."""
-        return time.time() > timestamp + self.token_ttl.total_seconds()
+from .otp import OTPTokenGenerator
 
 otp_token_generator = OTPTokenGenerator()
 

@@ -27,3 +27,17 @@ class PromoCardAdmin(admin.ModelAdmin):
         ('Colors', {'fields': ['card_color', 'text_color', 'link_color', 'badge_text', 'badge_color']}),
         ('Layout', {'fields': ['is_tall', 'position', 'is_active']}),
     ]
+
+
+@admin.register(SocialLink)
+class SocialLinkAdmin(admin.ModelAdmin):
+    list_display  = ['platform', 'category', 'label', 'member_count', 'order', 'is_active', 'created_at']
+    list_editable = ['order', 'is_active']
+    list_filter   = ['category', 'platform', 'is_active']
+    search_fields = ['label', 'description', 'url']
+    ordering      = ['category', 'order']
+    fieldsets = [
+        ('Platform', {'fields': ['platform', 'category']}),
+        ('Card Content', {'fields': ['label', 'url', 'description', 'member_count']}),
+        ('Display', {'fields': ['order', 'is_active']}),
+    ]

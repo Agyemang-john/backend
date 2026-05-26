@@ -252,18 +252,34 @@ class VendorOTPVerifyView(APIView):
             _otp_logger.warning("OTP verify: no valid record for user=%s", user.pk)
             return Response({'detail': 'Invalid or expired OTP.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not otp_record.verify(otp):
-            _otp_logger.warning(
-                "OTP verify: mismatch or expired for user=%s (expired=%s)",
-                user.pk, otp_record.is_expired(),
-            )
+        # Validate the OTP value WITHOUT marking it used yet.
+        # We mark it used only after tokens are successfully issued so that
+        # a server error after this point does not silently consume the OTP
+        # and lock the user out of retrying.
+        if otp_record.otp != str(otp).strip():
+            _otp_logger.warning("OTP verify: mismatch for user=%s", user.pk)
             return Response({'detail': 'Invalid or expired OTP.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # OTP is valid — issue tokens
+        # Issue tokens first — if this fails the OTP is still valid for retry
+        try:
+            refresh = CustomVendorRefreshToken.for_user(user)
+            access_token = str(refresh.access_token)
+            refresh_token = str(refresh)
+        except Exception as exc:
+            _otp_logger.error("OTP verify: token issuance failed for user=%s: %s", user.pk, exc)
+            return Response(
+                {'detail': 'Login failed. Please try again.'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        # Atomically mark OTP as used now that tokens are ready
+        consumed = OTPRecord.objects.filter(pk=otp_record.pk, is_used=False).update(is_used=True)
+        if consumed == 0:
+            # Concurrent request already consumed this OTP
+            _otp_logger.warning("OTP verify: race — OTP already used for user=%s", user.pk)
+            return Response({'detail': 'Invalid or expired OTP.'}, status=status.HTTP_400_BAD_REQUEST)
+
         _otp_logger.info("OTP verify: success for user=%s", user.pk)
-        refresh = CustomVendorRefreshToken.for_user(user)
-        access_token = str(refresh.access_token)
-        refresh_token = str(refresh)
 
         # Register device session
         try:
@@ -397,16 +413,17 @@ class VendorLogoutView(APIView):
 
         response = Response(status=status.HTTP_204_NO_CONTENT)
 
-        # Delete cookies using only supported args
         response.delete_cookie(
             settings.VENDOR_ACCESS_AUTH_COOKIE,
             path=settings.VENDOR_AUTH_COOKIE_PATH,
             domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
+            samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
         )
         response.delete_cookie(
             settings.VENDOR_REFRESH_AUTH_COOKIE,
             path=settings.VENDOR_AUTH_COOKIE_PATH,
-            domain=settings.VENDOR_AUTH_COOKIE_DOMAIN
+            domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
+            samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
         )
         return response
 
@@ -493,11 +510,13 @@ class VendorLogoutAllView(APIView):
             settings.VENDOR_ACCESS_AUTH_COOKIE,
             path=settings.VENDOR_AUTH_COOKIE_PATH,
             domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
+            samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
         )
         response.delete_cookie(
             settings.VENDOR_REFRESH_AUTH_COOKIE,
             path=settings.VENDOR_AUTH_COOKIE_PATH,
             domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
+            samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
         )
         return response
 

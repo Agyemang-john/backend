@@ -608,3 +608,11 @@ class MakeDefaultAddressView(APIView):
 #############################CUSTOMER DASHBOARD############################
 
 
+class SocialLinksView(APIView):
+    """Public endpoint — returns all active social/community links for the Community page."""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        links = SocialLink.objects.filter(is_active=True)
+        serializer = SocialLinkSerializer(links, many=True, context={'request': request})
+        return Response(serializer.data)

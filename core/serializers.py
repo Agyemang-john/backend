@@ -285,3 +285,9 @@ class PromoCardSerializer(serializers.ModelSerializer):
                 return None
         return None
 
+
+class SocialLinkSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SocialLink
+        fields = ['id', 'platform', 'category', 'label', 'url', 'description', 'member_count', 'order']
+
