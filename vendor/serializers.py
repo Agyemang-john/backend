@@ -19,10 +19,24 @@ class OpeningHourSerializer(serializers.ModelSerializer):
         fields = ['id', 'vendor', 'day', 'day_display', 'from_hour', 'to_hour', 'is_closed']
         read_only_fields = ['vendor', 'id']
 
+class MainCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Main_Category
+        fields = ['id', 'title', 'slug']
+
+class CategorySerializer(serializers.ModelSerializer):
+    main_category = MainCategorySerializer(read_only=True)
+
+    class Meta:
+        model = Category
+        fields = ['id', 'title', 'slug', 'main_category']
+
 class SubCategorySerializer(serializers.ModelSerializer):
+    category = CategorySerializer(read_only=True)
+
     class Meta:
         model = Sub_Category
-        fields = '__all__'
+        fields = ['id', 'title', 'slug', 'category', 'image', 'views', 'engagement_score', 'date', 'updated']
 
 class BrandSerializer(serializers.ModelSerializer):
     class Meta:
