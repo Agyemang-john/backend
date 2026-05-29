@@ -8,6 +8,8 @@ Core user and profile models for the platform:
 - SubscribedUsers / MailMessage: legacy newsletter models.
 """
 
+import hashlib
+import hmac
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.utils import timezone
@@ -216,7 +218,7 @@ class OTPRecord(models.Model):
         on_delete=models.CASCADE,
         related_name='otp_records',
     )
-    otp = models.CharField(max_length=10)       # stored as string — no int/str comparison risk
+    otp = models.CharField(max_length=64)       # SHA-256 hex digest of the plaintext OTP
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()
     is_used = models.BooleanField(default=False)
@@ -227,14 +229,18 @@ class OTPRecord(models.Model):
             models.Index(fields=['user', 'is_used', 'expires_at']),
         ]
 
+    @staticmethod
+    def _hash(value: str) -> str:
+        return hashlib.sha256(value.encode()).hexdigest()
+
     def is_expired(self) -> bool:
         return timezone.now() > self.expires_at
 
     def verify(self, submitted_otp) -> bool:
-        """Check the OTP and mark it used atomically. Returns True on success."""
         if self.is_used or self.is_expired():
             return False
-        if self.otp == str(submitted_otp).strip():
+        submitted_hash = self._hash(str(submitted_otp).strip())
+        if hmac.compare_digest(self.otp, submitted_hash):
             self.is_used = True
             self.save(update_fields=['is_used'])
             return True
@@ -247,7 +253,7 @@ class OTPRecord(models.Model):
         cls.objects.filter(user=user, is_used=False).delete()
         return cls.objects.create(
             user=user,
-            otp=str(otp_value),
+            otp=cls._hash(str(otp_value)),
             expires_at=timezone.now() + timedelta(minutes=ttl_minutes),
         )
 

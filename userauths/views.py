@@ -11,7 +11,7 @@ from rest_framework_simplejwt.views import (
 )
 from .serializers import CustomTokenObtainPairSerializer, otp_token_generator
 from django.contrib.auth import get_user_model
-from .custom_throttles import LoginThrottle
+from .custom_throttles import LoginThrottle, AnonLoginThrottle, RegisterThrottle
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from .tasks import send_otp
 from .vendor_serializers import VendorLoginSerializer
@@ -28,6 +28,15 @@ from .session_utils import register_session, get_client_ip
 class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
     permission_classes = [AllowAny]
+    throttle_classes = [RegisterThrottle]
+
+    def post(self, request, *args, **kwargs):
+        from .captcha import verify_turnstile
+        token = request.data.get('cf_turnstile_response', '')
+        ip = request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip() or request.META.get('REMOTE_ADDR')
+        if not verify_turnstile(token, ip):
+            return Response({'detail': 'CAPTCHA verification failed. Please try again.'}, status=status.HTTP_400_BAD_REQUEST)
+        return super().post(request, *args, **kwargs)
 
 
 class ActivateEmailView(APIView):
@@ -66,10 +75,15 @@ class ActivateEmailView(APIView):
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
-    permission_classes = [AllowAny]  # allow guests to login
-    # throttle_classes = [LoginThrottle, AnonLoginThrottle]
+    permission_classes = [AllowAny]
+    throttle_classes = [LoginThrottle, AnonLoginThrottle]
 
     def post(self, request, *args, **kwargs):
+        from .captcha import verify_turnstile
+        token = request.data.get('cf_turnstile_response', '')
+        ip = request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip() or request.META.get('REMOTE_ADDR')
+        if not verify_turnstile(token, ip):
+            return Response({'detail': 'CAPTCHA verification failed. Please try again.'}, status=status.HTTP_400_BAD_REQUEST)
         response = super().post(request, *args, **kwargs)
 
         if response.status_code == 200:
@@ -157,19 +171,29 @@ class CustomTokenVerifyView(TokenVerifyView):
 
 class LogoutView(APIView):
     def post(self, request, *args, **kwargs):
+        refresh_cookie = request.COOKIES.get('refresh')
+        if refresh_cookie:
+            try:
+                from rest_framework_simplejwt.tokens import RefreshToken as _RT
+                from .models import UserSession
+                rt = _RT(refresh_cookie)
+                jti = rt.payload.get('jti')
+                if jti:
+                    UserSession.objects.filter(session_key=jti).delete()
+                # Blacklist the refresh token so it cannot be reused
+                rt.blacklist()
+            except Exception:
+                pass
+
+        # Invalidate all sessions for this user by bumping token_version
+        if request.user.is_authenticated:
+            User.objects.filter(pk=request.user.pk).update(
+                token_version=F('token_version') + 1
+            )
+
         response = Response(status=status.HTTP_204_NO_CONTENT)
-        
-        # Delete cookies using only supported args
-        response.delete_cookie(
-            'access',
-            path=settings.AUTH_COOKIE_PATH,
-            domain=settings.AUTH_COOKIE_DOMAIN,
-        )
-        response.delete_cookie(
-            'refresh',
-            path=settings.AUTH_COOKIE_PATH,
-            domain=settings.AUTH_COOKIE_DOMAIN,
-        )
+        response.delete_cookie('access', path=settings.AUTH_COOKIE_PATH, domain=settings.AUTH_COOKIE_DOMAIN)
+        response.delete_cookie('refresh', path=settings.AUTH_COOKIE_PATH, domain=settings.AUTH_COOKIE_DOMAIN)
         return response
     
 
@@ -202,14 +226,49 @@ class VendorTokenRefreshView(TokenRefreshView):
                 del response.data["access"]
         return response
 
+def _mask_identifier(value: str) -> str:
+    """Return a redacted version safe to display in the UI (e.g. j***@gmail.com)."""
+    if '@' in value:
+        local, domain = value.split('@', 1)
+        return local[:1] + '***@' + domain
+    # phone: show last 3 digits
+    return '***' + value[-3:]
+
+
 class VendorTokenObtainPairView(TokenObtainPairView):
-    permission_classes = [AllowAny]  # allow guests to login
-    # throttle_classes = [LoginThrottle, AnonLoginThrottle]
+    permission_classes = [AllowAny]
+    throttle_classes = [LoginThrottle, AnonLoginThrottle]
 
     def post(self, request):
+        from .captcha import verify_turnstile
+        token = request.data.get('cf_turnstile_response', '')
+        ip = request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip() or request.META.get('REMOTE_ADDR')
+        if not verify_turnstile(token, ip):
+            return Response({'detail': 'CAPTCHA verification failed. Please try again.'}, status=status.HTTP_400_BAD_REQUEST)
+
         serializer = VendorLoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        return Response({"detail": "OTP sent. Please verify to continue."}, status=200)
+
+        identifier = request.data.get('email', '')
+        response = Response(
+            {
+                "detail": "OTP sent. Please verify to continue.",
+                "masked_identifier": _mask_identifier(identifier),
+            },
+            status=200,
+        )
+        # Store the identifier in an HttpOnly cookie so JS cannot read it
+        response.set_cookie(
+            'otp_identifier',
+            identifier,
+            max_age=600,            # 10 minutes — matches OTP TTL
+            path='/',
+            secure=settings.VENDOR_AUTH_COOKIE_SECURE,
+            httponly=True,
+            samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
+            domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
+        )
+        return response
 
 import logging as _logging
 _otp_logger = _logging.getLogger('otp')
@@ -221,12 +280,13 @@ class VendorOTPVerifyView(APIView):
 
     def post(self, request, *args, **kwargs):
         from .models import OTPRecord
-        email_or_phone = request.data.get("email")
+        # Identifier is read from the HttpOnly cookie set during login — not from the request body
+        email_or_phone = request.COOKIES.get('otp_identifier')
         otp = request.data.get("otp")
 
         if not email_or_phone or not otp:
             return Response(
-                {'detail': 'Email/phone and OTP are required.'},
+                {'detail': 'Session expired or OTP missing. Please log in again.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -252,11 +312,11 @@ class VendorOTPVerifyView(APIView):
             _otp_logger.warning("OTP verify: no valid record for user=%s", user.pk)
             return Response({'detail': 'Invalid or expired OTP.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Validate the OTP value WITHOUT marking it used yet.
-        # We mark it used only after tokens are successfully issued so that
-        # a server error after this point does not silently consume the OTP
-        # and lock the user out of retrying.
-        if otp_record.otp != str(otp).strip():
+        # Validate using constant-time hash comparison (OTP is stored hashed)
+        import hmac as _hmac
+        from .models import OTPRecord as _OTPRecord
+        submitted_hash = _OTPRecord._hash(str(otp).strip())
+        if not _hmac.compare_digest(otp_record.otp, submitted_hash):
             _otp_logger.warning("OTP verify: mismatch for user=%s", user.pk)
             return Response({'detail': 'Invalid or expired OTP.'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -342,6 +402,8 @@ class VendorOTPVerifyView(APIView):
             samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
             domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
         )
+        # Clear the OTP session cookie now that login is complete
+        response.delete_cookie('otp_identifier', path='/', domain=settings.VENDOR_AUTH_COOKIE_DOMAIN)
         return response
 
 class VendorOTPResendView(APIView):
@@ -349,14 +411,35 @@ class VendorOTPResendView(APIView):
     throttle_classes = [LoginThrottle]
 
     def post(self, request, *args, **kwargs):
-        email_or_phone = request.data.get('email')
+        # Read identifier from HttpOnly cookie — not from request body
+        email_or_phone = request.COOKIES.get('otp_identifier')
         if not email_or_phone:
-            return Response({'detail': 'Email or phone required.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'detail': 'Session expired. Please log in again.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         try:
             user = User.objects.get(Q(email__iexact=email_or_phone) | Q(phone=email_or_phone))
             if user.role != 'vendor':
                 return Response({'detail': 'OTP verification not required for this user.'}, status=status.HTTP_400_BAD_REQUEST)
+
             from .models import OTPRecord
+            # Enforce 60-second cooldown between resends
+            recent = OTPRecord.objects.filter(
+                user=user,
+                is_used=False,
+                expires_at__gt=timezone.now(),
+            ).order_by('-created_at').first()
+            if recent:
+                cooldown_seconds = 60
+                elapsed = (timezone.now() - recent.created_at).total_seconds()
+                if elapsed < cooldown_seconds:
+                    wait = int(cooldown_seconds - elapsed)
+                    return Response(
+                        {'detail': f'Please wait {wait} seconds before requesting a new OTP.'},
+                        status=status.HTTP_429_TOO_MANY_REQUESTS,
+                    )
+
             otp = otp_token_generator.generate_otp()
             OTPRecord.create_for_user(user, otp)
             recipient = user.email if '@' in email_or_phone else user.phone

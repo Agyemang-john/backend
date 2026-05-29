@@ -105,6 +105,11 @@ class ChangePasswordView(APIView):
         serializer = ChangePasswordSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             serializer.save()
+            # Invalidate all outstanding JWTs so other devices are logged out immediately
+            from django.db.models import F
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            User.objects.filter(pk=request.user.pk).update(token_version=F('token_version') + 1)
             return Response({"message": "Password updated successfully."}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 

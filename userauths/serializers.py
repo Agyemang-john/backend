@@ -36,12 +36,12 @@ class CustomPasswordResetSerializer(serializers.Serializer):
         if user:
             if not user.has_usable_password():
                 self.send_social_auth_warning_email(user)
+                # Don't reveal the auth provider in the public-facing error
                 raise serializers.ValidationError(
-                    f"This account was registered using {user.auth_provider.capitalize()}. Please use that method to log in."
+                    "This account does not support password login. Please use your original sign-in method."
                 )
             self._user = user
 
-        # return value
         return value
 
     def get_user(self, **kwargs):
@@ -101,41 +101,30 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             except ValidationError:
                 raise serializers.ValidationError("Please enter a valid email address.")
 
-        # 2. Find user
+        # 2. Find user — use a generic error so non-existent accounts are indistinguishable
+        _INVALID = "Invalid credentials."
         try:
             if is_email:
                 user = User.objects.get(email__iexact=identifier)
             else:
                 user = User.objects.get(phone=identifier)
         except User.DoesNotExist:
-            raise serializers.ValidationError(
-                "Email not registered." if is_email else "Phone number not registered."
-            )
+            raise serializers.ValidationError(_INVALID)
 
         # 3. Check if account is locked
         if user.failed_login_attempts >= MAX_FAILED_ATTEMPTS:
             if user.lockout_until and user.lockout_until > timezone.now():
                 raise serializers.ValidationError(
-                    f"Too many failed attempts. Try again after {user.lockout_until.strftime('%H:%M:%S')}."
+                    f"Too many failed attempts. Try again after {user.lockout_until.strftime('%H:%M')}."
                 )
             else:
-                # Reset if lockout expired
                 user.failed_login_attempts = 0
                 user.lockout_until = None
                 user.save(update_fields=["failed_login_attempts", "lockout_until"])
 
-        # 4. Check active
-        if not user.is_active:
-            raise serializers.ValidationError("Your account is not activated yet.")
-
-        # 5. Check suspended
-        if getattr(user, "is_suspended", False):
-            raise serializers.ValidationError("Your account has been suspended. Contact support.")
-
-        # 6. Authenticate credentials
+        # 4. Authenticate credentials first, then reveal account-specific state
         authenticated_user = authenticate(email_or_phone=identifier, password=password)
         if authenticated_user is None:
-            # Increment failed login counter on the actual user object
             User.objects.filter(pk=user.pk).update(
                 failed_login_attempts=F("failed_login_attempts") + 1
             )
@@ -148,7 +137,14 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                     f"Too many failed attempts. Please try again after {LOCKOUT_TIME.seconds // 60} minutes."
                 )
 
-            raise serializers.ValidationError("Incorrect password.")
+            raise serializers.ValidationError(_INVALID)
+
+        # 5. Post-auth state checks (password correct — now safe to reveal status)
+        if not user.is_active:
+            raise serializers.ValidationError("Your account is not activated yet. Check your email for the verification link.")
+
+        if getattr(user, "is_suspended", False):
+            raise serializers.ValidationError("Your account has been suspended. Contact support.")
 
         user.failed_login_attempts = 0
         user.lockout_until = None

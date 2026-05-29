@@ -1,11 +1,16 @@
 from rest_framework.throttling import UserRateThrottle, AnonRateThrottle
 
-# Strict throttle for login attempts (brute force prevention)
 class LoginThrottle(UserRateThrottle):
+    scope = "login"
     rate = "5/min"
 
 class AnonLoginThrottle(AnonRateThrottle):
+    scope = "anon_login"
     rate = "10/min"
+
+class RegisterThrottle(AnonRateThrottle):
+    scope = "register"
+    rate = "5/hour"
 
 
 # Checkout should not be spammed

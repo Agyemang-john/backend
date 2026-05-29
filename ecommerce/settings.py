@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'corsheaders',
     'django_countries',
     'rest_framework',
+    'rest_framework_simplejwt.token_blacklist',
     'django_filters',
     "djoser",
     'social_django',
@@ -233,17 +234,21 @@ REST_FRAMEWORK = {
     ],
 
     "DEFAULT_THROTTLE_RATES": {
-        # Browsing (guests)
         "anon": "4000/day",
-        # Browsing (logged-in)
         "user": "100000/day",
+        "login": "5/min",
+        "anon_login": "10/min",
+        "register": "5/hour",
         "auth_refresh": "30/min",
         "auth_verify": "100/min",
-        # Seller dashboard heartbeat (automated, fires every ~10 min)
         "vendor_heartbeat": "30/hour",
     },
 }
 
+
+# Cloudflare Turnstile CAPTCHA
+TURNSTILE_SECRET_KEY = config('TURNSTILE_SECRET_KEY', default='')
+TURNSTILE_SITE_KEY = config('TURNSTILE_SITE_KEY', default='')
 
 #Paystack configuration
 PAYSTACK_SECRET_KEY = config('PAYSTACK_SECRET_KEY')
@@ -530,13 +535,10 @@ from datetime import timedelta
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'ROTATE_REFRESH_TOKENS': True,
-    'SLIDING_TOKEN_LIFETIME': timedelta(days=1),           # access token sliding window
-    'SLIDING_TOKEN_REFRESH_LIFETIME': timedelta(days=30),
-    'BLACKLIST_AFTER_ROTATION': False,
+    'BLACKLIST_AFTER_ROTATION': True,
     'AUTH_HEADER_TYPES': ('Bearer',),
-    'TOKEN_USER_CLASS': 'rest_framework_simplejwt.models.TokenUser',  # ← works only if blacklist app is gone
     'JTI_CLAIM': 'jti',
     'ALGORITHM': 'HS256',
 }
@@ -812,3 +814,14 @@ IPWARE_TRUSTED_PROXY_COUNT = 0
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 USE_X_FORWARDED_HOST = True
 USE_X_FORWARDED_PORT = True
+
+# ── Security headers (production only) ────────────────────────────────────────
+if not DEBUG:
+    SECURE_SSL_REDIRECT = True
+    SECURE_HSTS_SECONDS = 31536000          # 1 year
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    SECURE_BROWSER_XSS_FILTER = True
+
+X_FRAME_OPTIONS = 'DENY'

@@ -1,4 +1,4 @@
-import random
+import secrets
 import time
 from datetime import timedelta
 from django.core.cache import cache
@@ -10,7 +10,7 @@ class OTPTokenGenerator:
     token_ttl = timedelta(minutes=10)
 
     def generate_otp(self):
-        return random.randint(10000, 99999)
+        return secrets.randbelow(90000) + 10000
 
     def _is_token_expired(self, timestamp):
         """
