@@ -40,7 +40,7 @@ from .signup_serializers import VendorSignupSerializer
 from .hour_serializers import OpeningHourSerializer
 from .about_serializers import AboutSerializer
 from .payment_serializers import VendorPaymentMethodSerializer, PayoutSerializer
-from .product_serializers import ProductSerializer, ProductReviewSerializer, VendorProductListSerializer
+from .product_serializers import ProductSerializer, ProductReviewSerializer, VendorProductListSerializer, VendorProductCardSerializer
 from .order_serializers import VendorOrderSerializer, OrderSerializer
 
 from core.serializers import VendorSerializer as VendorDetail, ProductReviewSerializer as ReviewDetail
@@ -480,18 +480,89 @@ class IsVendorOwner(permissions.BasePermission):
         return hasattr(request.user, 'vendor') and obj.vendor == request.user.vendor
 
 
+class VendorProductPagination(PageNumberPagination):
+    """
+    Server-side pagination for the seller dashboard product grid.
+    `?page=` is the persisted page (the frontend keeps it in the URL so a refresh
+    lands on the same page). `?page_size=` is overridable up to 100.
+    """
+    page_size             = 20
+    page_size_query_param = 'page_size'
+    max_page_size         = 100
+
+    def paginate_queryset(self, queryset, request, view=None):
+        try:
+            return super().paginate_queryset(queryset, request, view)
+        except NotFound:
+            # Requested page no longer exists (e.g. items were deleted, or a
+            # stale ?page= in the URL after a refresh). Clamp to the last page
+            # instead of 404-ing so refresh never breaks.
+            page_size = self.get_page_size(request) or self.page_size
+            paginator = self.django_paginator_class(queryset, page_size)
+            self.page = paginator.page(paginator.num_pages)
+            self.request = request
+            return list(self.page)
+
+    def get_paginated_response(self, data):
+        return Response({
+            'results':      data,
+            'count':        self.page.paginator.count,
+            'total_pages':  self.page.paginator.num_pages,
+            'current_page': self.page.number,
+            'page_size':    self.page.paginator.per_page,
+            'next':         self.get_next_link(),
+            'previous':     self.get_previous_link(),
+        })
+
+
 class ProductListCreateView(SubscriptionGateMixin, generics.ListCreateAPIView):
     serializer_class   = ProductSerializer
     permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    pagination_class   = VendorProductPagination
 
     check_product_limit = True
     check_image_limit   = True
+
+    def get_serializer_class(self):
+        # Light serializer for the dashboard grid; full serializer for create.
+        if self.request.method == 'GET':
+            return VendorProductCardSerializer
+        return ProductSerializer
 
     def get_queryset(self):
         vendor = self.request.user.vendor_user
         if not vendor:
             raise serializers.ValidationError("Vendor profile is required.")
-        return Product.objects.filter(vendor=vendor)
+        qs = Product.objects.filter(vendor=vendor)
+        # On list, apply search/status filters server-side and fetch only the
+        # columns the card renders — avoids hauling the rich-text/spec fields
+        # and the N+1 nested relations.
+        if self.request.method == 'GET':
+            search   = self.request.query_params.get('search', '').strip()
+            status_f = self.request.query_params.get('status', '').strip()
+            if search:
+                qs = qs.filter(title__icontains=search)
+            if status_f and status_f != 'all':
+                qs = qs.filter(status=status_f)
+            qs = qs.only(
+                'id', 'title', 'slug', 'sku', 'image', 'status',
+                'total_quantity', 'price', 'old_price', 'views', 'date',
+            )
+        return qs.order_by('-date')
+
+    def list(self, request, *args, **kwargs):
+        # Standard paginated response, plus catalog-wide status counts so the
+        # dashboard's filter chips stay accurate regardless of the current page.
+        response = super().list(request, *args, **kwargs)
+        vendor = request.user.vendor_user
+        counts = (
+            Product.objects.filter(vendor=vendor)
+            .values('status').annotate(c=Count('id'))
+        )
+        status_counts = {row['status']: row['c'] for row in counts}
+        response.data['status_counts'] = status_counts
+        response.data['catalog_total'] = sum(status_counts.values())
+        return response
 
     # ✅ No perform_create — mixin handles everything
     def get_perform_create_kwargs(self) -> dict:
@@ -676,6 +747,20 @@ class VendorSignupAPIView(APIView):
             return Response({'detail': 'You already have a vendor account.'}, status=400)
         if not user.is_active:
             return Response({'detail': 'Please verify your account before applying.'}, status=400)
+
+        # Early guard: a pending/rejected applicant still has role='customer'
+        # (the role only flips to 'vendor' on approval). Detect the existing
+        # application up-front so the user isn't asked to re-upload the whole
+        # KYC form only to fail at the final create() step.
+        existing = Vendor.objects.filter(user=user).only('status', 'slug').first()
+        if existing:
+            return Response({
+                'detail': 'You have already submitted a vendor application. '
+                          'It is being reviewed — you cannot submit another one.',
+                'code': 'vendor_exists',
+                'vendor_status': existing.status,
+                'slug': existing.slug,
+            }, status=status.HTTP_409_CONFLICT)
 
         # Build a mutable data dict, parsing JSON strings for nested serializers
         data = {}

@@ -307,6 +307,22 @@ class ProductReviewSerializer(serializers.ModelSerializer):
         return representation
 
 
+class VendorProductCardSerializer(serializers.ModelSerializer):
+    """
+    Ultra-light read-only serializer for the seller dashboard product grid.
+
+    Only the columns the product card actually renders — no nested images,
+    variants, delivery options, regions or rich-text fields — so a vendor's
+    whole catalogue serializes fast even when there are thousands of products.
+    Used for the GET (list) on ProductListCreateView; create/edit still use the
+    full ProductSerializer.
+    """
+    class Meta:
+        model = Product
+        fields = ['id', 'title', 'slug', 'sku', 'image', 'status',
+                  'total_quantity', 'price', 'old_price', 'views']
+
+
 class VendorProductListSerializer(serializers.ModelSerializer):
     """
     Read-only serializer for the seller store products list.
