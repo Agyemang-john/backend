@@ -8,12 +8,10 @@ from address.serializers import AddressSerializer
 from django.http import Http404
 from django.core.cache import cache
 from rest_framework.permissions import AllowAny
-from product.service import get_recommended_products, get_cart_based_recommendations, get_cart_product_ids
 from rest_framework import status
 from rest_framework.views import APIView
 from decimal import Decimal
 from order.service import *
-from .service import get_fbt_recommendations
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import F
 from rest_framework.pagination import PageNumberPagination
@@ -116,50 +114,6 @@ from .models import Product
 from .serializers import ProductSerializer
 
 
-class ProductRecommendationsAPIView(APIView):
-    def get(self, request, sku, slug):
-        # Step 1: Get only the IDs we need — no select_related conflict!
-        product = get_object_or_404(
-            Product.published.only('id', 'sub_category_id', 'vendor_id'),
-            sku=sku,
-            slug=slug
-        )
-
-        # Step 2: Build base queryset WITHOUT select_related on the main product query
-        # We use .only() + select_related only on the final slices
-        base_qs = Product.published.exclude(id=product.id)
-
-        # Related products (same sub_category)
-        related_products = list(
-            base_qs.filter(sub_category_id=product.sub_category_id)
-                   .select_related('vendor', 'sub_category')
-                   .only(
-                       'id', 'title', 'sku', 'slug', 'price', 'old_price', 'image',
-                       'vendor__name', 'vendor__slug', 'sub_category__slug'
-                   )[:12]
-        )
-
-        # Vendor products (same vendor)
-        vendor_products = list(
-            base_qs.filter(vendor_id=product.vendor_id)
-                   .select_related('vendor')
-                   .only(
-                       'id', 'title', 'sku', 'slug', 'price', 'old_price', 'image',
-                       'vendor__name', 'vendor__slug'
-                   )[:12]
-        )
-
-        # Serialize properly
-        serializer = ProductSerializer(many=True, context={'request': request})
-
-        data = {
-            "related_products": serializer.to_representation(related_products),
-            "vendor_products": serializer.to_representation(vendor_products),
-        }
-
-        return Response(data)
-
-from django.db.models import Prefetch
 def get_cached_product_data(sku: str, slug: str, request):
     """
     Fast cached product detail data — NO related/vendor products
@@ -565,7 +519,6 @@ class SearchSuggestionsAPIView(APIView):
         cache.set(cache_key, suggestions, timeout=600)
 
         return Response(suggestions, status=status.HTTP_200_OK)
-
 
 
 class CategoryProductListView(APIView):
@@ -1161,63 +1114,6 @@ class SyncRecentlyViewedView(APIView):
             sync_recently_viewed_db.delay(request.user.pk, pid)
 
         return Response({"synced": len(product_ids)})
-
-
-class CartRecommendationsAPIView(APIView):
-    permission_classes = [AllowAny]
-
-    def get(self, request):
-        # Get current cart product IDs — works for guest (session) AND logged-in (DB)
-        cart_product_ids = get_cart_product_ids(request)
-
-        # 1. Frequently Bought Together (based on cart co-occurrence)
-        bought_together_set = set()
-        for pid in cart_product_ids:
-            related = get_cart_based_recommendations(pid)
-            bought_together_set.update(related.values_list('id', flat=True))
-
-        bought_together = Product.published.filter(
-            id__in=bought_together_set
-        ).exclude(id__in=cart_product_ids)[:10]
-
-        # 2. Personalized Recommendations (category, FBT, trending)
-        personalized = get_recommended_products(request)
-
-        return Response({
-            "frequently_bought_together": ProductSerializer(
-                bought_together,
-                many=True,
-                context={'request': request}
-            ).data,
-            "recommended_for_you": ProductSerializer(
-                personalized,
-                many=True,
-                context={'request': request}
-            ).data,
-        }, status=status.HTTP_200_OK)
-    
-
-class FrequentlyBoughtTogetherAPIView(APIView):
-
-    def get(self, request):
-        # Step 1: Get the cart for the current request
-        cart = Cart.objects.get_for_request(request)
-        if not cart:
-            return Response([], status=200)
-
-        # Step 2: Extract product IDs from CartItems
-        cart_items = CartItem.objects.filter(cart=cart).select_related('product')
-        cart_product_ids = [item.product.id for item in cart_items if item.product]
-
-        if not cart_product_ids:
-            return Response([], status=200)
-
-        # Step 3: Get FBT recommendations
-        related_products = get_fbt_recommendations(cart_product_ids)
-
-        # Step 4: Serialize and return
-        serializer = ProductSerializer(related_products, many=True, context={'request': request})
-        return Response(serializer.data, status=200)
 
 
 class OccasionListAPIView(APIView):

@@ -26,6 +26,7 @@ urlpatterns = [
     path("api/v1/address/", include("address.urls")),
     path("api/v1/newsletter/", include("newsletter.urls")),
     path("api/v1/notification/", include("notification.urls")),
+    path("api/v1/recommendations/", include("recommendation.urls")),
     path("ckeditor5/", include('django_ckeditor_5.urls')),
 ]
 

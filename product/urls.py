@@ -28,11 +28,8 @@ urlpatterns = [
     path('recently-viewed-products/', views.RecentlyViewedProducts.as_view(), name='viewed'),
 
     path('mark-viewed/', views.MarkProductViewedAPIView.as_view(), name='mark-viewed'),
-    path('recommendations/', views.CartRecommendationsAPIView.as_view(), name='cart-recommendations'),
-    path('frequently-bought/', views.FrequentlyBoughtTogetherAPIView.as_view(), name='fbt'),
 
     # Product detail view (specific SKU and slug)
     path('<sku>/<slug>/auth-state/', views.ProductAuthStateAPIView.as_view(), name='product-auth-state'),
     path('<sku>/<slug>/', views.ProductDetailAPIView.as_view(), name='product-detail-api'),
-    path('recommendations/<sku>/<slug>/', views.ProductRecommendationsAPIView.as_view(), name='product-recommendations'),
 ]

@@ -1,6 +1,10 @@
 """
 core/urls.py
-URL routing for the core app (homepage data, navigation, recommendations).
+URL routing for the core app (homepage data, navigation, promos).
+
+Recommendation and deals endpoints live in the `recommendation` app, mounted
+at /api/v1/recommendations/ — the rails that used to be served from here are
+now driven by the trained models rather than by ad-hoc queries.
 """
 
 from django.urls import path
@@ -16,12 +20,7 @@ urlpatterns = [
     path('top-category/', TopEngagedCategoryView.as_view(), name='top-category'),
     path('category/<slug:slug>/', CategoryDetailView.as_view(), name='category-detail'),
     path('index/', MainAPIView.as_view(), name='index'),
-    path('recently-related/', RecentlyViewedRelatedProductsAPIView.as_view(), name='recently-related'),
     path('searched-products/', SearchedProducts.as_view(), name='searched-products'),
     path('search-history/', SearchHistoryView.as_view(), name='search-history'),
-    path('recommended-products/', RecommendedProducts.as_view(), name='recommended-products'),
-    path('trending-products/', TrendingProductsAPIView.as_view(), name='trending-products'),
-    path('cart-suggested-products/', SuggestedCartProductsAPIView.as_view(), name='cart-suggested-products'),
-    path('deals/', DealsAPIView.as_view(), name='deals'),
     path('community/links/', SocialLinksView.as_view(), name='community-links'),
 ]

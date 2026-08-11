@@ -1,7 +1,7 @@
 # tasks.py
 import redis
 from celery import shared_task
-from .models import Product, FrequentlyBoughtTogether, Brand, Category, Sub_Category, FlashSale, ProductViewLog, ProductDailyStats, RecentlyViewedProduct
+from .models import Product, Brand, Category, Sub_Category, FlashSale, ProductViewLog, ProductDailyStats, RecentlyViewedProduct
 from .trending import compute_all_trending_scores
 from celery import shared_task
 from django.db.models import Sum
@@ -124,48 +124,11 @@ def update_trending_scores(self):
 
 
 
-import pandas as pd
-from mlxtend.frequent_patterns import apriori, association_rules
-from celery import shared_task
-from order.models import Order
-
-@shared_task
-def generate_fbt():
-    # Step 1: Gather product transactions
-    orders = Order.objects.prefetch_related('order_products__product')
-    transactions = [
-        list({item.product.id for item in order.order_products.all()})
-        for order in orders
-        if order.order_products.exists()
-    ]
-
-    if not transactions:
-        return "No transactions to process"
-
-    # Step 2: One-hot encoding (ensuring no duplicates)
-    df = pd.DataFrame(transactions)
-    df = df.apply(lambda x: pd.Series(1, index=pd.unique(x.dropna())), axis=1).fillna(0)
-
-    # Step 3: Run Apriori
-    frequent_itemsets = apriori(df, min_support=0.01, use_colnames=True)
-    if frequent_itemsets.empty:
-        return "No frequent itemsets found"
-
-    rules = association_rules(frequent_itemsets, metric="lift", min_threshold=1.0)
-    if rules.empty:
-        return "No association rules generated"
-
-    # Step 4: Save rules
-    FrequentlyBoughtTogether.objects.all().delete()
-    for _, row in rules.iterrows():
-        for a in row["antecedents"]:
-            for c in row["consequents"]:
-                if a != c:
-                    FrequentlyBoughtTogether.objects.get_or_create(
-                        product_id=a, recommended_id=c
-                    )
-
-    return f"Generated {rules.shape[0]} association rules"
+# generate_fbt() lived here: an mlxtend/apriori job that rebuilt
+# FrequentlyBoughtTogether every six hours. Superseded by
+# recommendation.similarity.build_co_purchase(), which computes the same
+# pairings with cosine normalisation — so a best-seller stops appearing as a
+# "complement" to everything — and without loading pandas into the worker.
 
 
 @shared_task(ignore_result=True)

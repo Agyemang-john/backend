@@ -141,7 +141,6 @@ admin.site.register(Variants, VariantsAdmin)
 admin.site.register(VariantImage, VariantImageAdmin)
 admin.site.register(Coupon)
 admin.site.register(ClippedCoupon)
-admin.site.register(FrequentlyBoughtTogether)
 
 
 @admin.register(FlashSale)

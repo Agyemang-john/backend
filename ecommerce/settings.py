@@ -59,6 +59,7 @@ INSTALLED_APPS = [
     'django_ckeditor_5',
     'django_celery_beat',
     'notification',
+    'recommendation',
 ]
 
 MIDDLEWARE = [
@@ -383,11 +384,6 @@ CELERY_BEAT_SCHEDULE = {
         "task": "product.tasks.update_brand_engagement_scores",
         "schedule": 3600,
     },
-    # Rebuild FBT rules every 6 hours
-    "generate-fbt": {
-        "task": "product.tasks.generate_fbt",
-        "schedule": 21600,
-    },
     # Expire flash sales every 60 seconds
     "expire-flash-sales": {
         "task": "product.tasks.expire_flash_sales",
@@ -438,6 +434,34 @@ CELERY_BEAT_SCHEDULE = {
     #     "schedule": 14400,  # 4 hours
     #     "options": {"expires": 13000},
     # },
+
+    # ── Recommender ───────────────────────────────────────────────────────────
+    # Full retrain: ALS collaborative factors, TF-IDF/SVD content embeddings,
+    # blended item-item neighbours, and the per-shopper "Recommended for you"
+    # rails. Nightly at 02:30 UTC — taste shifts over days, and off-peak keeps
+    # the CPU spike away from shoppers. Skips itself if a run is still going.
+    "train-recommender": {
+        "task": "recommendation.tasks.train_recommender",
+        "schedule": crontab(hour=2, minute=30),
+        "options": {"expires": 7200},
+    },
+    # Rescore "Today's Deals" hourly: snapshots today's prices (which is what
+    # makes the anti-inflation check possible) then reranks every deal.
+    "score-deals": {
+        "task": "recommendation.tasks.score_deals",
+        "schedule": 3600,
+        "options": {"expires": 3000},
+    },
+    # Log click-through and add-to-cart rate per rail, weekly.
+    "recommendation-surface-report": {
+        "task": "recommendation.tasks.report_surface_performance",
+        "schedule": crontab(day_of_week="monday", hour=6, minute=0),
+    },
+    # Drop recommendation events older than 90 days and price history over a year.
+    "prune-recommendation-events": {
+        "task": "recommendation.tasks.prune_recommendation_events",
+        "schedule": crontab(day_of_week="sunday", hour=3, minute=30),
+    },
 
     # Delete media files that are no longer referenced by any DB record.
     # Runs once a week (Sunday at 02:00 UTC) to keep storage costs down.

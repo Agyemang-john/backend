@@ -7,12 +7,11 @@ API views for the homepage and supporting data:
 - CategoryDetailView: single category with subcategories
 - TopEngagedCategoryView: highest-engagement category
 - MainAPIView: combined homepage payload (products, brands, subcategories)
-- RecentlyViewedRelatedProductsAPIView: related products based on recently viewed
 - SearchedProducts: persists search history in cookies
-- RecommendedProducts: personalised recommendations from viewed + searched
-- TrendingProductsAPIView: top trending products by score
-- SuggestedCartProductsAPIView: suggestions based on current cart contents
 - MakeDefaultAddressView: set/get default address for a user
+
+Recommendation rails (deals, recommended-for-you, similar items, cart add-ons)
+moved to the `recommendation` app, which serves them from trained models.
 """
 
 from django.shortcuts import get_object_or_404
@@ -245,47 +244,6 @@ class MainAPIView(APIView):
         return Response(response_data, status=status.HTTP_200_OK)
 
 
-
-class RecentlyViewedRelatedProductsAPIView(APIView):
-    def get(self, request):
-        if request.user.is_authenticated:
-            product_ids = list(
-                RecentlyViewedProduct.objects.filter(user=request.user)
-                .order_by('-viewed_at')
-                .values_list('product_id', flat=True)[:10]
-            )
-        else:
-            product_ids = get_recently_viewed_ids(request)
-
-        if not product_ids:
-            return Response([], status=status.HTTP_200_OK)
-
-        position = int(request.query_params.get("position", 0))
-        if position >= len(product_ids):
-            return Response([], status=status.HTTP_200_OK)
-
-        product_id = product_ids[position]
-
-        try:
-            product = Product.published.select_related("sub_category").get(pk=product_id)
-        except Product.DoesNotExist:
-            return Response([], status=status.HTTP_200_OK)
-
-        if not product.sub_category:
-            return Response([], status=status.HTTP_200_OK)
-
-        related_products = (
-            Product.published
-            .filter(sub_category=product.sub_category)
-            .exclude(id=product.id)
-            .only('id', 'title', 'slug', 'sku', 'image', 'price', 'old_price')
-            [:10]
-        )
-
-        serializer = LightProductSerializer(related_products, many=True, context={'request': request})
-        return Response(serializer.data)
-
-
 class SearchedProducts(APIView):
     def post(self, request):
         from django.utils import timezone as tz
@@ -339,105 +297,6 @@ class SearchedProducts(APIView):
         return response
 
 
-class RecommendedProducts(APIView):
-    def get(self, request):
-        # -----------------------------
-        # 1. Recently viewed — DB for auth users, Redis for guests
-        # -----------------------------
-        if request.user.is_authenticated:
-            viewed_product_ids = list(
-                RecentlyViewedProduct.objects.filter(user=request.user)
-                .order_by('-viewed_at')
-                .values_list('product_id', flat=True)[:10]
-            )
-        else:
-            viewed_product_ids = get_recently_viewed_ids(request)
-
-        viewed_products_qs = (
-            Product.published
-            .filter(id__in=viewed_product_ids)
-            .only('id', 'title', 'slug', 'sku', 'image', 'price', 'old_price', 'sub_category_id')
-        )
-        products_dict = {p.id: p for p in viewed_products_qs}
-        sorted_viewed_products = [
-            products_dict[pid] for pid in viewed_product_ids if pid in products_dict
-        ]
-
-        # -----------------------------
-        # 2. Related by category
-        # -----------------------------
-        sub_category_ids = {
-            p.sub_category_id for p in viewed_products_qs if p.sub_category_id
-        }
-        related_products = (
-            Product.published
-            .filter(sub_category_id__in=sub_category_ids)
-            .exclude(id__in=viewed_product_ids)
-            .only('id', 'title', 'slug', 'sku', 'image', 'price', 'old_price')
-            .order_by('?')[:20]
-        )
-
-        # -----------------------------
-        # 3. Related by search history — DB for auth users, header for guests
-        # -----------------------------
-        if request.user.is_authenticated:
-            search_history = list(
-                SearchHistory.objects.filter(user=request.user)
-                .order_by('-searched_at')
-                .values_list('query', flat=True)[:5]
-            )
-        else:
-            try:
-                search_history = json.loads(request.headers.get('X-Search-History', '[]'))
-                if not isinstance(search_history, list):
-                    search_history = []
-            except Exception:
-                search_history = []
-
-        search_related_products = Product.objects.none()
-        if search_history:
-            search_q = Q()
-            for query in search_history[:5]:
-                search_q |= Q(title__icontains=query) | Q(description__icontains=query)
-            search_related_products = (
-                Product.published
-                .filter(search_q)
-                .exclude(id__in=viewed_product_ids)
-                .only('id', 'title', 'slug', 'sku', 'image', 'price', 'old_price')
-                .distinct()[:20]
-            )
-
-        # -----------------------------
-        # 4. Combine and limit
-        # -----------------------------
-        seen = set()
-        combined = []
-        for p in list(related_products) + list(search_related_products):
-            if p.id not in seen:
-                seen.add(p.id)
-                combined.append(p)
-        recommending_products = combined[:10]
-
-        if not sorted_viewed_products and not search_history:
-            recommending_products = (
-                Product.published
-                .only('id', 'title', 'slug', 'sku', 'image', 'price', 'old_price')
-                .order_by('-views')[:10]
-            )
-
-        # -----------------------------
-        # 5. Serialize & return
-        # -----------------------------
-        return Response({
-            'recently_viewed': LightProductSerializer(
-                sorted_viewed_products, many=True, context={'request': request}
-            ).data,
-            'recommended_products': LightProductSerializer(
-                recommending_products, many=True, context={'request': request}
-            ).data,
-        })
-    
-
 class SearchHistoryView(APIView):
     """
     GET  — return the user's search history (DB for auth, cookie for guest).
@@ -467,96 +326,6 @@ class SearchHistoryView(APIView):
             else:
                 SearchHistory.objects.filter(user=request.user).delete()
         return Response({'status': 'ok'})
-
-
-class TrendingProductsAPIView(APIView):
-    """Returns top 20 products by trending_score, cached for 10 minutes."""
-
-    def get(self, request):
-        _CACHE_KEY = "top_trending_products"
-        products_data = cache.get(_CACHE_KEY)
-
-        if not products_data:
-            products = (
-                Product.published.all()
-                .order_by('-trending_score', '-views')[:20]
-            )
-            products_data = list(TrendingProductSerializer(products, many=True, context={'request': request}).data)
-            cache.set(_CACHE_KEY, products_data, timeout=600)
-
-        currency = request.headers.get('X-Currency', 'GHS')
-        rates = get_exchange_rates()
-        return Response(_apply_currency(products_data, currency, rates))
-
-# Suggested products based on cart
-class SuggestedCartProductsAPIView(APIView):
-    def get(self, request):
-        try:
-            cart_product_ids = []
-
-            if request.user.is_authenticated:
-                cart = Cart.objects.get_for_request(request)
-                cart_items = cart.cart_items.select_related("product").all() if cart else []
-                cart_product_ids = [item.product.id for item in cart_items if item.product]
-            else:
-                guest_cart_header = request.headers.get('X-Guest-Cart')
-                try:
-                    guest_cart = json.loads(guest_cart_header) if guest_cart_header else []
-                    cart_product_ids = [int(item.get("p")) for item in guest_cart if item.get("p")]
-                except Exception as e:
-                    return Response({"detail": "Invalid guest cart"}, status=status.HTTP_400_BAD_REQUEST)
-
-            if not cart_product_ids:
-                return Response({"suggested": []})
-
-            # Get related subcategories or brands
-            products_in_cart = Product.objects.filter(id__in=cart_product_ids)
-            sub_categories = products_in_cart.values_list("sub_category", flat=True)
-            brands = products_in_cart.values_list("brand", flat=True)
-
-            # Suggest products from same subcategories or brands but not already in cart
-            suggested_products = Product.published.filter(
-                Q(sub_category__in=sub_categories) | Q(brand__in=brands),
-                ~Q(id__in=cart_product_ids),
-                status="published"
-            ).distinct()[:12]  # limit suggestions
-
-            serialized = ProductSerializer(suggested_products, many=True, context={'request': request}).data
-            return Response(serialized)
-
-        except Exception as e:
-            return Response(
-                {"detail": "Failed to load suggestions", "error": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-class DealsAPIView(APIView):
-    """Returns up to 20 products with active discounts, cached for 10 minutes."""
-
-    def get(self, request):
-        from django.db.models import F, ExpressionWrapper, FloatField
-
-        products_data = cache.get("deals_products")
-
-        if not products_data:
-            products = (
-                Product.published.filter(old_price__isnull=False)
-                .filter(old_price__gt=F("price"))
-                .annotate(
-                    discount_pct=ExpressionWrapper(
-                        (F("old_price") - F("price")) * 100.0 / F("old_price"),
-                        output_field=FloatField(),
-                    )
-                )
-                .order_by("-discount_pct")[:20]
-            )
-            # No request context — stores raw GHS prices
-            products_data = list(DealsProductSerializer(products, many=True, context={'request': request}).data)
-            cache.set("deals_products", products_data, timeout=600)
-
-        currency = request.headers.get("X-Currency", "GHS")
-        rates = get_exchange_rates()
-        return Response(_apply_currency(products_data, currency, rates))
 
 
 class MakeDefaultAddressView(APIView):

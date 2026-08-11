@@ -452,12 +452,11 @@ class VariantImage(models.Model):
         return mark_safe('<img src="%s" width="50" height="50" />' % (self.images.url))
 
 
-class FrequentlyBoughtTogether(models.Model):
-    product = models.ForeignKey(Product, related_name='frequently_bought_with', on_delete=models.CASCADE)
-    recommended = models.ForeignKey(Product, related_name='+', on_delete=models.CASCADE)
-
-    class Meta:
-        unique_together = ('product', 'recommended')
+# FrequentlyBoughtTogether lived here — a table of apriori association rules
+# rebuilt every six hours by product.tasks.generate_fbt. Superseded by
+# recommendation.ProductNeighbor (kind='co_purchase'), which scores the same
+# pairings as cosine-normalised co-occurrence rather than raw support, so the
+# platform's best-seller stops appearing as a "complement" to every product.
 
 from django.core.validators import MinValueValidator, MaxValueValidator
 class ProductReview(models.Model):
