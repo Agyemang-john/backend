@@ -585,7 +585,7 @@ CSRF_TRUSTED_ORIGINS = [
     "https://www.negromart.com",
     "https://seller.negromart.com",
     "https://corporate.negromart.com",
-    "https://api.negromart.com",
+    "https://app.negromart.com",
 ]
 
 if DEBUG:
