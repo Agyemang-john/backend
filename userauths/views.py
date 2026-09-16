@@ -141,10 +141,12 @@ class CustomTokenRefreshView(TokenRefreshView):
 
         if response.status_code == 200:
             access_token = response.data.get("access")
+            refresh_token = response.data.get("refresh")
 
-            # Set new access cookie
+            # New access token
             response.set_cookie(
-                "access", access_token,
+                "access",
+                access_token,
                 max_age=settings.AUTH_ACCESS_MAX_AGE,
                 path=settings.AUTH_COOKIE_PATH,
                 secure=settings.AUTH_COOKIE_SECURE,
@@ -152,6 +154,21 @@ class CustomTokenRefreshView(TokenRefreshView):
                 samesite=settings.AUTH_COOKIE_SAMESITE,
                 domain=settings.AUTH_COOKIE_DOMAIN,
             )
+
+            # IMPORTANT:
+            # Save the rotated refresh token too
+            if refresh_token:
+                response.set_cookie(
+                    "refresh",
+                    refresh_token,
+                    max_age=settings.AUTH_REFRESH_MAX_AGE,
+                    path=settings.AUTH_COOKIE_PATH,
+                    secure=settings.AUTH_COOKIE_SECURE,
+                    httponly=True,
+                    samesite=settings.AUTH_COOKIE_SAMESITE,
+                    domain=settings.AUTH_COOKIE_DOMAIN,
+                )
+
             if request.headers.get("X-SSR-Refresh") != "true":
                 response.data = {}
 
