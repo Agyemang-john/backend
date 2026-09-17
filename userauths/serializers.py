@@ -221,18 +221,33 @@ class CustomerCustomTokenRefreshSerializer(TokenRefreshSerializer):
 
         data = super().validate(attrs)
 
-        # Re-add custom claims to the new access token
-        refresh = _RT(refresh_token)
-        access = refresh.access_token
+        # ROTATE_REFRESH_TOKENS + BLACKLIST_AFTER_ROTATION mean super().validate()
+        # has just blacklisted `refresh_token`; re-parsing it here would raise
+        # "Token is blacklisted".  Build the new access token from the *rotated*
+        # refresh instead (falling back to the original if rotation is disabled).
+        source_refresh = _RT(data["refresh"]) if data.get("refresh") else _RT(refresh_token)
+        new_jti = source_refresh.payload.get("jti")
+        access = source_refresh.access_token
+
         if user_id:
             try:
-                user = User.objects.only("role", "is_active", "is_staff").get(id=user_id)
+                user = User.objects.only(
+                    "role", "is_active", "is_staff", "token_version"
+                ).get(id=user_id)
                 access["role"] = user.role or "customer"
                 access["is_active"] = user.is_active
                 access["is_staff"] = user.is_staff
                 access["token_version"] = user.token_version
             except User.DoesNotExist:
                 pass
+
+        # Follow the device session onto the rotated jti — otherwise the *next*
+        # refresh fails the session-existence check above and logs the user out.
+        if jti and new_jti and new_jti != jti:
+            from .models import UserSession
+            UserSession.objects.filter(
+                session_key=jti, is_vendor_session=False
+            ).update(session_key=new_jti, last_activity=timezone.now())
 
         data["access"] = str(access)
         return data
