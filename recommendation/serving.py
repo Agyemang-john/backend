@@ -33,6 +33,7 @@ from .models import (
     KIND_CO_PURCHASE, KIND_CONTENT, KIND_HYBRID, ModelRun, NotInterested,
     ProductDealScore, ProductNeighbor, SURFACE_FOR_YOU, UserRecommendation,
 )
+from .serializers import CARD_ONLY_FIELDS
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +106,7 @@ def _ordered_by_ids(product_ids: list[int]):
     return list(
         Product.published
         .filter(pk__in=product_ids)
-        .select_related('vendor', 'sub_category')
+        .only(*CARD_ONLY_FIELDS)
         .order_by(ordering)
     )
 
@@ -276,7 +277,7 @@ def more_from_seller(product_id: int, vendor_id: int | None = None, limit: int =
         Product.published
         .filter(vendor_id=vendor_id)
         .exclude(id=product_id)
-        .select_related('vendor', 'sub_category')
+        .only(*CARD_ONLY_FIELDS)
         .order_by('-trending_score', '-avg_rating')[:limit]
     )
 
@@ -350,7 +351,6 @@ def recommended_for_you(request, limit: int = 20):
     if recent:
         exclude = set(recent) | dismissed
         scores: dict[int, float] = {}
-        seed_of: dict[int, int] = {}
 
         rows = (
             ProductNeighbor.objects
@@ -365,25 +365,11 @@ def recommended_for_you(request, limit: int = 20):
             # about what the shopper is looking for right now.
             recency = 1.0 / (1 + recent.index(seed_id)) if seed_id in recent else 0.5
             contribution = float(score) * recency
-            if contribution > scores.get(neighbor_id, 0.0):
-                seed_of[neighbor_id] = seed_id
             scores[neighbor_id] = scores.get(neighbor_id, 0.0) + contribution
 
         if scores:
             ranked = [pid for pid, _ in sorted(scores.items(), key=lambda kv: -kv[1])][:limit]
-            products = _ordered_by_ids(_fill(ranked, limit, exclude))
-
-            from product.models import Product
-            seed_titles = dict(
-                Product.objects.filter(id__in=set(seed_of.values()))
-                .values_list('id', 'title')
-            )
-            reasons = {
-                product_id: f"Because you viewed {seed_titles[seed_id][:80]}"
-                for product_id, seed_id in seed_of.items()
-                if seed_id in seed_titles
-            }
-            return products, reasons
+            return _ordered_by_ids(_fill(ranked, limit, exclude)), {}
 
     # Nothing known about this visitor at all.
     ids = _fill([], limit, dismissed)

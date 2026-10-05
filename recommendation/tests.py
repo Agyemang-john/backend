@@ -561,24 +561,23 @@ class ApiContractTests(CatalogMixin, RecommenderTestCase):
     """
     The exact response shape the storefront reads.
 
-    The frontend destructures these field names directly — `results[].reason`
-    captions each tile, `deal_price` / `savings_percent` / `stock_remaining`
-    drive the deal card, `more_from_seller` is a whole rail on the product page.
+    The frontend destructures these field names directly — `price` / `old_price`
+    / `average_rating` / `review_count` render each tile, `deal_price` drives
+    the deal card, `more_from_seller` is a whole rail on the product page.
     Renaming any of them silently blanks part of the UI rather than raising
     anything, so the contract is pinned here.
     """
 
     CARD_FIELDS = {
         'id', 'title', 'slug', 'sku', 'image', 'price', 'old_price',
-        'average_rating', 'review_count', 'vendor_name', 'sub_category_slug',
-        'discount_percent', 'reason',
+        'average_rating', 'review_count', 'discount_percent',
         # Stamped per card by apply_currency() rather than declared on the
         # serializer — the card is the only place the frontend can read which
         # currency the price is in.
         'currency',
     }
     DEAL_FIELDS = CARD_FIELDS | {
-        'deal_price', 'savings_percent', 'stock_remaining', 'has_flash_sale', 'deal_score',
+        'deal_price', 'savings_percent', 'deal_score',
     }
 
     @classmethod

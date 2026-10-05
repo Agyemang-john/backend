@@ -60,6 +60,7 @@ from payments.subscription_permissions import (
 
 from dateutil.parser import parse
 import requests, logging, difflib, re, time
+from decimal import Decimal, InvalidOperation
 logger = logging.getLogger(__name__)
 
 
@@ -864,40 +865,150 @@ class MarkVendorViewedAPIView(APIView):
 
 
 class VendorProductsView(APIView):
-    def get(self, request, slug):
-        vendor    = get_object_or_404(Vendor, slug=slug)
-        PAGE_SIZE = 8
+    """
+    GET /api/v1/vendor/seller-detail/<slug>/products/
+
+    The seller storefront grid: 16 lightweight cards per page, filtered and
+    sorted in the database.
+
+    Query params (all optional):
+        page        1-based page number
+        sort        newest (default) | price_asc | price_desc | rating | popular
+        category    sub-category slug
+        min_price   in the shopper's currency (X-Currency), converted to GHS here
+        max_price   ditto
+        rating      minimum average rating (1-5)
+        on_sale     1 → only products whose old_price is above price
+
+    Speed: one COUNT + one 16-row SELECT of card columns only, no per-product
+    queries. Pages are cached in GHS for a minute and converted per request, so
+    the cache is shared across currencies. The category facet list is cached
+    separately for ten minutes.
+    """
+
+    permission_classes = [AllowAny]
+
+    PAGE_SIZE = 16
+    PAGE_TTL = 60
+    FACET_TTL = 60 * 10
+    CARD_FIELDS = ('id', 'title', 'slug', 'sku', 'image', 'price', 'old_price', 'avg_rating', 'review_count')
+    SORTS = {
+        'newest':     ('-date',),
+        'price_asc':  ('price', '-date'),
+        'price_desc': ('-price', '-date'),
+        'rating':     ('-avg_rating', '-review_count', '-date'),
+        'popular':    ('-views', '-date'),
+    }
+
+    @staticmethod
+    def _decimal(value):
         try:
-            page = int(request.GET.get('page', 1))
-        except (ValueError, TypeError):
+            number = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        return number if number.is_finite() and number >= 0 else None
+
+    def get(self, request, slug):
+        from core.service import get_exchange_rates
+
+        params = request.query_params
+        currency = request.headers.get('X-Currency', 'GHS')
+        rate = Decimal(str(get_exchange_rates().get(currency, 1))) or Decimal(1)
+
+        try:
+            page = max(1, int(params.get('page', 1)))
+        except (TypeError, ValueError):
             page = 1
+        sort = params.get('sort') if params.get('sort') in self.SORTS else 'newest'
+        category = (params.get('category') or '').strip()[:150]
+        min_price = self._decimal(params.get('min_price'))
+        max_price = self._decimal(params.get('max_price'))
+        min_rating = self._decimal(params.get('rating'))
+        on_sale = params.get('on_sale') in ('1', 'true')
 
-        products = Product.published.filter(vendor=vendor).order_by('-date')
+        # Price bounds arrive in the shopper's currency; prices are stored in GHS.
+        ghs_min = (min_price / rate).quantize(Decimal('0.01')) if min_price is not None else None
+        ghs_max = (max_price / rate).quantize(Decimal('0.01')) if max_price is not None else None
 
-        total_items = products.count()
-        total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
-        page        = max(1, min(page, total_pages))
-        paged       = products[(page - 1) * PAGE_SIZE: page * PAGE_SIZE]
+        cache_key = 'vendor_products:{}:{}'.format(slug, '|'.join(map(str, (
+            page, sort, category, ghs_min, ghs_max, min_rating, on_sale,
+        ))))
+        payload = cache.get(cache_key)
 
-        products_data = []
-        for product in paged:
-            product_variants = Variants.objects.filter(product=product).select_related('color', 'size')
-            products_data.append({
-                'product':        VendorProductListSerializer(product, context={'request': request}).data,
-                'average_rating': product.avg_rating,
-                'review_count':   product.review_count,
-                'variants':       VariantsSerializer(product_variants, many=True, context={'request': request}).data,
-                'colors':         list(product_variants.values('color__name', 'color__code', 'id').distinct()),
-            })
+        if payload is None:
+            vendor_id = Vendor.objects.filter(slug=slug).values_list('id', flat=True).first()
+            if vendor_id is None:
+                raise Http404
 
-        def build_url(p):
-            return f"/api/v1/vendor/seller-detail/{slug}/products/?page={p}" if 1 <= p <= total_pages else None
+            products = Product.published.filter(vendor_id=vendor_id)
+            if category:
+                products = products.filter(sub_category__slug=category)
+            if ghs_min is not None:
+                products = products.filter(price__gte=ghs_min)
+            if ghs_max is not None:
+                products = products.filter(price__lte=ghs_max)
+            if min_rating is not None:
+                products = products.filter(avg_rating__gte=float(min_rating))
+            if on_sale:
+                products = products.filter(old_price__gt=F('price'))
 
-        return Response({
-            'products': products_data, 'total': total_items,
-            'current_page': page, 'total_pages': total_pages,
-            'next': build_url(page + 1), 'previous': build_url(page - 1) if page > 1 else None,
-        })
+            total = products.count()
+            total_pages = max(1, -(-total // self.PAGE_SIZE))
+            page = min(page, total_pages)
+            offset = (page - 1) * self.PAGE_SIZE
+            rows = products.order_by(*self.SORTS[sort]).only(*self.CARD_FIELDS)[offset:offset + self.PAGE_SIZE]
+
+            payload = {
+                'total': total,
+                'page': page,
+                'total_pages': total_pages,
+                'page_size': self.PAGE_SIZE,
+                'results': [
+                    {
+                        'id': p.id,
+                        'title': p.title,
+                        'slug': p.slug,
+                        'sku': p.sku,
+                        'image': p.image.url if p.image else None,
+                        'price': p.price,
+                        'old_price': p.old_price,
+                        'average_rating': p.avg_rating,
+                        'review_count': p.review_count,
+                    }
+                    for p in rows
+                ],
+                'categories': self._categories(slug, vendor_id),
+            }
+            cache.set(cache_key, payload, self.PAGE_TTL)
+
+        results = []
+        for card in payload['results']:
+            row = dict(card)
+            row['currency'] = currency
+            row['price'] = round(card['price'] * rate, 2)
+            row['old_price'] = round(card['old_price'] * rate, 2) if card['old_price'] else None
+            if row['image']:
+                row['image'] = request.build_absolute_uri(row['image'])
+            results.append(row)
+
+        return Response({**payload, 'currency': currency, 'results': results})
+
+    def _categories(self, slug, vendor_id):
+        """Sub-categories this seller lists in, with counts — the category filter's options."""
+        key = f'vendor_product_categories:{slug}'
+        categories = cache.get(key)
+        if categories is None:
+            categories = [
+                {'slug': row['sub_category__slug'], 'title': row['sub_category__title'], 'count': row['count']}
+                for row in (
+                    Product.published.filter(vendor_id=vendor_id, sub_category__isnull=False)
+                    .values('sub_category__slug', 'sub_category__title')
+                    .annotate(count=Count('id'))
+                    .order_by('-count', 'sub_category__title')
+                )
+            ]
+            cache.set(key, categories, self.FACET_TTL)
+        return categories
 
 
 class VendorReviewsView(APIView):

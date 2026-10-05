@@ -35,28 +35,33 @@ def apply_currency(cards: list[dict], currency: str) -> list[dict]:
     return converted
 
 
+# The columns a card reads. Card querysets `.only()` these so a rail never pulls
+# descriptions, specs or joined vendor rows it will not render.
+CARD_ONLY_FIELDS = (
+    'id', 'title', 'slug', 'sku', 'image', 'price', 'old_price', 'avg_rating', 'review_count',
+)
+
+
 class RecommendedProductSerializer(serializers.ModelSerializer):
     """
-    Lightweight card — everything a rail tile needs, nothing it doesn't.
+    Lightweight card — everything a rail tile renders, nothing it doesn't.
 
-    `reason` is populated from a {product_id: text} map passed in context so the
-    UI can caption each tile ("Because you viewed …"), which is what separates a
-    personalised rail from an anonymous grid of products.
+    Rails are the heaviest payload on the homepage (several of them, 20+ cards
+    each), so every field here must be one the tile actually displays. Card
+    querysets load only CARD_ONLY_FIELDS; adding a field that reads anything
+    else (a relation, another column) means extending that list too, or every
+    card pays an extra query.
     """
 
     image = serializers.SerializerMethodField()
     average_rating = serializers.FloatField(source='avg_rating', read_only=True)
-    vendor_name = serializers.CharField(source='vendor.name', read_only=True, default='')
-    sub_category_slug = serializers.CharField(source='sub_category.slug', read_only=True, default='')
-    reason = serializers.SerializerMethodField()
     discount_percent = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
         fields = [
             'id', 'title', 'slug', 'sku', 'image', 'price', 'old_price',
-            'average_rating', 'review_count', 'vendor_name', 'sub_category_slug',
-            'discount_percent', 'reason',
+            'average_rating', 'review_count', 'discount_percent',
         ]
 
     def get_image(self, obj):
@@ -68,9 +73,6 @@ class RecommendedProductSerializer(serializers.ModelSerializer):
         except (ValueError, AttributeError):
             return None
         return request.build_absolute_uri(url) if request else url
-
-    def get_reason(self, obj):
-        return self.context.get('reasons', {}).get(obj.id, '')
 
     def get_discount_percent(self, obj):
         if obj.old_price and obj.price and obj.old_price > obj.price:
@@ -86,13 +88,11 @@ class DealCardSerializer(RecommendedProductSerializer):
 
     deal_price = serializers.SerializerMethodField()
     savings_percent = serializers.SerializerMethodField()
-    stock_remaining = serializers.SerializerMethodField()
-    has_flash_sale = serializers.SerializerMethodField()
     deal_score = serializers.SerializerMethodField()
 
     class Meta(RecommendedProductSerializer.Meta):
         fields = RecommendedProductSerializer.Meta.fields + [
-            'deal_price', 'savings_percent', 'stock_remaining', 'has_flash_sale', 'deal_score',
+            'deal_price', 'savings_percent', 'deal_score',
         ]
 
     def _deal(self, obj) -> ProductDealScore | None:
@@ -107,14 +107,6 @@ class DealCardSerializer(RecommendedProductSerializer):
         if deal:
             return round(deal.discount_percent, 1)
         return self.get_discount_percent(obj)
-
-    def get_stock_remaining(self, obj):
-        deal = self._deal(obj)
-        return deal.stock_remaining if deal else None
-
-    def get_has_flash_sale(self, obj):
-        deal = self._deal(obj)
-        return bool(deal.has_flash_sale) if deal else False
 
     def get_deal_score(self, obj):
         """Exposed only when ?debug=1 — useful when a ranking looks wrong."""
