@@ -532,7 +532,7 @@ CELERY_BEAT_SCHEDULE = {
 #SIMPLE JWT CONFIGURATION
 AUTH_COOKIE = 'access'
 AUTH_ACCESS_MAX_AGE = timedelta(hours=1).total_seconds()
-AUTH_REFRESH_MAX_AGE = timedelta(days=30).total_seconds()
+AUTH_REFRESH_MAX_AGE = timedelta(days=90).total_seconds()
 AUTH_COOKIE_SECURE = False if DEBUG else True 
 AUTH_COOKIE_HTTP_ONLY = True
 AUTH_COOKIE_PATH = '/'
@@ -559,7 +559,9 @@ from datetime import timedelta
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
+    # Sliding: every refresh rotates to a fresh token, so active users stay
+    # signed in indefinitely; only 90 days of inactivity logs them out.
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=90),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
     'AUTH_HEADER_TYPES': ('Bearer',),

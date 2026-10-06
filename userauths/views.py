@@ -183,6 +183,13 @@ class CustomTokenVerifyView(TokenVerifyView):
 
         if access_token:
             request.data['token'] = access_token
+        elif not request.data.get('token'):
+            # The browser drops the access cookie when it expires. Answer 401
+            # (not the serializer's 400) so the client refreshes the session.
+            return Response(
+                {"detail": "Access token missing."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
 
         return super().post(request, *args, **kwargs)
 
@@ -202,11 +209,8 @@ class LogoutView(APIView):
             except Exception:
                 pass
 
-        # Invalidate all sessions for this user by bumping token_version
-        if request.user.is_authenticated:
-            User.objects.filter(pk=request.user.pk).update(
-                token_version=F('token_version') + 1
-            )
+        # Only this device is logged out. Bumping token_version here would sign
+        # the user out everywhere; that's what CustomerLogoutAllView is for.
 
         response = Response(status=status.HTTP_204_NO_CONTENT)
         response.delete_cookie('access', path=settings.AUTH_COOKIE_PATH, domain=settings.AUTH_COOKIE_DOMAIN)

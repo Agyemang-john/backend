@@ -163,6 +163,13 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 
 
+# How long a just-rotated refresh token may still be presented and get back the
+# same new token pair. Covers concurrent refreshes (several tabs, parallel
+# requests, server render + browser) that would otherwise hit "Token is
+# blacklisted" and log the user out.
+REFRESH_REUSE_GRACE_SECONDS = 120
+
+
 class CustomerCustomTokenRefreshSerializer(TokenRefreshSerializer):
     refresh = serializers.CharField(required=False, write_only=True)
 
@@ -173,6 +180,71 @@ class CustomerCustomTokenRefreshSerializer(TokenRefreshSerializer):
 
         attrs["refresh"] = refresh_token
 
+        # Signature + expiry only (no blacklist check), so a token rotated a
+        # moment ago can still be matched against the grace cache below.
+        from rest_framework_simplejwt.tokens import UntypedToken
+        try:
+            jti = UntypedToken(refresh_token).payload.get("jti")
+        except Exception:
+            raise serializers.ValidationError("Invalid refresh token.")
+
+        if not jti:
+            return self._rotate(attrs, refresh_token)
+
+        from django.core.cache import cache
+        grace_key = f"jwt_refresh_grace:{jti}"
+
+        cached = cache.get(grace_key)
+        if cached:
+            return self._from_grace(cached)
+
+        # Serialize refreshes of the same token so only one actually rotates;
+        # the others wait, then pick up its result from the grace cache.
+        lock = None
+        try:
+            lock = cache.lock(f"jwt_refresh_lock:{jti}", timeout=15, blocking_timeout=10)
+            acquired = lock.acquire()
+        except Exception:
+            lock, acquired = None, False  # Redis unavailable: rotate without the lock
+
+        try:
+            if acquired:
+                cached = cache.get(grace_key)
+                if cached:
+                    return self._from_grace(cached)
+
+            data = self._rotate(attrs, refresh_token)
+            cache.set(
+                grace_key,
+                {"access": data["access"], "refresh": data.get("refresh")},
+                REFRESH_REUSE_GRACE_SECONDS,
+            )
+            return data
+        finally:
+            if acquired:
+                try:
+                    lock.release()
+                except Exception:
+                    pass
+
+    def _from_grace(self, cached):
+        # Only honour the cached pair while its device session is still alive,
+        # so a logout (or "log out all devices") in the grace window sticks.
+        from rest_framework_simplejwt.tokens import UntypedToken
+        from .models import UserSession
+        if not cached.get("refresh"):
+            return dict(cached)  # rotation disabled: nothing to track
+        try:
+            new_jti = UntypedToken(cached["refresh"]).payload.get("jti")
+        except Exception:
+            new_jti = None
+        if not new_jti or not UserSession.objects.filter(
+            session_key=new_jti, is_vendor_session=False
+        ).exists():
+            raise serializers.ValidationError("Session revoked. Please log in again.")
+        return dict(cached)
+
+    def _rotate(self, attrs, refresh_token):
         # Decode the incoming refresh token for pre-validation
         from rest_framework_simplejwt.tokens import RefreshToken as _RT
         try:
