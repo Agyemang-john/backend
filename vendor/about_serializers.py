@@ -46,7 +46,7 @@ class AboutSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'longitude': 'Longitude must be between -180 and 180.'})
 
         # Validate vendor_name uniqueness
-        vendor = self.context['request'].user.vendor_user
+        vendor = self.context['request'].user.current_vendor
         new_vendor_name = data.get('vendor', {}).get('name', vendor.name)
         if new_vendor_name != vendor.name and Vendor.objects.filter(name=new_vendor_name).exists():
             raise serializers.ValidationError({'vendor_name': 'This store name is already taken.'})

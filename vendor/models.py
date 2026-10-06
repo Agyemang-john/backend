@@ -242,17 +242,15 @@ class Vendor(models.Model):
                 self.slug = f"{base_slug}-{counter}"
                 counter += 1
         
+        # Approval no longer rewrites User.role: dashboard access follows from
+        # VendorMember + is_approved (vendor/access.py), so the owner and every
+        # team member gain or lose access together, and nobody stops being a
+        # customer just because their store was rejected or suspended.
         if self.pk:
             previous_state = Vendor.objects.get(pk=self.pk)
             if previous_state.is_approved != self.is_approved:
                 send_vendor_approval_email.delay(self.id, self.is_approved)
                 send_vendor_sms.delay(self.id, self.is_approved)
-                if self.is_approved:
-                    self.user.role = 'vendor'  # Change user role to 'vendor'
-                    self.user.save()
-                else:
-                    self.user.role = 'customer'
-                    self.user.save()
 
         super().save(*args, **kwargs)
 
@@ -598,3 +596,113 @@ class VendorActivityLog(models.Model):
 
     def __str__(self):
         return f"{self.vendor.name} — {self.event_type} @ {self.created_at:%Y-%m-%d %H:%M}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Store team (owner / admin / staff)
+# ─────────────────────────────────────────────────────────────────────────────
+# A store is run by one or more Negromart user accounts. Each person signs in
+# with their OWN account (no shared passwords), and what they may do is decided
+# by their role here. Vendor.user stays as the legal owner / KYC subject; the
+# owner also gets a VendorMember row so every access check has one code path.
+# Role → capability mapping lives in vendor/access.py.
+
+class VendorMember(models.Model):
+    ROLE_OWNER = 'owner'
+    ROLE_ADMIN = 'admin'
+    ROLE_STAFF = 'staff'
+    ROLE_CHOICES = [
+        (ROLE_OWNER, 'Owner'),
+        (ROLE_ADMIN, 'Admin'),
+        (ROLE_STAFF, 'Staff'),
+    ]
+
+    vendor = models.ForeignKey(Vendor, on_delete=models.CASCADE, related_name='members')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='vendor_memberships')
+    role = models.CharField(max_length=10, choices=ROLE_CHOICES, default=ROLE_STAFF)
+    # Removing someone deactivates the row instead of deleting it, so the audit
+    # trail (who added whom, when) survives and re-inviting is a simple reactivate.
+    is_active = models.BooleanField(default=True)
+    added_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    removed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['vendor', 'user'], name='uniq_vendor_member'),
+            # One active store per account. The seller dashboard and every
+            # vendor endpoint resolve "my store" from the signed-in user alone;
+            # supporting several stores per person later means adding a store
+            # switcher (e.g. an X-Vendor-Id header) and relaxing this constraint.
+            models.UniqueConstraint(
+                fields=['user'], condition=models.Q(is_active=True),
+                name='uniq_active_membership_per_user',
+            ),
+            # Exactly one active owner per store.
+            models.UniqueConstraint(
+                fields=['vendor'], condition=models.Q(is_active=True, role='owner'),
+                name='uniq_active_owner_per_vendor',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['vendor', 'is_active']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} → {self.vendor.name} ({self.role})"
+
+
+class VendorInvitation(models.Model):
+    """
+    A pending invite for someone to join a store's team.
+
+    Only a SHA-256 digest of the token is stored. The raw token appears once,
+    in the emailed link, so a database leak cannot be turned into team access.
+    Invites are bound to an email address: the account that accepts must own
+    that address and have verified it.
+    """
+    TTL_DAYS = 7
+
+    vendor = models.ForeignKey(Vendor, on_delete=models.CASCADE, related_name='invitations')
+    email = models.EmailField(max_length=128)
+    role = models.CharField(
+        max_length=10,
+        choices=[c for c in VendorMember.ROLE_CHOICES if c[0] != VendorMember.ROLE_OWNER],
+        default=VendorMember.ROLE_STAFF,
+    )
+    token_hash = models.CharField(max_length=64, unique=True)
+    invited_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    accepted_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['vendor', 'accepted_at', 'revoked_at']),
+            models.Index(fields=['email']),
+        ]
+
+    def __str__(self):
+        return f"Invite {self.email} → {self.vendor.name} ({self.role})"
+
+    @staticmethod
+    def hash_token(raw_token: str) -> str:
+        import hashlib
+        return hashlib.sha256(raw_token.encode()).hexdigest()
+
+    @property
+    def is_pending(self) -> bool:
+        return (
+            self.accepted_at is None
+            and self.revoked_at is None
+            and self.expires_at > timezone.now()
+        )

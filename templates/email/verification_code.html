@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Your Negromart verification code</title>
+    <style>
+        body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; background-color: #f7fafc; color: #1a202c; }
+        .container { max-width: 600px; margin: 40px auto; background: #ffffff; border-radius: 8px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); overflow: hidden; }
+        .header { padding: 20px; text-align: center; border-bottom: 1px solid #edf2f7; }
+        .header img { max-width: 64px; height: auto; }
+        .content { padding: 30px; text-align: center; }
+        .code { font-size: 32px; font-weight: bold; color: #2d3748; letter-spacing: 6px; margin: 20px 0; padding: 10px 20px; background: #e2e8f0; display: inline-block; border-radius: 4px; }
+        .footer { background: #edf2f7; padding: 20px; text-align: center; font-size: 14px; color: #718096; }
+        @media only screen and (max-width: 600px) { .container { margin: 20px; } .content { padding: 20px; } .code { font-size: 24px; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <img src="{{ logo_url }}" alt="{{ brand_name }}">
+            <h1 style="margin: 10px 0; font-size: 22px;">Verify your email address</h1>
+        </div>
+        <div class="content">
+            <p style="font-size: 16px; line-height: 1.5;">Hello{% if first_name %} {{ first_name }}{% endif %},</p>
+            <p style="font-size: 16px; line-height: 1.5;">
+                Enter this code to confirm your email address and continue setting up your {{ brand_name }} account:
+            </p>
+            <div class="code">{{ code }}</div>
+            <p style="font-size: 16px; line-height: 1.5;">
+                The code expires in {{ expiry_minutes }} minutes. {{ brand_name }} will never ask you to share it.
+            </p>
+            <p style="font-size: 14px; color: #718096;">
+                If you didn't try to create an account, you can ignore this email. Nobody can use your address without this code.
+            </p>
+        </div>
+        <div class="footer">
+            <p>&copy; {{ brand_name }} {% now 'Y' %}. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>

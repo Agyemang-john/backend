@@ -7,7 +7,8 @@ Token resolution order:
 2. HTTP-only cookie (customer: settings.AUTH_COOKIE, vendor: settings.VENDOR_ACCESS_AUTH_COOKIE)
 
 The X-User-Type header ("customer" or "vendor") determines which cookie to read.
-Vendor routes (except /vendor/register/) also enforce that the user has role='vendor'.
+Vendor routes (except /vendor/register/) also enforce user.is_vendor: an active
+membership in an approved store (vendor/access.py).
 
 token_version check: if the JWT payload carries a token_version claim that no longer
 matches the user's DB value, the token is treated as unauthenticated.  Incrementing
@@ -55,8 +56,12 @@ class CustomJWTAuthentication(JWTAuthentication):
             if token_version is not None and token_version != user.token_version:
                 return None  # treat as unauthenticated
 
+            # Vendor cookie ⇒ the user must still belong to an approved store.
+            # Checked on every request (one memoised query), so removing a team
+            # member or suspending a store cuts dashboard access immediately,
+            # without waiting for the access token to expire.
             if expected_type == "vendor" and '/vendor/register' not in request.path:
-                if getattr(user, 'role', None) != 'vendor':
+                if not user.is_vendor:
                     return None
 
             return (user, validated_token)

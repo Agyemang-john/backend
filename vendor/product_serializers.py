@@ -287,7 +287,7 @@ class ProductReviewSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         request = self.context['request']
-        vendor = request.user.vendor_user
+        vendor = request.user.current_vendor
         review = self.instance
 
         if review and review.vendor != vendor:

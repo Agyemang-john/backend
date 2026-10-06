@@ -3,12 +3,13 @@
 from rest_framework.permissions import BasePermission
 
 class IsVendor(BasePermission):
+    # Store access comes from team membership, not User.role (vendor/access.py).
     def has_permission(self, request, view):
         return (
             request.user
             and request.user.is_authenticated
             and request.user.is_active
-            and request.user.role == "vendor"
+            and request.user.is_vendor
         )
 
 class IsManager(BasePermission):

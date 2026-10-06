@@ -45,6 +45,11 @@ from .order_serializers import VendorOrderSerializer, OrderSerializer
 
 from core.serializers import VendorSerializer as VendorDetail, ProductReviewSerializer as ReviewDetail
 from vendor.permissions import IsVerifiedVendor
+# Team access: "my store" is resolved through VendorMember, and sensitive
+# endpoints ask for a capability rather than a role (see vendor/access.py).
+from vendor.access import (
+    ANY_MEMBER, Capability, capabilities_for_role, get_vendor_or_404, require_capability,
+)
 from order.models import OrderProduct, Order
 from product.models import Wishlist, SavedProduct, ProductReview
 from payments.models import Payout
@@ -84,7 +89,7 @@ class VendorHeartbeatAPIView(APIView):
 
     def post(self, request):
         try:
-            vendor = request.user.vendor_user
+            vendor = request.user.current_vendor
         except Exception:
             return Response({'detail': 'Vendor not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -117,11 +122,11 @@ class VendorShopStatusToggleAPIView(APIView):
     Lets a verified seller voluntarily pause or resume their shop.
     Pausing hides all products from the storefront; resuming re-lists them instantly.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, require_capability(Capability.MANAGE_STORE, read=ANY_MEMBER)]
 
     def patch(self, request):
         try:
-            vendor = request.user.vendor_user
+            vendor = request.user.current_vendor
         except Exception:
             return Response({'detail': 'Vendor not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -167,11 +172,11 @@ class VendorActivityLogAPIView(APIView):
     GET /api/v1/vendor/activity/log/
     Returns the vendor's own recent activity log (last 60 events).
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, require_capability(Capability.MANAGE_STORE)]
 
     def get(self, request):
         try:
-            vendor = request.user.vendor_user
+            vendor = request.user.current_vendor
         except Exception:
             return Response({'detail': 'Vendor not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -196,11 +201,11 @@ class VendorActivityLogAPIView(APIView):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SalesSummaryView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.VIEW_ANALYTICS)]
 
     def get(self, request):
         try:
-            vendor = Vendor.objects.get(user=request.user)
+            vendor = request.user.current_vendor
         except Vendor.DoesNotExist:
             return Response({"error": "Vendor not found"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -235,11 +240,11 @@ class SalesSummaryView(APIView):
 
 
 class SalesTrendView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.VIEW_ANALYTICS)]
 
     def get(self, request):
         try:
-            vendor = Vendor.objects.get(user=request.user)
+            vendor = request.user.current_vendor
         except Vendor.DoesNotExist:
             return Response({"error": "Vendor not found"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -292,11 +297,11 @@ class SalesTrendView(APIView):
 
 
 class TopProductsView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.VIEW_ANALYTICS)]
 
     def get(self, request):
         try:
-            vendor = Vendor.objects.get(user=request.user)
+            vendor = request.user.current_vendor
         except Vendor.DoesNotExist:
             return Response({"error": "Vendor not found"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -311,11 +316,11 @@ class TopProductsView(APIView):
 
 
 class OrderStatusView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.VIEW_ANALYTICS)]
 
     def get(self, request):
         try:
-            vendor = Vendor.objects.get(user=request.user)
+            vendor = request.user.current_vendor
         except Vendor.DoesNotExist:
             return Response({"error": "Vendor not found"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -328,11 +333,11 @@ class OrderStatusView(APIView):
 
 
 class EngagementView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.VIEW_ANALYTICS)]
 
     def get(self, request):
         try:
-            vendor = Vendor.objects.get(user=request.user)
+            vendor = request.user.current_vendor
         except Vendor.DoesNotExist:
             return Response({"error": "Vendor not found"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -352,11 +357,11 @@ class StoreViewAnalyticsView(APIView):
     Returns time-bucketed store-page view analytics using VendorViewLog (today,
     live) and VendorDailyStats (historical, materialised at midnight).
     """
-    permission_classes = [IsAuthenticated, IsVerifiedVendor, RequireBasicPlan]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, RequireBasicPlan, require_capability(Capability.VIEW_ANALYTICS)]
 
     def get(self, request):
         try:
-            vendor = Vendor.objects.get(user=request.user)
+            vendor = request.user.current_vendor
         except Vendor.DoesNotExist:
             return Response({'error': 'Vendor not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -445,11 +450,11 @@ class StoreViewAnalyticsView(APIView):
 
 
 class DeliveryPerformanceView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.VIEW_ANALYTICS)]
 
     def get(self, request):
         try:
-            vendor = Vendor.objects.get(user=request.user)
+            vendor = request.user.current_vendor
         except Vendor.DoesNotExist:
             return Response({"error": "Vendor not found"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -518,7 +523,7 @@ class VendorProductPagination(PageNumberPagination):
 
 class ProductListCreateView(SubscriptionGateMixin, generics.ListCreateAPIView):
     serializer_class   = ProductSerializer
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.MANAGE_CATALOG)]
     pagination_class   = VendorProductPagination
 
     check_product_limit = True
@@ -531,7 +536,7 @@ class ProductListCreateView(SubscriptionGateMixin, generics.ListCreateAPIView):
         return ProductSerializer
 
     def get_queryset(self):
-        vendor = self.request.user.vendor_user
+        vendor = self.request.user.current_vendor
         if not vendor:
             raise serializers.ValidationError("Vendor profile is required.")
         qs = Product.objects.filter(vendor=vendor)
@@ -555,7 +560,7 @@ class ProductListCreateView(SubscriptionGateMixin, generics.ListCreateAPIView):
         # Standard paginated response, plus catalog-wide status counts so the
         # dashboard's filter chips stay accurate regardless of the current page.
         response = super().list(request, *args, **kwargs)
-        vendor = request.user.vendor_user
+        vendor = request.user.current_vendor
         counts = (
             Product.objects.filter(vendor=vendor)
             .values('status').annotate(c=Count('id'))
@@ -567,7 +572,7 @@ class ProductListCreateView(SubscriptionGateMixin, generics.ListCreateAPIView):
 
     # ✅ No perform_create — mixin handles everything
     def get_perform_create_kwargs(self) -> dict:
-        vendor = self.request.user.vendor_user
+        vendor = self.request.user.current_vendor
         if not vendor:
             raise serializers.ValidationError("Vendor profile is required.")
         return {'vendor': vendor}
@@ -576,13 +581,13 @@ class ProductListCreateView(SubscriptionGateMixin, generics.ListCreateAPIView):
 class ProductCreateView(SubscriptionGateMixin, generics.CreateAPIView):
     queryset           = Product.objects.all()
     serializer_class   = ProductSerializer
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.MANAGE_CATALOG)]
 
     check_product_limit = True
     check_image_limit   = True
 
     def perform_create(self, serializer):
-        vendor = self.request.user.vendor_user
+        vendor = self.request.user.current_vendor
         if not vendor:
             raise serializers.ValidationError("Vendor profile is required.")
         super().perform_create(serializer)
@@ -591,13 +596,13 @@ class ProductCreateView(SubscriptionGateMixin, generics.CreateAPIView):
 
 class ProductDetailView(SubscriptionGateMixin, generics.RetrieveUpdateDestroyAPIView):
     serializer_class   = ProductSerializer
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.MANAGE_CATALOG)]
     check_product_limit = True
     # Only check image limit on updates — not on GET / DELETE
     check_image_limit = True
 
     def get_queryset(self):
-        vendor = self.request.user.vendor_user
+        vendor = self.request.user.current_vendor
         if not vendor:
             raise serializers.ValidationError("Vendor profile is required.")
         return Product.objects.filter(vendor=vendor)
@@ -698,9 +703,17 @@ class CheckCustomerAuth(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        from userauths.verification import mask_phone
+        user = request.user
+        # Verification flags let the seller landing page show the right next
+        # step: "verify your phone" for customers who never confirmed it.
         return Response({
             "isAuthenticated": True,
-            "email": request.user.email,
+            "email": user.email,
+            "first_name": user.first_name,
+            "email_verified": user.is_email_verified,
+            "phone_verified": user.is_phone_verified,
+            "masked_phone": mask_phone(user.phone),
         })
 
 class VendorStatusAPIView(APIView):
@@ -709,7 +722,9 @@ class VendorStatusAPIView(APIView):
     def get(self, request):
         user = request.user
         try:
-            vendor = user.vendor_user
+            # The store this user owns or works for (any approval status).
+            vendor = user.current_vendor
+            membership = user.vendor_membership
             inactivity_days = getattr(settings, 'VENDOR_INACTIVITY_DAYS', 30)
             now = timezone.now()
             reference = vendor.last_seen_at or vendor.last_login_at or vendor.created_at
@@ -717,7 +732,13 @@ class VendorStatusAPIView(APIView):
             days_until_close = (inactivity_days - days_inactive) if days_inactive is not None else None
 
             return Response({
+                # `is_vendor` here means "has a store application or membership"
+                # (unchanged meaning for existing clients); `can_access_dashboard`
+                # is the live access decision used by the API itself.
                 'is_vendor': True,
+                'can_access_dashboard': user.is_vendor,
+                'vendor_role': membership.role,
+                'capabilities': sorted(capabilities_for_role(membership.role)),
                 'vendor_status': vendor.status,
                 'vendor_slug': vendor.slug,
                 'shop_paused': vendor.shop_paused,
@@ -732,6 +753,9 @@ class VendorStatusAPIView(APIView):
         except Vendor.DoesNotExist:
             return Response({
                 'is_vendor': False,
+                'can_access_dashboard': False,
+                'vendor_role': None,
+                'capabilities': [],
                 'vendor_status': None,
                 'vendor_slug': None,
                 'inactivity_auto_closed': False,
@@ -744,21 +768,42 @@ class VendorSignupAPIView(APIView):
 
     def post(self, request, *args, **kwargs):
         user = request.user
-        if user.role == 'vendor':
-            return Response({'detail': 'You already have a vendor account.'}, status=400)
         if not user.is_active:
             return Response({'detail': 'Please verify your account before applying.'}, status=400)
 
-        # Early guard: a pending/rejected applicant still has role='customer'
-        # (the role only flips to 'vendor' on approval). Detect the existing
-        # application up-front so the user isn't asked to re-upload the whole
-        # KYC form only to fail at the final create() step.
-        existing = Vendor.objects.filter(user=user).only('status', 'slug').first()
-        if existing:
+        # Amazon-style identity bar: the applicant must have proven both their
+        # email and their phone. Customers created before verification codes
+        # existed usually only need the phone step (seller landing page).
+        if not user.is_email_verified:
             return Response({
-                'detail': 'You have already submitted a vendor application. '
-                          'It is being reviewed — you cannot submit another one.',
-                'code': 'vendor_exists',
+                'detail': 'Please verify your email address before applying.',
+                'code': 'email_unverified',
+            }, status=status.HTTP_403_FORBIDDEN)
+        if not user.is_phone_verified:
+            return Response({
+                'detail': 'Please verify your phone number before applying.',
+                'code': 'phone_unverified',
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        # Early guard: the user already owns a store application (any status)
+        # or belongs to another store's team. Detect it up-front so they
+        # aren't asked to re-upload the whole KYC form only to fail at the
+        # final create() step.
+        existing = (
+            Vendor.objects.filter(user=user).only('status', 'slug').first()
+            or getattr(user, 'current_vendor', None)
+        )
+        if existing:
+            owns_it = existing.user_id == user.pk
+            return Response({
+                'detail': (
+                    'You have already submitted a vendor application. '
+                    'It is being reviewed — you cannot submit another one.'
+                    if owns_it else
+                    'Your account is a team member of another store. Leave that '
+                    'team before opening your own store.'
+                ),
+                'code': 'vendor_exists' if owns_it else 'team_member',
                 'vendor_status': existing.status,
                 'slug': existing.slug,
             }, status=status.HTTP_409_CONFLICT)
@@ -1029,7 +1074,7 @@ class VendorReviewsView(APIView):
 
 
 class ProductRelatedDataAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.MANAGE_CATALOG)]
 
     def get(self, request, *args, **kwargs):
         return Response({
@@ -1106,11 +1151,11 @@ class BankValidationView(APIView):
 
 
 class PayoutListView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.VIEW_FINANCE)]
 
     def get(self, request):
         try:
-            vendor  = Vendor.objects.get(user=request.user)
+            vendor  = request.user.current_vendor
             payouts = Payout.objects.filter(vendor=vendor).order_by('-created_at')
             return Response(PayoutSerializer(payouts, many=True).data)
         except Vendor.DoesNotExist:
@@ -1121,10 +1166,10 @@ class PayoutListView(APIView):
 
 
 class VendorPaymentMethodAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.MANAGE_FINANCE, read=Capability.VIEW_FINANCE)]
 
     def get_queryset(self):
-        return VendorPaymentMethod.objects.filter(vendor__user=self.request.user)
+        return VendorPaymentMethod.objects.filter(vendor__members__user=self.request.user, vendor__members__is_active=True)
 
     def get(self, request, *args, **kwargs):
         try:
@@ -1138,7 +1183,7 @@ class VendorPaymentMethodAPIView(APIView):
             return Response({"detail": "A payment method already exists."}, status=status.HTTP_400_BAD_REQUEST)
         serializer = VendorPaymentMethodSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
-            serializer.save(vendor=request.user.vendor_user, last_updated_by=request.user)
+            serializer.save(vendor=request.user.current_vendor, last_updated_by=request.user)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1148,7 +1193,7 @@ class VendorPaymentMethodAPIView(APIView):
         except ObjectDoesNotExist:
             serializer = VendorPaymentMethodSerializer(data=request.data, context={'request': request})
             if serializer.is_valid():
-                serializer.save(vendor=request.user.vendor_user, last_updated_by=request.user)
+                serializer.save(vendor=request.user.current_vendor, last_updated_by=request.user)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         serializer = VendorPaymentMethodSerializer(instance, data=request.data, partial=True, context={'request': request})
@@ -1159,10 +1204,10 @@ class VendorPaymentMethodAPIView(APIView):
 
 
 class OpeningHourAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.MANAGE_STORE, read=ANY_MEMBER)]
 
     def get_queryset(self):
-        return OpeningHour.objects.filter(vendor__user=self.request.user)
+        return OpeningHour.objects.filter(vendor__members__user=self.request.user, vendor__members__is_active=True)
 
     def get_object(self, pk):
         try:
@@ -1195,18 +1240,18 @@ class OpeningHourAPIView(APIView):
 
 
 class AboutManagementAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.MANAGE_STORE, read=ANY_MEMBER)]
 
     def get(self, request):
         try:
-            about = About.objects.get(vendor__user=request.user)
+            about = About.objects.get(vendor__members__user=request.user, vendor__members__is_active=True)
             return Response(AboutSerializer(about, context={'request': request}).data)
         except About.DoesNotExist:
             return Response({"detail": "Profile not found"}, status=status.HTTP_404_NOT_FOUND)
 
     def put(self, request):
         try:
-            about = About.objects.get(vendor__user=request.user)
+            about = About.objects.get(vendor__members__user=request.user, vendor__members__is_active=True)
         except About.DoesNotExist:
             return Response({"detail": "Profile not found"}, status=status.HTTP_404_NOT_FOUND)
         serializer = AboutSerializer(about, data=request.data, context={'request': request})
@@ -1217,11 +1262,11 @@ class AboutManagementAPIView(APIView):
 
 
 class VendorProductReviewsAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.MANAGE_CATALOG)]
 
     def get(self, request, *args, **kwargs):
         try:
-            vendor  = request.user.vendor_user
+            vendor  = request.user.current_vendor
             reviews = ProductReview.objects.filter(vendor=vendor).select_related("product", "user")
             return Response(ProductReviewSerializer(reviews, many=True, context={'request': request}).data)
         except AttributeError:
@@ -1229,7 +1274,7 @@ class VendorProductReviewsAPIView(APIView):
 
     def patch(self, request, pk, *args, **kwargs):
         try:
-            review     = ProductReview.objects.get(pk=pk, vendor=request.user.vendor_user)
+            review     = ProductReview.objects.get(pk=pk, vendor=request.user.current_vendor)
             serializer = ProductReviewSerializer(review, data=request.data, partial=True, context={'request': request})
             if serializer.is_valid():
                 serializer.save()
@@ -1248,7 +1293,7 @@ class StandardResultsSetPagination(PageNumberPagination):
 class VendorOrderListAPIView(generics.ListAPIView):
     serializer_class   = VendorOrderSerializer
     pagination_class   = StandardResultsSetPagination
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, require_capability(Capability.MANAGE_ORDERS)]
     filter_backends    = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields   = ['status', 'payment_method']
     search_fields      = ['order_number', 'user__email']
@@ -1257,7 +1302,7 @@ class VendorOrderListAPIView(generics.ListAPIView):
 
     def get_queryset(self):
         try:
-            vendor = get_object_or_404(Vendor, user=self.request.user)
+            vendor = get_vendor_or_404(self.request.user)
             return Order.objects.filter(vendors=vendor).select_related(
                 'user', 'address'
             ).prefetch_related(
@@ -1271,16 +1316,16 @@ class VendorOrderListAPIView(generics.ListAPIView):
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
-        context['vendor'] = get_object_or_404(Vendor, user=self.request.user)
+        context['vendor'] = get_vendor_or_404(self.request.user)
         return context
 
 
 class VendorOrderDetailView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, require_capability(Capability.MANAGE_ORDERS)]
 
     def get(self, request, id):
         try:
-            vendor = Vendor.objects.get(user=request.user)
+            vendor = request.user.current_vendor
             order  = Order.objects.filter(vendors=vendor).select_related(
                 'user', 'address'
             ).prefetch_related(
@@ -1299,10 +1344,10 @@ class VendorOrderDetailView(APIView):
 
 
 class UpdateOrderStatusAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.MANAGE_ORDERS)]
 
     def put(self, request, id):
-        vendor     = get_object_or_404(Vendor, user=request.user)
+        vendor     = get_vendor_or_404(request.user)
         new_status = request.data.get('status')
         if new_status not in dict(Order.STATUS_CHOICES).keys():
             return Response({"error": "Invalid status choice."}, status=status.HTTP_400_BAD_REQUEST)
@@ -1363,7 +1408,7 @@ class ProductAnalyticsDetailView(APIView):
     - Entirely read-only — no POST/PUT/PATCH/DELETE.
     - Uses ProductDetailAnalyticsSerializer which aggregates all metrics in one pass.
     """
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.VIEW_ANALYTICS)]
  
     def get(self, request, pk):
         # Fetch the product — 404 if it doesn't exist at all
@@ -1380,7 +1425,7 @@ class ProductAnalyticsDetailView(APIView):
         )
  
         # Ownership check — 403 if the product belongs to a different vendor
-        vendor = getattr(request.user, 'vendor_user', None)
+        vendor = getattr(request.user, 'current_vendor', None)
         if not vendor or product.vendor != vendor:
             raise PermissionDenied("You do not have permission to view this product's analytics.")
  
@@ -1442,10 +1487,10 @@ class ShipmentAPIView(APIView):
     POST /api/v1/vendor/orders/<id>/shipment/              → create shipment
     PUT  /api/v1/vendor/orders/<id>/shipment/<shipment_id>/ → update shipment
     """
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.MANAGE_ORDERS)]
 
     def _get_vendor_order(self, request, order_id):
-        vendor = get_object_or_404(Vendor, user=request.user)
+        vendor = get_vendor_or_404(request.user)
         order  = get_object_or_404(Order, id=order_id, vendors__in=[vendor])
         return vendor, order
 
@@ -1547,10 +1592,10 @@ class TrackingEventAddAPIView(APIView):
     POST /api/v1/vendor/orders/<id>/shipment/<shipment_id>/event/
     Adds a tracking event and pushes a live update to the customer.
     """
-    permission_classes = [IsAuthenticated, IsVerifiedVendor]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.MANAGE_ORDERS)]
 
     def post(self, request, id, shipment_id):
-        vendor   = get_object_or_404(Vendor, user=request.user)
+        vendor   = get_vendor_or_404(request.user)
         order    = get_object_or_404(Order, id=id, vendors__in=[vendor])
         shipment = get_object_or_404(Shipment, shipment_id=shipment_id, order=order, vendor=vendor)
 
@@ -1632,11 +1677,11 @@ class TrackingEventAddAPIView(APIView):
 
 class VendorAccountAPIView(APIView):
     """GET / partial-PUT on the core Vendor row (business details + documents)."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, require_capability(Capability.MANAGE_STORE, read=ANY_MEMBER)]
     parser_classes = [MultiPartParser, FormParser]
 
     def _get_vendor(self, request):
-        return get_object_or_404(Vendor, user=request.user)
+        return get_vendor_or_404(request.user)
 
     def get(self, request):
         from .account_serializers import VendorAccountSerializer
@@ -1657,13 +1702,13 @@ class VendorAccountAPIView(APIView):
 
 class VendorDeletionRequestView(APIView):
     """Submit an account deletion request — emails the admin team."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, require_capability(Capability.CLOSE_STORE)]
 
     def post(self, request):
         from django.core.mail import EmailMessage
         from django.conf import settings as django_settings
 
-        vendor = get_object_or_404(Vendor, user=request.user)
+        vendor = get_vendor_or_404(request.user)
         admin_email = getattr(django_settings, 'ADMIN_EMAIL', 'support@negromart.com')
 
         subject = f"[DELETION REQUEST] {vendor.name} (ID: {vendor.id})"
@@ -1701,7 +1746,7 @@ class VendorDeletionRequestView(APIView):
 
 class VendorNotificationPrefsView(APIView):
     """GET / PATCH vendor notification preferences stored as a JSON blob on the Vendor row."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, require_capability(Capability.MANAGE_STORE, read=ANY_MEMBER)]
 
     DEFAULTS = {
         'new_order': True,
@@ -1718,11 +1763,11 @@ class VendorNotificationPrefsView(APIView):
         return {**self.DEFAULTS, **{k: v for k, v in vendor.notification_prefs.items() if k in self.ALLOWED_KEYS}}
 
     def get(self, request):
-        vendor = get_object_or_404(Vendor, user=request.user)
+        vendor = get_vendor_or_404(request.user)
         return Response(self._merged(vendor))
 
     def patch(self, request):
-        vendor = get_object_or_404(Vendor, user=request.user)
+        vendor = get_vendor_or_404(request.user)
         updates = {
             k: bool(v)
             for k, v in request.data.items()

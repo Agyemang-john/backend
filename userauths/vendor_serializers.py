@@ -36,12 +36,16 @@ class VendorLoginSerializer(serializers.Serializer):
             except ValidationError:
                 raise serializers.ValidationError("Please enter a valid email address.")
 
+        # Any Negromart account may sign in here as long as it belongs to an
+        # approved store, as its owner or as an invited team member.
         try:
             if is_email:
-                user = User.objects.get(email__iexact=identifier, role="vendor")
+                user = User.objects.get(email__iexact=identifier)
             else:
-                user = User.objects.get(phone=identifier, role="vendor")
+                user = User.objects.get(phone=identifier)
         except User.DoesNotExist:
+            user = None
+        if user is None or not user.is_vendor:
             raise serializers.ValidationError(
                 "Vendor not registered with this email/phone."
             )
@@ -60,9 +64,6 @@ class VendorLoginSerializer(serializers.Serializer):
         if not user.is_active:
             raise serializers.ValidationError("Your account is not activated yet.")
         
-        if user.role != 'vendor':
-            raise serializers.ValidationError("You must be a registered seller")
-
         if getattr(user, "is_suspended", False):
             raise serializers.ValidationError("Your account has been suspended. Contact support.")
 
@@ -107,6 +108,12 @@ class CustomTokenRefreshSerializer(TokenRefreshSerializer):
             user = User.objects.get(id=user_id)
         except User.DoesNotExist:
             raise serializers.ValidationError("User not found.")
+
+        # Removed from the team, or the store was suspended: stop renewing.
+        if not user.is_vendor:
+            raise serializers.ValidationError(
+                "You no longer have access to this store. Please contact the store owner."
+            )
 
         # token_version check — catches "logout all devices"
         token_version = old_refresh.payload.get("token_version")

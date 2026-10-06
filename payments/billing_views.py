@@ -29,12 +29,15 @@ from .billing_serializers import (
     BillingPlanSerializer,
 )
 from . import services
+from vendor.access import get_finance_vendor
 
 logger = logging.getLogger(__name__)
 
 
 def _get_vendor(request):
-    vendor = getattr(request.user, 'vendor_user', None)
+    # The caller's store, if their team role allows billing (reads need
+    # VIEW_FINANCE, writes MANAGE_FINANCE). Non-members get None as before.
+    vendor = get_finance_vendor(request)
     return vendor
 
 

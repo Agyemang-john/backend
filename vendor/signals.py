@@ -26,6 +26,24 @@ def create_vendor_profile(sender, instance, created, **kwargs):
     if created and not hasattr(instance, 'about'):
         About.objects.create(vendor=instance)
 
+
+@receiver(post_save, sender=Vendor)
+def create_owner_membership(sender, instance, created, **kwargs):
+    """
+    Every store's owner (Vendor.user) is also its first team member, so access
+    checks never special-case the owner. Done in a signal so stores created
+    from the admin or a shell get it too, not just the signup API.
+    """
+    if not created:
+        return
+    from .models import VendorMember
+    from .access import clear_membership_cache
+    VendorMember.objects.get_or_create(
+        vendor=instance, user=instance.user,
+        defaults={'role': VendorMember.ROLE_OWNER, 'added_by': instance.user},
+    )
+    clear_membership_cache(instance.user)
+
 from payments.models import *
 
 @receiver(post_save, sender=VendorSubscription)

@@ -12,6 +12,26 @@ class VendorActivityLogInline(admin.TabularInline):
     ordering = ('-created_at',)
 
 
+class VendorMemberInline(admin.TabularInline):
+    """Who can access this store's dashboard (owner / admin / staff)."""
+    model = VendorMember
+    fk_name = 'vendor'
+    extra = 0
+    fields = ('user', 'role', 'is_active', 'added_by', 'created_at', 'removed_at')
+    readonly_fields = ('added_by', 'created_at', 'removed_at')
+    raw_id_fields = ('user',)
+
+
+@admin.register(VendorInvitation)
+class VendorInvitationAdmin(admin.ModelAdmin):
+    list_display = ('email', 'vendor', 'role', 'invited_by', 'created_at', 'expires_at', 'accepted_at', 'revoked_at')
+    list_filter = ('role',)
+    search_fields = ('email', 'vendor__name')
+    # Tokens are only stored hashed; nothing here can be used to join a team.
+    readonly_fields = ('token_hash', 'accepted_by', 'accepted_at', 'created_at')
+    raw_id_fields = ('vendor', 'invited_by')
+
+
 class VendorAdmin(admin.ModelAdmin):
     list_display = (
         'name', 'email', 'contact', 'status', 'is_approved', 'is_suspended',
@@ -24,7 +44,7 @@ class VendorAdmin(admin.ModelAdmin):
         'inactivity_auto_closed',
     )
     search_fields = ('name', 'email', 'contact')
-    inlines = [VendorActivityLogInline]
+    inlines = [VendorMemberInline, VendorActivityLogInline]
 
     fieldsets = (
         ('Basic Information', {
@@ -68,7 +88,8 @@ class VendorAdmin(admin.ModelAdmin):
                 vendor.subscription_start_date = timezone.now().date()
                 vendor.subscription_end_date = timezone.now().date() + timedelta(days=365)  # 1-year subscription
                 vendor.is_subscribed = True
-                vendor.user.role = 'vendor'
+                # No User.role change: is_approved alone opens the dashboard to
+                # the owner and team (vendor/access.py).
                 vendor.save()
                 logger.info(f"Vendor {vendor.name} approved by {request.user}")
                 send_vendor_approval_email.delay(vendor.id, True)
@@ -84,7 +105,6 @@ class VendorAdmin(admin.ModelAdmin):
                 vendor.status = 'REJECTED'
                 vendor.is_approved = False
                 vendor.is_suspended = False
-                vendor.user.role = 'customer'
                 vendor.save()
                 logger.info(f"Vendor {vendor.name} rejected by {request.user}")
                 send_vendor_approval_email.delay(vendor.id, False)
@@ -100,7 +120,6 @@ class VendorAdmin(admin.ModelAdmin):
                 vendor.status = 'SUSPENDED'
                 vendor.is_suspended = True
                 vendor.is_approved = False
-                vendor.user.role = 'customer'
                 vendor.save()
                 logger.info(f"Vendor {vendor.name} suspended by {request.user}")
                 send_vendor_approval_email.delay(vendor.id, False)

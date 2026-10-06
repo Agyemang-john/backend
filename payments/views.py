@@ -23,6 +23,8 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from .tasks import create_order_from_payment_task
+# Billing is limited to team roles with the finance capability; owners always qualify.
+from vendor.access import get_finance_vendor
 
 logger = logging.getLogger(__name__)
 
@@ -337,7 +339,7 @@ class SubscriptionPlanListView(APIView):
         # Populate current_subscription when authenticated
         current_subscription = None
         if request.user and request.user.is_authenticated:
-            vendor = getattr(request.user, 'vendor_user', None)
+            vendor = getattr(request.user, 'current_vendor', None)
             if vendor:
                 active_sub = VendorSubscription.objects.filter(
                     vendor=vendor, status='active'
@@ -368,7 +370,7 @@ class InitiateSubscriptionView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        vendor = getattr(request.user, 'vendor_user', None)
+        vendor = get_finance_vendor(request)
         if not vendor:
             return Response(
                 {"error": "User has no associated vendor account."},
@@ -433,7 +435,7 @@ class CurrentSubscriptionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        vendor = getattr(request.user, 'vendor_user', None)
+        vendor = getattr(request.user, 'current_vendor', None)
         if not vendor:
             return Response(
                 {"error": "No vendor account found."},
@@ -470,7 +472,7 @@ class CancelSubscriptionView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        vendor = getattr(request.user, 'vendor_user', None)
+        vendor = get_finance_vendor(request)
         if not vendor:
             return Response({"error": "No vendor account."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -507,7 +509,7 @@ class AutoRenewToggleView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        vendor = getattr(request.user, 'vendor_user', None)
+        vendor = get_finance_vendor(request)
         sub = VendorSubscription.objects.filter(
             vendor=vendor, status='active'
         ).first()
@@ -536,7 +538,7 @@ class PaymentHistoryView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        vendor = getattr(request.user, 'vendor_user', None)
+        vendor = get_finance_vendor(request)
         if not vendor:
             return Response({"error": "No vendor account."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -559,7 +561,7 @@ class SavedCardsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        vendor = getattr(request.user, 'vendor_user', None)
+        vendor = get_finance_vendor(request)
         cards = PaystackAuthorization.objects.filter(
             vendor=vendor, is_reusable=True
         ).order_by('-is_default', '-created_at')
@@ -571,7 +573,7 @@ class SavedCardDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, card_id):
-        vendor = getattr(request.user, 'vendor_user', None)
+        vendor = get_finance_vendor(request)
         card = PaystackAuthorization.objects.filter(
             pk=card_id, vendor=vendor
         ).first()
@@ -599,7 +601,7 @@ class SetDefaultCardView(APIView):
     permission_classes = [IsAuthenticated]
 
     def patch(self, request, card_id):
-        vendor = getattr(request.user, 'vendor_user', None)
+        vendor = get_finance_vendor(request)
         card = PaystackAuthorization.objects.filter(
             pk=card_id, vendor=vendor
         ).first()

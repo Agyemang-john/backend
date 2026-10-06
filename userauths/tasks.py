@@ -59,6 +59,49 @@ def send_otp(recipient, otp, is_email=True):
             raise
 
 
+@shared_task(bind=True, max_retries=3, default_retry_delay=30)
+def send_verification_code(self, recipient, code, channel, first_name=''):
+    """
+    Deliver an email/phone verification code (userauths/verification.py).
+
+    Separate from send_otp because the wording differs: this confirms that a
+    person owns an address, it does not log them in to the seller dashboard.
+    """
+    try:
+        if channel == 'email':
+            context = {
+                'code': code,
+                'first_name': first_name,
+                'brand_name': 'Negromart',
+                'expiry_minutes': 10,
+                'logo_url': 'https://seller.negromart.com/favicon.png',
+            }
+            html_message = render_to_string('email/verification_code.html', context)
+            send_mail(
+                subject=f'{code} is your Negromart verification code',
+                message=(
+                    f'Your Negromart verification code is {code}. It expires in 10 minutes. '
+                    'If you did not request it, you can ignore this email.'
+                ),
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[recipient],
+                html_message=html_message,
+                fail_silently=False,
+            )
+        else:
+            response = _get_sms_client().send_sms(
+                sender=settings.ARKESEL_SENDER,
+                message=f'{code} is your Negromart verification code. It expires in 10 minutes. Never share it.',
+                recipients=[recipient],
+            )
+            if response.get('status') != 'success':
+                raise Exception(f"Arkesel API error: {response.get('message', 'Unknown error')}")
+        logger.info("verification code sent via %s", channel)
+    except Exception as exc:
+        logger.error("verification code via %s failed: %s", channel, exc)
+        raise self.retry(exc=exc)
+
+
 @shared_task(ignore_result=True)
 def cleanup_expired_otps():
     """

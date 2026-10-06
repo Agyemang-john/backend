@@ -8,9 +8,9 @@ import time
 
 class SubscriptionCheckMiddleware(MiddlewareMixin):
     def process_request(self, request):
-        if request.user.is_authenticated and request.user.role == 'vendor':
+        if request.user.is_authenticated and getattr(request.user, 'is_vendor', False):
             try:
-                vendor = Vendor.objects.get(user=request.user)
+                vendor = request.user.current_vendor
                 if not vendor.has_active_subscription():
                     return redirect('payments:subscribe')  # Redirect to the subscription page
             except Vendor.DoesNotExist:
@@ -38,30 +38,31 @@ class VendorActivityMiddleware(MiddlewareMixin):
             return None
         if not request.user.is_authenticated:
             return None
-        if getattr(request.user, 'role', None) != 'vendor':
-            return None
 
         try:
             from django_redis import get_redis_connection
             conn = get_redis_connection("default")
 
             # Cache user_id → vendor_id in Redis (TTL 24h) to avoid a DB hit
-            # on every request. Cache is populated on first miss.
+            # on every request. Cache is populated on first miss; "0" marks a
+            # user with no store so non-sellers don't query on every request.
+            # The id comes from team membership, so activity by any member
+            # (owner, admin, staff) keeps the store's last_seen fresh.
             uid_vid_key = f"vendor:uid_vid:{request.user.id}"
             cached = conn.get(uid_vid_key)
-            if cached:
+            if cached is not None:
                 vendor_id = int(cached)
             else:
-                from .models import Vendor
+                from .models import VendorMember
                 vendor_id = (
-                    Vendor.objects
-                    .filter(user_id=request.user.id)
-                    .values_list('id', flat=True)
+                    VendorMember.objects
+                    .filter(user_id=request.user.id, is_active=True, vendor__is_approved=True)
+                    .values_list('vendor_id', flat=True)
                     .first()
-                )
-                if not vendor_id:
-                    return None
+                ) or 0
                 conn.set(uid_vid_key, vendor_id, ex=86400)
+            if not vendor_id:
+                return None
 
             conn.set(f"vendor:last_seen:{vendor_id}", int(time.time()), ex=86400)
         except Exception:

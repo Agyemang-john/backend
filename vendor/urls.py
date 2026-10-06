@@ -47,7 +47,15 @@ from vendor.bulk_upload_views import (
     BulkUploadMetaAPIView,
     BulkUploadJobStatusAPIView,
 )
- 
+from vendor.team_views import (
+    TeamListView,
+    TeamInvitationCreateView,
+    TeamInvitationDetailView,
+    TeamInvitationLookupView,
+    TeamInvitationAcceptView,
+    TeamMemberDetailView,
+)
+
 
 urlpatterns = [
     # Vendor Routes
@@ -55,6 +63,16 @@ urlpatterns = [
     path('check/', CheckCustomerAuth.as_view(), name='check-auth'),
     path('my-status/', VendorStatusAPIView.as_view(), name='vendor-my-status'),
     path('register/', VendorSignupAPIView.as_view(), name='vendor-register'),
+
+    # Store team (owner / admin / staff). lookup/ and accept/ come before
+    # <int:invitation_id>/ only for readability; the int converter can't match them.
+    path('team/', TeamListView.as_view(), name='vendor-team'),
+    path('team/invitations/', TeamInvitationCreateView.as_view(), name='vendor-team-invite'),
+    path('team/invitations/lookup/', TeamInvitationLookupView.as_view(), name='vendor-team-invite-lookup'),
+    path('team/invitations/accept/', TeamInvitationAcceptView.as_view(), name='vendor-team-invite-accept'),
+    path('team/invitations/<int:invitation_id>/', TeamInvitationDetailView.as_view(), name='vendor-team-invite-detail'),
+    path('team/invitations/<int:invitation_id>/resend/', TeamInvitationDetailView.as_view(), name='vendor-team-invite-resend'),
+    path('team/members/<int:member_id>/', TeamMemberDetailView.as_view(), name='vendor-team-member'),
     path('product-related-data/', ProductRelatedDataAPIView.as_view(), name='product-related-data'),
 
     # Product Routes

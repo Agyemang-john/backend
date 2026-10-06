@@ -1,3 +1,4 @@
+from django.db import transaction
 from rest_framework import serializers
 from .models import Vendor, About, VendorPaymentMethod
 from django.core.validators import MinLengthValidator, RegexValidator
@@ -104,18 +105,22 @@ class VendorSignupSerializer(CountryFieldMixin, serializers.ModelSerializer):
 
         if Vendor.objects.filter(user=user).exists():
             raise serializers.ValidationError("User already has a vendor profile.")
-        
-        vendor = Vendor.objects.create(user=user, **validated_data)
 
-        if about_data:
-            About.objects.update_or_create(
+        # One transaction: the store, its owner membership (created by the
+        # post_save signal in signals.py), profile and payout method either all
+        # exist or none do. A half-created store would block a retry.
+        with transaction.atomic():
+            vendor = Vendor.objects.create(user=user, **validated_data)
+
+            if about_data:
+                About.objects.update_or_create(
+                    vendor=vendor,
+                    defaults=about_data
+                )
+
+            VendorPaymentMethod.objects.create(
                 vendor=vendor,
-                defaults=about_data
+                last_updated_by=user,
+                **payment_method_data
             )
-
-        VendorPaymentMethod.objects.create(
-            vendor=vendor,
-            last_updated_by=user,
-            **payment_method_data
-        )
         return vendor

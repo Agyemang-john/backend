@@ -29,6 +29,7 @@ from payments.models import SubscriptionUsage
 from payments.subscription_permissions import require_feature, _usage, _plan
 from product.models import Sub_Category, Brand
 from vendor.permissions import IsVerifiedVendor
+from vendor.access import Capability, require_capability
 from vendor.bulk_upload_serializer import (
     BulkUploadResultSerializer,
     BulkProductRowSerializer,
@@ -61,7 +62,7 @@ EXAMPLE_ROW = [
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
 def _get_vendor(user):
-    return getattr(user, "vendor_user", None)
+    return getattr(user, "current_vendor", None)
 
 
 def _check_product_limit(user, requested_count):
@@ -154,7 +155,7 @@ def _dispatch(vendor, clean_rows, usage):
 # ── Template download ──────────────────────────────────────────────────────────
 
 class BulkUploadTemplatAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_feature("can_access_bulk_upload")]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_feature("can_access_bulk_upload"), require_capability(Capability.MANAGE_CATALOG)]
 
     def get(self, request):
         output = io.StringIO()
@@ -174,7 +175,7 @@ class BulkUploadMetaAPIView(APIView):
     sub_categories includes a 'label' field with the full display path
     (Main Category > Category > Sub Category) so the frontend doesn't need slugs.
     """
-    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_feature("can_access_bulk_upload")]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_feature("can_access_bulk_upload"), require_capability(Capability.MANAGE_CATALOG)]
 
     def get(self, request):
         sub_cats_qs = Sub_Category.objects.select_related(
@@ -230,7 +231,7 @@ class BulkUploadMetaAPIView(APIView):
 
 class BulkProductUploadAPIView(APIView):
     """POST multipart/form-data with field 'file' (CSV or TSV)."""
-    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_feature("can_access_bulk_upload")]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_feature("can_access_bulk_upload"), require_capability(Capability.MANAGE_CATALOG)]
     MAX_ROWS = 500
 
     def post(self, request):
@@ -290,7 +291,7 @@ class BulkProductDirectAPIView(APIView):
     Accepts the same row schema as the CSV upload.
     Used by the in-browser grid editor so sellers never touch a spreadsheet.
     """
-    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_feature("can_access_bulk_upload")]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_feature("can_access_bulk_upload"), require_capability(Capability.MANAGE_CATALOG)]
     MAX_ROWS = 500
 
     def post(self, request):
@@ -325,7 +326,7 @@ class BulkProductDirectAPIView(APIView):
 
 class BulkUploadJobStatusAPIView(APIView):
     """GET  /api/v1/vendor/products/bulk-upload/job/<uuid>/"""
-    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_feature("can_access_bulk_upload")]
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_feature("can_access_bulk_upload"), require_capability(Capability.MANAGE_CATALOG)]
 
     def get(self, request, job_id):
         vendor = _get_vendor(request.user)

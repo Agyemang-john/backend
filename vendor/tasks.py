@@ -677,3 +677,43 @@ def check_inactive_vendors():
         "check_inactive_vendors: auto-closed=%d warned=%d threshold=%d days",
         closed_count, warned_count, inactivity_days,
     )
+
+@shared_task(bind=True, max_retries=3, retry_backoff=True)
+def send_team_invitation_email(self, invitation_id, raw_token):
+    """
+    Email a store-team invitation link (vendor/team_views.py).
+
+    The raw token is passed in because only its hash is stored; it cannot be
+    rebuilt from the database. If the invite was revoked or re-issued before
+    this runs, the stale link is simply not sent.
+    """
+    from .models import VendorInvitation
+    try:
+        invitation = VendorInvitation.objects.select_related('vendor', 'invited_by').get(pk=invitation_id)
+    except VendorInvitation.DoesNotExist:
+        return
+    if not invitation.is_pending or invitation.token_hash != VendorInvitation.hash_token(raw_token):
+        return
+
+    seller_url = getattr(settings, 'SELLER_SITE_URL', 'https://seller.negromart.com').rstrip('/')
+    inviter = invitation.invited_by
+    context = {
+        'store_name': invitation.vendor.name,
+        'role': invitation.get_role_display(),
+        'inviter_name': f"{inviter.first_name} {inviter.last_name}".strip() if inviter else 'The store owner',
+        'accept_url': f"{seller_url}/join-team?token={raw_token}",
+        'expiry_days': VendorInvitation.TTL_DAYS,
+    }
+    try:
+        email = EmailMessage(
+            subject=f"You're invited to help run {invitation.vendor.name} on Negromart",
+            body=render_to_string('email/vendor-team-invitation.html', context),
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to=[invitation.email],
+        )
+        email.content_subtype = 'html'
+        email.send()
+        logger.info("team invite emailed: invitation=%s", invitation_id)
+    except Exception as exc:
+        logger.error("team invite email failed: invitation=%s err=%s", invitation_id, exc)
+        raise self.retry(exc=exc)

@@ -67,6 +67,8 @@ class ActivateEmailView(APIView):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         user.is_active = True
+        # Clicking the emailed link proves control of the address.
+        user.email_verified_at = user.email_verified_at or timezone.now()
         user.save()
         return Response({
             "success": True,
@@ -316,15 +318,17 @@ class VendorOTPVerifyView(APIView):
         except User.DoesNotExist:
             return Response({'detail': 'User not found.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if user.role != 'vendor':
+        if not user.is_vendor:
             return Response(
                 {'detail': 'OTP verification not required for this user.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Fetch the most recent unused, non-expired OTP record from DB
+        # Fetch the most recent unused, non-expired login OTP from DB. Codes
+        # issued for other purposes (email/phone verification) never count.
         otp_record = OTPRecord.objects.filter(
             user=user,
+            purpose=OTPRecord.PURPOSE_VENDOR_LOGIN,
             is_used=False,
             expires_at__gt=timezone.now(),
         ).order_by('-created_at').first()
@@ -377,7 +381,7 @@ class VendorOTPVerifyView(APIView):
             from vendor.tasks import log_vendor_activity
             from vendor.models import Vendor
             from django_redis import get_redis_connection
-            vendor = Vendor.objects.filter(user=user).first()
+            vendor = getattr(user, 'current_vendor', None)
             if vendor:
                 ip = (
                     request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
@@ -385,7 +389,10 @@ class VendorOTPVerifyView(APIView):
                 )
                 ua = request.META.get('HTTP_USER_AGENT', '')[:500]
                 was_auto_closed = vendor.inactivity_auto_closed
-                log_vendor_activity.delay(vendor.pk, 'login', ip, ua)
+                # Record which team member signed in, not just which store.
+                log_vendor_activity.delay(
+                    vendor.pk, 'login', ip, ua, {'user_id': user.pk, 'email': user.email},
+                )
                 Vendor.objects.filter(pk=vendor.pk).update(
                     last_login_at=timezone.now(),
                     last_seen_at=timezone.now(),
@@ -441,13 +448,14 @@ class VendorOTPResendView(APIView):
             )
         try:
             user = User.objects.get(Q(email__iexact=email_or_phone) | Q(phone=email_or_phone))
-            if user.role != 'vendor':
+            if not user.is_vendor:
                 return Response({'detail': 'OTP verification not required for this user.'}, status=status.HTTP_400_BAD_REQUEST)
 
             from .models import OTPRecord
             # Enforce 60-second cooldown between resends
             recent = OTPRecord.objects.filter(
                 user=user,
+                purpose=OTPRecord.PURPOSE_VENDOR_LOGIN,
                 is_used=False,
                 expires_at__gt=timezone.now(),
             ).order_by('-created_at').first()
@@ -486,18 +494,21 @@ class VendorTokenVerifyView(TokenVerifyView):
 class VendorLogoutView(APIView):
     def post(self, request, *args, **kwargs):
         # Fire async logout activity before clearing auth
-        if request.user.is_authenticated and getattr(request.user, 'role', None) == 'vendor':
+        if request.user.is_authenticated and request.user.is_vendor:
             try:
                 from vendor.tasks import log_vendor_activity
                 from vendor.models import Vendor
-                vendor = Vendor.objects.filter(user=request.user).first()
+                vendor = getattr(request.user, 'current_vendor', None)
                 if vendor:
                     ip = (
                         request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
                         or request.META.get('REMOTE_ADDR')
                     )
                     ua = request.META.get('HTTP_USER_AGENT', '')[:500]
-                    log_vendor_activity.delay(vendor.pk, 'logout', ip, ua)
+                    log_vendor_activity.delay(
+                        vendor.pk, 'logout', ip, ua,
+                        {'user_id': request.user.pk, 'email': request.user.email},
+                    )
                     Vendor.objects.filter(pk=vendor.pk).update(last_logout_at=timezone.now())
             except Exception:
                 pass

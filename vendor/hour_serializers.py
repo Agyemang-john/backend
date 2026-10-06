@@ -23,7 +23,7 @@ class OpeningHourSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         # Extract data
-        vendor = self.context['request'].user.vendor_user
+        vendor = self.context['request'].user.current_vendor
         day = data.get('day')
         from_hour = data.get('from_hour')
         to_hour = data.get('to_hour')
@@ -75,5 +75,5 @@ class OpeningHourSerializer(serializers.ModelSerializer):
         return data
 
     def create(self, validated_data):
-        validated_data['vendor'] = self.context['request'].user.vendor_user
+        validated_data['vendor'] = self.context['request'].user.current_vendor
         return super().create(validated_data)

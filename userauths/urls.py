@@ -23,10 +23,32 @@ from .views import (
     CustomerSessionRevokeView,
     CustomerLogoutAllView,
 )
+from .seller_signup_views import (
+    SellerSignupStartView,
+    SellerSignupStateView,
+    SellerSignupVerifyEmailView,
+    SellerSignupVerifyPhoneView,
+    SellerSignupResendView,
+    SellerSignupChangePhoneView,
+    PhoneVerificationSendView,
+    PhoneVerificationConfirmView,
+)
 
 
 urlpatterns = [
     path("register/", RegisterView.as_view(), name="register"),
+
+    # Inline account creation from the seller site (email + phone codes)
+    path('seller-signup/start/', SellerSignupStartView.as_view(), name='seller-signup-start'),
+    path('seller-signup/state/', SellerSignupStateView.as_view(), name='seller-signup-state'),
+    path('seller-signup/verify-email/', SellerSignupVerifyEmailView.as_view(), name='seller-signup-verify-email'),
+    path('seller-signup/verify-phone/', SellerSignupVerifyPhoneView.as_view(), name='seller-signup-verify-phone'),
+    path('seller-signup/resend/', SellerSignupResendView.as_view(), name='seller-signup-resend'),
+    path('seller-signup/change-phone/', SellerSignupChangePhoneView.as_view(), name='seller-signup-change-phone'),
+
+    # Phone verification for signed-in customers (required before opening a store)
+    path('phone/verification/send/', PhoneVerificationSendView.as_view(), name='phone-verification-send'),
+    path('phone/verification/confirm/', PhoneVerificationConfirmView.as_view(), name='phone-verification-confirm'),
     path('activate/', ActivateEmailView.as_view(), name='activate'),
 
     path('jwt/create/', CustomTokenObtainPairView.as_view()),

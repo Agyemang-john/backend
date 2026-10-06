@@ -14,10 +14,12 @@ class IsVerifiedVendor(BasePermission):
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
             raise PermissionDenied("Authentication required.")
-        if request.user.role != 'vendor':
+        if not request.user.is_vendor:
             raise PermissionDenied("User must be a vendor.")
         try:
-            vendor = Vendor.objects.get(user=request.user)
+            # Resolved through team membership, so owners, admins and staff
+            # all pass for the store they work for (see vendor/access.py).
+            vendor = request.user.current_vendor
             if vendor.status != 'VERIFIED':
                 raise PermissionDenied("Vendor is not verified.")
             if not vendor.is_approved:

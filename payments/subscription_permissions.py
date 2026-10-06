@@ -32,12 +32,21 @@ TIER_ORDER: dict[str, int] = {"free": 0, "basic": 1, "pro": 2, "enterprise": 3}
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
+def _vendor_of(user):
+    # The store the user works for (owner or team member). Plan limits are
+    # per store, so staff see exactly the features the owner paid for.
+    return getattr(user, 'current_vendor', None)
+
+
 def _active_sub(user) -> VendorSubscription | None:
+    vendor = _vendor_of(user)
+    if vendor is None:
+        return None
     try:
         return (
             VendorSubscription.objects
             .select_related("plan")
-            .get(vendor__user=user, status__in=["active", "trial"])
+            .get(vendor=vendor, status__in=["active", "trial"])
         )
     except VendorSubscription.DoesNotExist:
         return None
@@ -51,7 +60,7 @@ def _plan(user) -> SubscriptionPlan | None:
 
 
 def _usage(user) -> SubscriptionUsage | None:
-    vendor = getattr(user, 'vendor_user', None) or getattr(user, 'vendor', None)
+    vendor = _vendor_of(user)
     if not vendor:
         return None
     try:

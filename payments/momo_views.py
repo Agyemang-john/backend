@@ -15,12 +15,14 @@ from .momo_serializers import (
     ManualMomoSerializer,
 )
 from . import momo_services
+from vendor.access import get_finance_vendor
 
 logger = logging.getLogger(__name__)
 
 
 def _vendor(request):
-    return getattr(request.user, 'vendor_user', None)
+    # Store whose billing this caller may see/change; see vendor/access.py.
+    return get_finance_vendor(request)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
