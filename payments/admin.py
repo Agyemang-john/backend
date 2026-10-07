@@ -399,3 +399,38 @@ class BillingProfileAdmin(admin.ModelAdmin):
     is_complete_display.boolean = True
     is_complete_display.short_description = "Complete?"
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Seller ledger: read-only history; staff may add ADJUSTMENT lines only
+# ─────────────────────────────────────────────────────────────────────────────
+from .ledger_models import LedgerEntry  # noqa: E402
+
+
+@admin.register(LedgerEntry)
+class LedgerEntryAdmin(admin.ModelAdmin):
+    list_display = ('created_at', 'vendor', 'entry_type', 'amount', 'description', 'available_at', 'payout')
+    list_filter = ('entry_type',)
+    search_fields = ('vendor__name', 'description', 'order__order_number')
+    raw_id_fields = ('vendor',)
+    date_hierarchy = 'created_at'
+
+    def get_fields(self, request, obj=None):
+        if obj is None:  # adding: a manual adjustment
+            return ('vendor', 'amount', 'description')
+        return [f.name for f in self.model._meta.fields]
+
+    def get_readonly_fields(self, request, obj=None):
+        return [] if obj is None else [f.name for f in self.model._meta.fields]
+
+    def save_model(self, request, obj, form, change):
+        if change:
+            return  # entries are immutable
+        from django.utils import timezone
+        obj.entry_type = LedgerEntry.ADJUSTMENT
+        obj.available_at = timezone.now()
+        obj.created_by = request.user
+        super().save_model(request, obj, form, change)
+
+    def has_delete_permission(self, request, obj=None):
+        return False

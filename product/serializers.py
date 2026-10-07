@@ -100,7 +100,9 @@ class ProductReviewSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ProductReview
-        fields = ['id', 'review', 'rating', 'product', 'user', 'date', 'product_image']
+        fields = ['id', 'review', 'rating', 'product', 'user', 'date', 'product_image',
+                  'seller_reply', 'seller_replied_at']
+        read_only_fields = ['seller_reply', 'seller_replied_at']  # written only by the seller endpoint
         extra_kwargs = {'user': {'read_only': True}}
     
     def get_product_image(self, obj):
@@ -144,7 +146,8 @@ class ProductSerializer(serializers.ModelSerializer):
     vendor = VendorSerializer()
     brand = BrandSerializer()
     available_in_regions = CountrySerializer(many=True)
-    reviews = ProductReviewSerializer(many=True, read_only=True)
+    # Reviews are not nested here: they were unfiltered (unpublished ones leaked)
+    # and loaded every review per product. Use product/review_views.py instead.
     currency = serializers.SerializerMethodField()
     price = serializers.SerializerMethodField()
     old_price = serializers.SerializerMethodField()
@@ -156,7 +159,6 @@ class ProductSerializer(serializers.ModelSerializer):
             "slug",
             "sub_category",
             "vendor",
-            "reviews",
             "variant",
             "brand",
             "status",

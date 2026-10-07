@@ -16,6 +16,8 @@ Endpoints:
 """
 
 import logging
+from .delivery import default_provider
+from .fulfilment import on_shipment_delivered, recompute_order_status, record_tracking_event
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.db.models import Count, Q
@@ -280,10 +282,13 @@ class AdminShipmentView(APIView):
         if not vendor_items:
             return Response({'error': 'No items for this vendor in this order.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        provider = default_provider()
         shipment = Shipment.objects.create(
             order=order,
             vendor=vendor,
-            carrier=request.data.get('carrier', ''),
+            provider=request.data.get('provider') or provider.code,
+            fulfilled_by=request.data.get('fulfilled_by') or provider.fulfilled_by,
+            carrier=request.data.get('carrier', '') or provider.name,
             carrier_code=request.data.get('carrier_code', ''),
             tracking_number=request.data.get('tracking_number', ''),
             tracking_url=request.data.get('tracking_url', ''),
@@ -311,6 +316,9 @@ class AdminShipmentView(APIView):
                 setattr(shipment, field, val)
         shipment.save()
 
+        if shipment.status == 'delivered':
+            on_shipment_delivered(shipment)
+        recompute_order_status(order)
         _broadcast(order.id)
         return Response(ShipmentSerializer(shipment).data)
 
@@ -337,8 +345,8 @@ class AdminTrackingEventView(APIView):
         if request.data['status'] not in dict(TrackingEvent.STATUS_CHOICES).keys():
             return Response({'error': 'Invalid event status.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        event = TrackingEvent.objects.create(
-            shipment=shipment,
+        event = record_tracking_event(
+            shipment,
             status=request.data['status'],
             description=request.data['description'],
             location=request.data.get('location', ''),
@@ -346,17 +354,6 @@ class AdminTrackingEventView(APIView):
             country=request.data.get('country', ''),
             event_date=request.data['event_date'],
         )
-
-        status_map = {
-            'in_transit': 'in_transit',
-            'out_for_delivery': 'out_for_delivery',
-            'delivered': 'delivered',
-            'failed_attempt': 'failed',
-            'returned_to_sender': 'returned',
-        }
-        if event.status in status_map:
-            shipment.status = status_map[event.status]
-            shipment.save(update_fields=['status'])
 
         _broadcast(order.id)
         return Response(TrackingEventSerializer(event).data, status=status.HTTP_201_CREATED)

@@ -717,3 +717,34 @@ def send_team_invitation_email(self, invitation_id, raw_token):
     except Exception as exc:
         logger.error("team invite email failed: invitation=%s err=%s", invitation_id, exc)
         raise self.retry(exc=exc)
+
+
+@shared_task(ignore_result=True)
+def remind_late_orders():
+    """
+    Daily: tell each store owner how many orders are past their ship-by date
+    (order date + Vendor.handling_days, see order/fulfilment.py). One
+    notification per store per day, not one per order.
+    """
+    from notification.utils import send_notification
+    from order.fulfilment import late_orders
+    from .models import Vendor
+
+    stores = Vendor.objects.filter(is_approved=True, is_suspended=False, shop_paused=False).select_related('user')
+    notified = 0
+    for vendor in stores.iterator():
+        count = late_orders(vendor).count()
+        if not count or not vendor.user_id:
+            continue
+        noun = 'order is' if count == 1 else 'orders are'
+        send_notification(
+            recipient=vendor.user, verb='vendor_orders_late',
+            data={
+                'count': count,
+                'message': f"{count} {noun} past the ship-by date. Ship or update them to protect your store rating.",
+                'url': '/orders?filter=late',
+            },
+        )
+        notified += 1
+    logger.info("remind_late_orders: notified %s store(s)", notified)
+    return notified

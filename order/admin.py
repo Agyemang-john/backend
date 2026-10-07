@@ -555,3 +555,32 @@ class DeliveryRateAdmin(admin.ModelAdmin):
 class CampusZoneAdmin(admin.ModelAdmin):
     list_display = ('name', 'center_lat', 'center_lon', 'radius_km', 'flat_fee', 'free_delivery_threshold')
     search_fields = ('name',)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Returns: staff issue the refund (sellers approve and confirm receipt)
+# ─────────────────────────────────────────────────────────────────────────────
+from order.models import ReturnRequest  # noqa: E402
+
+
+@admin.register(ReturnRequest)
+class ReturnRequestAdmin(admin.ModelAdmin):
+    list_display = ('reference', 'order', 'vendor', 'reason', 'quantity', 'refund_amount', 'status', 'created_at')
+    list_filter = ('status', 'reason')
+    search_fields = ('reference', 'order__order_number', 'vendor__name', 'customer__email')
+    readonly_fields = ('reference', 'order', 'order_product', 'vendor', 'customer', 'refund_amount',
+                       'created_at', 'decided_at', 'decided_by', 'received_at', 'refunded_at')
+    actions = ['mark_refunded']
+
+    @admin.action(description="Mark refunded (money returned to customer; debits the seller)")
+    def mark_refunded(self, request, queryset):
+        from order.returns import ReturnError, mark_refunded
+        done, skipped = 0, 0
+        for rr in queryset.filter(status=ReturnRequest.STATUS_RECEIVED):
+            try:
+                mark_refunded(rr, request.user)
+                done += 1
+            except ReturnError:
+                skipped += 1
+        skipped += queryset.exclude(status=ReturnRequest.STATUS_RECEIVED).count()
+        self.message_user(request, f"{done} refunded. {skipped} skipped (only 'Item received' returns can be refunded).")

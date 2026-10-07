@@ -199,11 +199,37 @@ class PayoutService:
                 "message": f"Transfer error: {str(e)}"
             }
 
+    def send_transfer(self, vendor, amount, reason):
+        """
+        Send `amount` GHS to the store's verified payout account.
+        Returns {"status": "success"|"error", "transaction_id"?, "message"?}.
+        Used by payments.ledger.pay_vendor; creates no Payout row itself.
+        """
+        try:
+            payment_method = VendorPaymentMethod.objects.filter(vendor=vendor, status='verified').first()
+            if not payment_method:
+                return {"status": "error", "message": "No verified payment method found."}
+            recipient_code = self._recipient_for(payment_method, vendor)
+            if not recipient_code:
+                return {"status": "error", "message": "Failed to create transfer recipient."}
+            return self.initiate_transfer(recipient_code, amount, reason)
+        except Exception as e:
+            logger.error(f"Transfer error for vendor {vendor.id}: {e}")
+            return {"status": "error", "message": f"Transfer error: {e}"}
+
+    def _recipient_for(self, payment_method, vendor):
+        if payment_method.payment_method == 'momo' and payment_method.momo_number and payment_method.momo_provider:
+            return self.create_momo_recipient(payment_method.momo_number, payment_method.momo_provider, vendor)
+        if payment_method.payment_method == 'bank' and payment_method.bank_account_number and payment_method.bank_name:
+            return self.create_bank_recipient(payment_method.bank_account_number, payment_method.bank_name, vendor)
+        logger.error(f"Unsupported or incomplete payout method for vendor {vendor.id}")
+        return None
+
     def process_vendor_payout(self, vendor, orders, amount, product_total, delivery_fee):
-        """Process payout for a vendor based on orders, storing product total and delivery fee."""
+        """Legacy order-based payout. New payouts go through payments.ledger.pay_vendor."""
         try:
             payment_method = VendorPaymentMethod.objects.filter(
-                vendor=vendor, 
+                vendor=vendor,
                 status='verified'
             ).first()
             if not payment_method:
@@ -257,42 +283,13 @@ class PayoutService:
 
 @shared_task
 def batch_payouts():
-    """Celery task to process payouts for all vendors with verified payment methods."""
-    logger.info("Starting batch payout process")
-    vendors = Vendor.objects.filter(
-        payment_methods__status='verified'
-    ).distinct()
-    
-    for vendor in vendors:
-        orders = Order.objects.filter(
-            vendors=vendor,
-            status='delivered',
-            payouts__isnull=True
-        )
-        if not orders.exists():
-            logger.info(f"No eligible orders for vendor {vendor.id}")
-            continue
+    """
+    Pay every store its available ledger balance.
 
-        product_total = sum(Decimal(str(order.get_vendor_total(vendor))) for order in orders)
-        delivery_fee = sum(Decimal(str(order.calculate_vendor_delivery_fee(vendor))) for order in orders)
-        total_amount = (product_total + delivery_fee) * Decimal('0.8')
-
-        if total_amount <= 0:
-            logger.info(f"No positive amount to pay for vendor {vendor.id}")
-            continue
-
-        logger.info(f"Processing payout of {total_amount} GHS for vendor {vendor.id} (Products: {product_total}, Delivery: {delivery_fee})")
-        payout_service = PayoutService()
-        result = payout_service.process_vendor_payout(vendor, orders, total_amount, product_total, delivery_fee)
-        
-        if result["status"] == "success":
-            logger.info(f"Payout successful for vendor {vendor.id}: {result['transaction_id']}")
-        else:
-            logger.error(f"Payout failed for vendor {vendor.id}: {result['message']}")
-            from django.core.mail import send_mail
-            send_mail(
-                subject="Payout Failure",
-                message=f"Payout failed for vendor {vendor.id}: {result['message']}",
-                from_email="no-reply@negromart.com",
-                recipient_list=["admin@negromart.com"]
-            )
+    Replaces the old order-based batch (which paid a flat 80% of products plus
+    delivery, ignoring plan commission and who delivered). Kept under this
+    name so existing Celery Beat entries keep working; see
+    payments.tasks.run_seller_payouts.
+    """
+    from payments.tasks import run_seller_payouts
+    return run_seller_payouts()

@@ -1,3 +1,5 @@
+from django.utils import timezone
+from order.fulfilment import AWAITING_DISPATCH_ORDER_STATUSES, ship_by_for
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from order.models import Order, OrderProduct
@@ -71,7 +73,29 @@ class OrderProductSerializer(serializers.ModelSerializer):
             logger.error(f"Error getting delivery status for OrderProduct {obj.id}: {str(e)}")
             return "Delivery status unavailable"
 
-class VendorOrderSerializer(serializers.ModelSerializer):
+class ShipByMixin(serializers.Serializer):
+    """
+    ship_by: order date + the store's handling days (order/fulfilment.py).
+    is_late: past ship_by and this store has not created its shipment yet.
+    Needs `vendor` in the serializer context.
+    """
+    ship_by = serializers.SerializerMethodField()
+    is_late = serializers.SerializerMethodField()
+
+    def get_ship_by(self, obj):
+        vendor = self.context.get('vendor')
+        return ship_by_for(obj, vendor) if vendor else None
+
+    def get_is_late(self, obj):
+        vendor = self.context.get('vendor')
+        if not vendor or obj.status not in AWAITING_DISPATCH_ORDER_STATUSES:
+            return False
+        if any(s.vendor_id == vendor.pk for s in obj.shipments.all()):
+            return False
+        return timezone.now() > ship_by_for(obj, vendor)
+
+
+class VendorOrderSerializer(ShipByMixin, serializers.ModelSerializer):
     grand_total = serializers.SerializerMethodField()
     user_email = serializers.CharField(source='user.email', read_only=True, allow_null=True)
     vendor_delivery_date_range = serializers.SerializerMethodField()
@@ -91,6 +115,8 @@ class VendorOrderSerializer(serializers.ModelSerializer):
             'vendor_delivery_date_range',
             'vendor_delivery_status',
             'vendor_delivery_fee',
+            'ship_by',
+            'is_late',
         ]
         read_only_fields = ['id', 'order_number', 'date_created', 'grand_total', 'status']
 
@@ -147,7 +173,7 @@ class VendorOrderSerializer(serializers.ModelSerializer):
             logger.error(f"Error getting vendor delivery status for Order {obj.order_number}: {str(e)}")
             return "Delivery status unavailable"
 
-class OrderSerializer(serializers.ModelSerializer):
+class OrderSerializer(ShipByMixin, serializers.ModelSerializer):
     order_products = serializers.SerializerMethodField()
     address = AddressSerializer()
     vendor_delivery_date_range = serializers.SerializerMethodField()
@@ -172,6 +198,8 @@ class OrderSerializer(serializers.ModelSerializer):
             'vendor_delivery_cost',
             'vendor_delivery_status',
             'grand_total',
+            'ship_by',
+            'is_late',
         ]
 
     def get_order_products(self, obj):

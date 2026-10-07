@@ -530,6 +530,26 @@ class Shipment(models.Model):
     # Which OrderProducts are in this shipment
     items = models.ManyToManyField('OrderProduct', related_name='shipments')
 
+    # Who moves the parcel. `provider` is a key in settings.DELIVERY_PROVIDERS
+    # (order/delivery/), so adding an external courier later is a new provider
+    # class plus a settings entry, not a schema change. Today Negromart
+    # delivers everything itself ('platform').
+    FULFILLED_BY_CHOICES = [
+        ('platform', 'Negromart delivery'),
+        ('seller', 'Seller delivers'),
+        ('carrier', 'External courier'),
+    ]
+    provider = models.CharField(max_length=40, default='platform', db_index=True)
+    fulfilled_by = models.CharField(max_length=20, choices=FULFILLED_BY_CHOICES, default='platform')
+    external_reference = models.CharField(max_length=120, blank=True, default='',
+                                          help_text="The courier's own id for this shipment.")
+    label_url = models.URLField(blank=True, default='')
+    provider_data = models.JSONField(default=dict, blank=True,
+                                     help_text="Raw provider response, kept for support/debugging.")
+    # Set once the seller's earnings for this shipment are in the ledger
+    # (payments/ledger.py). Makes posting idempotent and easy to sweep.
+    ledger_posted_at = models.DateTimeField(null=True, blank=True, db_index=True)
+
     # Carrier & Tracking
     carrier = models.CharField(max_length=100, blank=True)  # e.g., "DHL", "FedEx", "Aramex"
     carrier_code = models.CharField(max_length=20, blank=True)  # for API: "dhl", "fedex"
@@ -562,6 +582,10 @@ class Shipment(models.Model):
 
     class Meta:
         unique_together = [('order', 'vendor')]
+        indexes = [
+            # The ledger sweep looks for "delivered but not yet posted".
+            models.Index(fields=['status', 'ledger_posted_at'], name='shipment_ledger_sweep_idx'),
+        ]
 
     def save(self, *args, **kwargs):
         if not self.shipment_id:
@@ -649,3 +673,92 @@ class CampusZone(models.Model):
 
     def __str__(self):
         return self.name
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Returns
+# ─────────────────────────────────────────────────────────────────────────────
+# One request per order line. The customer opens it, the seller approves or
+# rejects it, the item comes back (by Negromart delivery today; a provider
+# later), the seller confirms receipt, and Negromart issues the refund, which
+# also debits the seller's ledger. Rules live in order/returns.py.
+
+class ReturnRequest(models.Model):
+    # Reasons where the seller is at fault are always returnable within the
+    # platform's minimum window, even if the product's own return period is 0.
+    REASON_CHOICES = [
+        ('damaged', 'Arrived damaged'),
+        ('defective', 'Does not work / defective'),
+        ('wrong_item', 'Wrong item sent'),
+        ('not_as_described', 'Not as described'),
+        ('missing_parts', 'Missing parts or accessories'),
+        ('changed_mind', 'No longer needed'),
+        ('other', 'Other'),
+    ]
+    SELLER_FAULT_REASONS = frozenset({'damaged', 'defective', 'wrong_item', 'not_as_described', 'missing_parts'})
+
+    STATUS_REQUESTED = 'requested'
+    STATUS_APPROVED = 'approved'
+    STATUS_REJECTED = 'rejected'
+    STATUS_RECEIVED = 'received'
+    STATUS_REFUNDED = 'refunded'
+    STATUS_CANCELLED = 'cancelled'
+    STATUS_CHOICES = [
+        (STATUS_REQUESTED, 'Requested'),
+        (STATUS_APPROVED, 'Approved, awaiting return'),
+        (STATUS_REJECTED, 'Rejected'),
+        (STATUS_RECEIVED, 'Item received'),
+        (STATUS_REFUNDED, 'Refunded'),
+        (STATUS_CANCELLED, 'Cancelled by customer'),
+    ]
+    OPEN_STATUSES = (STATUS_REQUESTED, STATUS_APPROVED, STATUS_RECEIVED)
+
+    reference = models.CharField(max_length=20, unique=True, editable=False)
+    order_product = models.ForeignKey(OrderProduct, on_delete=models.PROTECT, related_name='return_requests')
+    order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name='return_requests')
+    vendor = models.ForeignKey(Vendor, on_delete=models.SET_NULL, null=True, related_name='return_requests')
+    customer = models.ForeignKey(get_user_model(), on_delete=models.SET_NULL, null=True, related_name='return_requests')
+
+    reason = models.CharField(max_length=30, choices=REASON_CHOICES)
+    details = models.TextField(max_length=2000, blank=True, default='')
+    quantity = models.PositiveIntegerField(default=1)
+    refund_amount = models.DecimalField(max_digits=10, decimal_places=2)
+
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_REQUESTED, db_index=True)
+    seller_note = models.TextField(max_length=1000, blank=True, default='')
+    # Pickup of the returned item, when a delivery provider handles it.
+    return_shipment = models.ForeignKey(Shipment, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    decided_at = models.DateTimeField(null=True, blank=True)
+    decided_by = models.ForeignKey(get_user_model(), on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    received_at = models.DateTimeField(null=True, blank=True)
+    refunded_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['vendor', 'status']),
+            models.Index(fields=['customer', '-created_at']),
+        ]
+        constraints = [
+            # At most one active return per order line.
+            models.UniqueConstraint(
+                fields=['order_product'],
+                condition=Q(status__in=('requested', 'approved', 'received')),
+                name='uniq_open_return_per_order_line',
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self.reference:
+            self.reference = f"RT-{uuid.uuid4().hex[:10].upper()}"
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.reference} ({self.get_status_display()})"
+
+    @property
+    def is_open(self):
+        return self.status in self.OPEN_STATUSES

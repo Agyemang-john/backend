@@ -217,7 +217,9 @@ class ProductReviewSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ProductReview
-        fields = ['review', 'rating', 'product', 'user', 'date', 'product_image']  # Include 'user' as read-only
+        fields = ['review', 'rating', 'product', 'user', 'date', 'product_image',
+                  'seller_reply', 'seller_replied_at']  # Include 'user' as read-only
+        read_only_fields = ['seller_reply', 'seller_replied_at']  # written only by the seller endpoint
         extra_kwargs = {'user': {'read_only': True}}
     
     def get_product_image(self, obj):

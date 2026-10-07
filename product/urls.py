@@ -1,6 +1,7 @@
 
 from django.urls import path
 from . import views
+from . import review_views
 
 urlpatterns = [
     path('flash-sales/', views.FlashSaleListAPIView.as_view(), name='flash-sales'),
@@ -9,6 +10,19 @@ urlpatterns = [
 
     # AJAX and custom endpoints
     path('add-review/', views.AddProductReviewView.as_view(), name='product-review-create'),
+
+    # Reviews (product/review_views.py). Fixed paths before <int:...> ones.
+    path('<int:product_id>/reviews/', review_views.ProductReviewListView.as_view(), name='product-reviews'),
+    path('<int:product_id>/reviews/summary/', review_views.ProductReviewSummaryView.as_view(), name='product-review-summary'),
+    path('<int:product_id>/reviews/eligibility/', review_views.ReviewEligibilityView.as_view(), name='product-review-eligibility'),
+    path('reviews/mine/', review_views.MyReviewsView.as_view(), name='my-reviews'),
+    path('reviews/moderation/', review_views.ModerationQueueView.as_view(), name='review-moderation-queue'),
+    path('reviews/media/', review_views.ReviewMediaUploadView.as_view(), name='review-media-upload'),
+    path('reviews/media/<int:media_id>/', review_views.ReviewMediaDeleteView.as_view(), name='review-media-delete'),
+    path('reviews/<int:review_id>/', review_views.ReviewDetailView.as_view(), name='review-detail'),
+    path('reviews/<int:review_id>/helpful/', review_views.ReviewHelpfulView.as_view(), name='review-helpful'),
+    path('reviews/<int:review_id>/moderate/', review_views.ModerateReviewView.as_view(), name='review-moderate'),
+    path('reviews/<int:review_id>/history/', review_views.ReviewHistoryView.as_view(), name='review-history'),
     path('sitemap-data/', views.SitemapDataAPIView.as_view(), name='sitemap-data'),
     # path('ajaxcolor/', views.AjaxColorAPIView.as_view(), name='change_color'),
 

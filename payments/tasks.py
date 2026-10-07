@@ -377,3 +377,57 @@ def charge_vendor_for_renewal(self, subscription_id: int):
             send_subscription_expired_email.delay(sub.vendor.id)
         except Exception as inner:
             logger.error(f'Failed to expire sub={subscription_id}: {inner}')
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Seller ledger & payouts (payments/ledger.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@shared_task(ignore_result=True)
+def sweep_delivered_shipments():
+    """
+    Safety net for seller earnings: post any delivered shipment the ledger
+    hasn't seen. Deliveries marked from Django admin bulk actions (which use
+    queryset.update and skip signals) or lost on_commit hooks get picked up
+    here within one run. Idempotent; runs every 15 minutes.
+    """
+    from order.fulfilment import on_shipment_delivered
+    from order.models import Shipment
+    from .ledger import post_shipment_earnings
+    pending = Shipment.objects.filter(status='delivered', ledger_posted_at__isnull=True)
+    posted = 0
+    for shipment in pending.iterator(chunk_size=500):
+        try:
+            # Stamps delivered dates on the lines (admin bulk updates skip
+            # that too), then post synchronously so the count is accurate.
+            on_shipment_delivered(shipment)
+            posted += bool(post_shipment_earnings(shipment.pk))
+        except Exception as exc:
+            logger.error(f"ledger sweep failed for shipment={shipment.pk}: {exc}")
+    if posted:
+        logger.info(f"ledger sweep posted {posted} shipment(s)")
+    return posted
+
+
+@shared_task(ignore_result=True)
+def run_seller_payouts():
+    """
+    Pay each store with a verified payout method its available balance.
+    Disabled unless settings.SELLER_PAYOUTS_ENABLED is True, so turning on
+    real transfers is an explicit decision per environment.
+    """
+    from django.conf import settings as dj_settings
+    from vendor.models import Vendor
+    from .ledger import pay_vendor
+
+    if not getattr(dj_settings, 'SELLER_PAYOUTS_ENABLED', False):
+        logger.info("seller payouts disabled (SELLER_PAYOUTS_ENABLED is False)")
+        return 0
+    paid = 0
+    vendors = Vendor.objects.filter(payment_methods__status='verified', is_suspended=False).distinct()
+    for vendor in vendors.iterator():
+        try:
+            payout = pay_vendor(vendor)
+            paid += bool(payout and payout.status == 'success')
+        except Exception as exc:
+            logger.error(f"payout failed for vendor={vendor.pk}: {exc}")
+    return paid

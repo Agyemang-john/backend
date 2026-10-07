@@ -1,3 +1,4 @@
+import re
 from rest_framework import serializers
 from django.utils.text import slugify
 from product.models import Product, ProductImages, Variants, ProductDeliveryOption, DeliveryOption, Sub_Category, Brand, Color, Size
@@ -49,7 +50,7 @@ class VariantsSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Variants
-        fields = ['id', 'title', 'size', 'color', 'image', 'quantity', 'price']
+        fields = ['id', 'title', 'size', 'color', 'image', 'quantity', 'price', 'seller_sku']
 
     def create(self, validated_data):
         variant = Variants.objects.create(**validated_data)
@@ -94,9 +95,11 @@ class ProductSerializer(serializers.ModelSerializer):
             'delivery_returns', 'available_in_regions', 'product_type', 'total_quantity',
             'weight', 'volume', 'life', 'mfd', 'return_period_days', 'warranty_period_days',
             'trending_score', 'deals_of_the_day', 'recommended_for_you', 'popular_product',
-            'delivery_options', 'sku', 'date', 'updated', 'views', 'p_images', 'variants'
+            'delivery_options', 'sku', 'seller_sku', 'review_note', 'date', 'updated', 'views',
+            'p_images', 'variants'
         ]
-        read_only_fields = ['vendor', 'sku', 'date', 'updated', 'views']
+        # review_note is written by Negromart reviewers (e.g. why it was rejected).
+        read_only_fields = ['vendor', 'sku', 'review_note', 'date', 'updated', 'views']
 
     def validate_price(self, value):
         if value <= 0:
@@ -107,6 +110,46 @@ class ProductSerializer(serializers.ModelSerializer):
         if len(value) < 1:
             raise serializers.ValidationError("At least one region must be selected.")
         return value
+
+    def validate_seller_sku(self, value):
+        value = (value or '').strip()
+        if not value:
+            return ''
+        vendor = self.context['request'].user.current_vendor
+        clash = Product.objects.filter(vendor=vendor, seller_sku__iexact=value)
+        if self.instance is not None:
+            clash = clash.exclude(pk=self.instance.pk)
+        if clash.exists():
+            raise serializers.ValidationError("Another product in your store already uses this SKU.")
+        return value
+
+    def validate(self, attrs):
+        # Variants arrive as a JSON string in multipart requests, outside the
+        # nested serializer; check their SKUs here, before anything is saved.
+        raw = self.context['request'].data.get('variants')
+        if raw:
+            try:
+                variants_data = json.loads(raw) if isinstance(raw, str) else raw
+            except json.JSONDecodeError:
+                variants_data = []
+            self._check_variant_skus(variants_data, product=self.instance)
+        return attrs
+
+    def _check_variant_skus(self, variants_data, product=None):
+        """Variant SKUs must be unique within the store (across all products)."""
+        skus = [str(v.get('seller_sku') or '').strip() for v in variants_data or []]
+        skus = [s for s in skus if s]
+        if not skus:
+            return
+        lowered = [s.lower() for s in skus]
+        if len(set(lowered)) != len(lowered):
+            raise serializers.ValidationError({'variants': "Each variant needs a different SKU."})
+        vendor = self.context['request'].user.current_vendor
+        taken = Variants.objects.filter(product__vendor=vendor, seller_sku__iregex=r'^(' + '|'.join(map(re.escape, skus)) + r')$')
+        if product is not None:
+            taken = taken.exclude(product=product)
+        if taken.exists():
+            raise serializers.ValidationError({'variants': f"SKU {taken.first().seller_sku} is already used by another product."})
 
     def create(self, validated_data):
         request = self.context['request']
@@ -281,9 +324,12 @@ class ProductReviewSerializer(serializers.ModelSerializer):
         model = ProductReview
         fields = [
             'id', 'product', 'product_title', 'product_image', 'user', 'user_email',
-            'review', 'rating', 'status', 'date', 'updated'
+            'review', 'rating', 'status', 'seller_reply', 'seller_replied_at', 'date', 'updated'
         ]
-        read_only_fields = ['id', 'product', 'user', 'user_email', 'review', 'rating', 'date', 'updated', 'product_title', 'product_image']
+        # Everything is read-only for sellers, including `status`: hiding a
+        # review is a Negromart moderation decision. Sellers reply or report
+        # instead (vendor/operations_views.py: ReviewReplyView, ReviewReportView).
+        read_only_fields = fields
 
     def validate(self, data):
         request = self.context['request']
@@ -292,9 +338,6 @@ class ProductReviewSerializer(serializers.ModelSerializer):
 
         if review and review.vendor != vendor:
             raise serializers.ValidationError({"non_field_errors": "You can only update reviews for your own products."})
-
-        if 'status' in data and not isinstance(data['status'], bool):
-            raise serializers.ValidationError({"status": "Status must be a boolean value (true/false)."})
 
         return data
 
@@ -319,7 +362,7 @@ class VendorProductCardSerializer(serializers.ModelSerializer):
     """
     class Meta:
         model = Product
-        fields = ['id', 'title', 'slug', 'sku', 'image', 'status',
+        fields = ['id', 'title', 'slug', 'sku', 'seller_sku', 'image', 'status', 'review_note',
                   'total_quantity', 'price', 'old_price', 'views']
 
 

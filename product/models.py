@@ -27,6 +27,9 @@ from django.contrib.postgres.indexes import GinIndex
 from django.contrib.postgres.search import SearchVectorField
 from django.contrib.postgres.search import SearchVector
 from django.db.models import F, Sum
+from django.utils import timezone
+import os
+import uuid
    
 ####################### CATEGORIES MODEL ##################
 
@@ -286,7 +289,16 @@ class Product(models.Model):
     recommended_for_you = models.BooleanField(default=False)
     popular_product = models.BooleanField(default=False)
     delivery_options = models.ManyToManyField(DeliveryOption, through='ProductDeliveryOption', related_name='delivery_options')
-    sku = ShortUUIDField(unique=True, length=4, max_length=10, prefix ="SKU", alphabet = "1234567890")
+    # Internal, platform-generated id. Was 4 digits (only 10,000 possible
+    # values, so creates would start failing as the catalogue grew); new rows
+    # get 10 digits. Existing short values stay valid.
+    sku = ShortUUIDField(unique=True, length=10, max_length=20, prefix ="SKU", alphabet = "1234567890")
+    # The seller's own stock code, used for their inventory and spreadsheet
+    # updates. Unique within a store (see Meta.constraints), optional.
+    seller_sku = models.CharField(max_length=64, blank=True, default='')
+    # Why a product was rejected (or what to fix), written by the platform
+    # reviewer and shown to the seller.
+    review_note = models.TextField(blank=True, default='')
     date = models.DateTimeField(auto_now_add=True)
     updated = models.DateTimeField(null=True, blank=True)
     views = models.PositiveIntegerField(default=0)
@@ -329,6 +341,14 @@ class Product(models.Model):
             models.Index(fields=["views"]),
             models.Index(fields=["date"]),
             GinIndex(fields=["search_vector"]),
+        ]
+        constraints = [
+            # A seller's own SKU identifies one product within their store.
+            models.UniqueConstraint(
+                fields=["vendor", "seller_sku"],
+                condition=~models.Q(seller_sku=""),
+                name="uniq_product_seller_sku_per_vendor",
+            ),
         ]
 
     def product_image(self):
@@ -398,12 +418,16 @@ class Variants(models.Model):
     image = models.ImageField(upload_to="variants/", default="product.jpg")
     quantity = models.PositiveIntegerField(default=1)
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    # Seller's own code for this exact size/colour. Uniqueness within the
+    # store is checked in the seller product serializer (it spans products).
+    seller_sku = models.CharField(max_length=64, blank=True, default='')
     date = models.DateTimeField(auto_now_add=True)
     updated = models.DateTimeField(auto_now=True)
 
 
     class Meta:
         indexes = [
+            models.Index(fields=['product', 'seller_sku']),
             models.Index(fields=['product', 'color']),
             models.Index(fields=['product', 'size']),
             models.Index(fields=['product', 'color', 'size']),
@@ -460,6 +484,29 @@ class VariantImage(models.Model):
 
 from django.core.validators import MinValueValidator, MaxValueValidator
 class ProductReview(models.Model):
+    """
+    A customer's review of a product they bought and received.
+
+    Two independent checks (product/review_services.py):
+      - purchase verification: derived from a delivered order line owned by the
+        author (order_item, is_verified_purchase). Never taken from the client.
+      - content moderation: automatic rules decide APPROVED or PENDING; staff
+        approve, reject or hide. Only APPROVED reviews are public or counted.
+
+    Policy: one review per customer per product (database constraint), whatever
+    the number of purchases; the most recent delivered line is the evidence.
+    """
+    PENDING = 'pending'
+    APPROVED = 'approved'
+    REJECTED = 'rejected'
+    HIDDEN = 'hidden'
+    MODERATION_CHOICES = [
+        (PENDING, 'Pending moderation'),
+        (APPROVED, 'Approved'),
+        (REJECTED, 'Rejected'),
+        (HIDDEN, 'Hidden'),
+    ]
+
     RATING = (
         (1, "★✰✰✰✰"),
         (2, "★★✰✰✰"),
@@ -488,22 +535,70 @@ class ProductReview(models.Model):
         null=True,
         blank=True
     )
+    # The purchase that verifies this review. Kept if the order is later
+    # refunded: the customer did buy and receive the item.
+    order_item = models.ForeignKey(
+        'order.OrderProduct', on_delete=models.SET_NULL, null=True, blank=True, related_name='reviews',
+    )
+    title = models.CharField(max_length=120, blank=True, default='')
     review = models.TextField(max_length=1000, blank=False)
     rating = models.IntegerField(
         choices=RATING,
         validators=[MinValueValidator(1), MaxValueValidator(5)],
         blank=False
     )
-    status = models.BooleanField(default=False)  # True = Published, False = Hidden
+    # Source of truth for visibility. Changed only by review_services.
+    moderation_status = models.CharField(max_length=10, choices=MODERATION_CHOICES, default=PENDING,
+                                         db_index=True)
+    # Derived "is public" flag (= moderation_status == APPROVED), set in save().
+    # Kept because many queries across the project filter on status=True.
+    status = models.BooleanField(default=False)
+    # Internal moderation record; never exposed publicly.
+    moderation_flags = models.JSONField(default=list, blank=True,
+                                        help_text="Automatic rules that sent this review to manual moderation.")
+    moderation_reason = models.TextField(blank=True, default='')
+    moderated_at = models.DateTimeField(null=True, blank=True)
+    moderated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+                                     blank=True, related_name='+')
+    # Normalised-text fingerprint for duplicate / copy-paste detection.
+    content_hash = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    # Shopper-facing context (see product/review_views.py):
+    # verified = written by someone with a delivered order line for this product;
+    # purchased_variant = what they bought, e.g. "Size M · Black" (helps others choose).
+    is_verified_purchase = models.BooleanField(default=False)
+    purchased_variant = models.CharField(max_length=120, blank=True, default='')
+    # Denormalised for sorting/filtering at scale (kept in sync by review_views
+    # and the ReviewHelpfulVote/ReviewMedia writers).
+    helpful_count = models.PositiveIntegerField(default=0)
+    has_media = models.BooleanField(default=False)
+    seller_reply = models.TextField(max_length=1000, blank=True, default='')
+    seller_replied_at = models.DateTimeField(null=True, blank=True)
+    seller_replied_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
     date = models.DateTimeField(auto_now_add=True)
     updated = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name_plural = "Product Reviews"
         ordering = ['-date']
+        permissions = [('moderate_productreview', 'Can moderate product reviews')]
+        constraints = [
+            # One review per customer per product. Hidden rows are excluded only
+            # so pre-existing duplicates could be kept (hidden) by migration
+            # 0018; the service layer still refuses any second review.
+            models.UniqueConstraint(
+                fields=['user', 'product'],
+                condition=models.Q(user__isnull=False, product__isnull=False) & ~models.Q(moderation_status='hidden'),
+                name='uniq_review_per_user_product',
+            ),
+        ]
         indexes = [
             models.Index(fields=['product', 'status']),
             models.Index(fields=['product', 'rating', 'status']),
+            # Review list sorts / "with photos" filter on the product page.
+            models.Index(fields=['product', 'status', '-helpful_count'], name='review_helpful_idx'),
+            models.Index(fields=['product', 'status', 'has_media'], name='review_media_idx'),
         ]
 
     def __str__(self):
@@ -518,8 +613,131 @@ class ProductReview(models.Model):
     def save(self, *args, **kwargs):
         if self.product and not self.vendor:
             self.vendor = self.product.vendor  # Automatically set vendor from product
+        self.status = self.moderation_status == self.APPROVED
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None and 'moderation_status' in update_fields:
+            kwargs['update_fields'] = set(update_fields) | {'status'}
         super().save(*args, **kwargs)
-    
+
+    @property
+    def is_public(self):
+        return self.moderation_status == self.APPROVED
+
+
+class ReviewModerationEvent(models.Model):
+    """Audit trail: every status change of a review, by whom (NULL = automatic) and why."""
+    review = models.ForeignKey(ProductReview, on_delete=models.CASCADE, related_name='moderation_events')
+    from_status = models.CharField(max_length=10, blank=True, default='')
+    to_status = models.CharField(max_length=10)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+                              related_name='+')
+    reason = models.TextField(blank=True, default='')
+    flags = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['review', '-created_at'])]
+
+    def __str__(self):
+        return f"Review {self.review_id}: {self.from_status or '-'} → {self.to_status}"
+
+
+def review_media_path(instance, filename):
+    return f"reviews/{timezone.now():%Y/%m}/{uuid.uuid4().hex}{os.path.splitext(filename)[1].lower()}"
+
+
+class ReviewMedia(models.Model):
+    """
+    A photo or video attached to a review.
+
+    Uploaded on its own before the review is posted (so each file gets its own
+    progress bar and the review request stays small), then attached by id.
+    Unattached uploads are deleted after a day (product.tasks.cleanup_orphan_review_media).
+    Images are re-encoded on upload: EXIF (incl. GPS location) stripped,
+    longest side capped, plus a small thumbnail for grids. See product/review_media.py.
+    """
+    KIND_IMAGE = 'image'
+    KIND_VIDEO = 'video'
+    KIND_CHOICES = [(KIND_IMAGE, 'Image'), (KIND_VIDEO, 'Video')]
+
+    review = models.ForeignKey(ProductReview, on_delete=models.CASCADE, null=True, blank=True, related_name='media')
+    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='+')
+    kind = models.CharField(max_length=10, choices=KIND_CHOICES)
+    file = models.FileField(upload_to=review_media_path, max_length=255)
+    thumbnail = models.ImageField(upload_to=review_media_path, max_length=255, null=True, blank=True)
+    width = models.PositiveIntegerField(null=True, blank=True)
+    height = models.PositiveIntegerField(null=True, blank=True)
+    size_bytes = models.PositiveIntegerField(default=0)
+    position = models.PositiveSmallIntegerField(default=0)
+    # Staff moderation: hidden media is not shown to shoppers.
+    is_hidden = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['position', 'id']
+        indexes = [
+            models.Index(fields=['review', 'is_hidden', 'position']),
+            models.Index(fields=['uploaded_by', 'review', 'created_at']),
+        ]
+        verbose_name_plural = 'Review media'
+
+    def __str__(self):
+        return f"{self.kind} for review {self.review_id or '(unattached)'}"
+
+
+class ReviewHelpfulVote(models.Model):
+    """One shopper finding one review helpful. Count is mirrored on ProductReview.helpful_count."""
+    review = models.ForeignKey(ProductReview, on_delete=models.CASCADE, related_name='helpful_votes')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['review', 'user'], name='uniq_helpful_vote')]
+
+
+class ReviewReport(models.Model):
+    """
+    A seller (or later a shopper) flags a review for Negromart staff, e.g. it
+    is abusive, about a different product, or contains personal data. Staff
+    decide whether to hide it; the reporter never can.
+    """
+    REASON_CHOICES = [
+        ('abusive', 'Abusive or offensive'),
+        ('not_about_product', 'Not about this product'),
+        ('fake', 'Suspected fake review'),
+        ('personal_info', 'Contains personal information'),
+        ('other', 'Other'),
+    ]
+    STATUS_CHOICES = [
+        ('open', 'Open'),
+        ('upheld', 'Upheld (review hidden)'),
+        ('dismissed', 'Dismissed'),
+    ]
+
+    review = models.ForeignKey(ProductReview, on_delete=models.CASCADE, related_name='reports')
+    reported_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='+')
+    vendor = models.ForeignKey(Vendor, on_delete=models.SET_NULL, null=True, blank=True, related_name='review_reports')
+    reason = models.CharField(max_length=30, choices=REASON_CHOICES)
+    details = models.TextField(max_length=1000, blank=True, default='')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='open', db_index=True)
+    resolution_note = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            # One open report per review per store; re-reporting is noise.
+            models.UniqueConstraint(
+                fields=['review', 'vendor'], condition=models.Q(status='open'),
+                name='uniq_open_review_report_per_vendor',
+            ),
+        ]
+
+    def __str__(self):
+        return f"Report on review {self.review_id} ({self.get_reason_display()})"
+
 
 class Wishlist(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='wishlists', on_delete=models.CASCADE)

@@ -70,7 +70,7 @@ class OrderDetailView(APIView):
                 'order_products__variant',
                 'order_products__selected_delivery_option'
             ).get(id=id, user=request.user)
-            serializer = OrderSerializer(order, context={'request': request})
+            serializer = OrderSerializer(order, context={'request': request, 'include_returns': True})
             return Response(serializer.data)
         except Order.DoesNotExist:
             logger.warning(f"Order {id} not found for user {request.user.id}")

@@ -47,6 +47,20 @@ from vendor.bulk_upload_views import (
     BulkUploadMetaAPIView,
     BulkUploadJobStatusAPIView,
 )
+from vendor.operations_views import (
+    ActionCenterView,
+    PlanSummaryView,
+    OperationsSettingsView,
+    BalanceView,
+    LedgerView,
+    StatementExportView,
+    OrdersExportView,
+    VendorReturnListView,
+    VendorReturnActionView,
+    SellerReviewListView,
+    ReviewReplyView,
+    ReviewReportView,
+)
 from vendor.team_views import (
     TeamListView,
     TeamInvitationCreateView,
@@ -73,6 +87,20 @@ urlpatterns = [
     path('team/invitations/<int:invitation_id>/', TeamInvitationDetailView.as_view(), name='vendor-team-invite-detail'),
     path('team/invitations/<int:invitation_id>/resend/', TeamInvitationDetailView.as_view(), name='vendor-team-invite-resend'),
     path('team/members/<int:member_id>/', TeamMemberDetailView.as_view(), name='vendor-team-member'),
+
+    # Day-to-day operations (vendor/operations_views.py)
+    path('action-center/', ActionCenterView.as_view(), name='vendor-action-center'),
+    path('plan/', PlanSummaryView.as_view(), name='vendor-plan'),
+    path('operations-settings/', OperationsSettingsView.as_view(), name='vendor-operations-settings'),
+    path('finance/balance/', BalanceView.as_view(), name='vendor-finance-balance'),
+    path('finance/ledger/', LedgerView.as_view(), name='vendor-finance-ledger'),
+    path('finance/statement.csv', StatementExportView.as_view(), name='vendor-finance-statement'),
+    path('orders/export.csv', OrdersExportView.as_view(), name='vendor-orders-export'),
+    path('returns/', VendorReturnListView.as_view(), name='vendor-returns'),
+    path('returns/<str:reference>/<str:action>/', VendorReturnActionView.as_view(), name='vendor-return-action'),
+    path('reviews/manage/', SellerReviewListView.as_view(), name='vendor-reviews-manage'),
+    path('reviews/<int:pk>/reply/', ReviewReplyView.as_view(), name='vendor-review-reply'),
+    path('reviews/<int:pk>/report/', ReviewReportView.as_view(), name='vendor-review-report'),
     path('product-related-data/', ProductRelatedDataAPIView.as_view(), name='product-related-data'),
 
     # Product Routes

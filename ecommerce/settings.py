@@ -351,6 +351,41 @@ VENDOR_INACTIVITY_DAYS = int(config("VENDOR_INACTIVITY_DAYS", default=30))
 # [7, 3] means: warn at day 23 (7 days left) and day 27 (3 days left).
 VENDOR_INACTIVITY_WARN_DAYS = [7, 3]
 
+# ── Seller money (payments/ledger.py, payments/entitlements.py) ──────────────
+# Real transfers only run when explicitly enabled for the environment.
+SELLER_PAYOUTS_ENABLED = config("SELLER_PAYOUTS_ENABLED", default=False, cast=bool)
+SELLER_MIN_PAYOUT_AMOUNT = config("SELLER_MIN_PAYOUT_AMOUNT", default="10.00")
+# Used only when no subscription plan row exists; normally the plan decides.
+DEFAULT_COMMISSION_RATE = config("DEFAULT_COMMISSION_RATE", default="20.00")
+DEFAULT_PAYOUT_DELAY_DAYS = config("DEFAULT_PAYOUT_DELAY_DAYS", default=7, cast=int)
+
+# ── Returns (order/returns.py) ───────────────────────────────────────────────
+# Damaged / wrong / defective items can always be returned within this many
+# days of delivery, even when the product's own return period is 0.
+RETURN_MIN_WINDOW_SELLER_FAULT_DAYS = config("RETURN_MIN_WINDOW_SELLER_FAULT_DAYS", default=7, cast=int)
+
+# ── Review moderation (product/review_moderation.py) ─────────────────────────
+# Clean reviews publish immediately; anything flagged waits for staff.
+# Ratings and sentiment are never used to decide.
+REVIEW_MODERATION = {
+    # Prohibited words (whole-word match). Keep the real list in the environment
+    # or a private settings override rather than in the repository.
+    'BLOCKED_TERMS': [t.strip() for t in config('REVIEW_BLOCKED_TERMS', default='').split(',') if t.strip()],
+    'MAX_REVIEWS_PER_HOUR': config('REVIEW_MAX_PER_HOUR', default=5, cast=int),
+    # Hold every review with photos/videos for a human check.
+    'MEDIA_REQUIRES_MODERATION': config('REVIEW_MEDIA_REQUIRES_MODERATION', default=False, cast=bool),
+    # Optional external checker: dotted path to a review_moderation.AIModerationAdapter subclass.
+    'AI_ADAPTER': config('REVIEW_AI_MODERATION_ADAPTER', default='') or None,
+}
+
+# ── Delivery providers (order/delivery/) ─────────────────────────────────────
+# Negromart delivers everything itself today. Add an external courier by
+# writing a provider class and listing it here.
+DELIVERY_PROVIDERS = {
+    'platform': 'order.delivery.platform.PlatformDeliveryProvider',
+}
+DEFAULT_DELIVERY_PROVIDER = config("DEFAULT_DELIVERY_PROVIDER", default="platform")
+
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_TIMEZONE = "UTC"
@@ -470,12 +505,29 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": crontab(day_of_week="sunday", hour=2, minute=0),
     },
 
-    # Pay out all vendors with verified MoMo accounts for delivered orders.
-    # Runs every 2 days at 03:00 UTC. Only orders not yet paid out are included.
-    # "batch-payouts": {
-    #     "task": "payments.tasks.batch_payouts",
-    #     "schedule": 172800,  # 2 days in seconds (172800 = 2 × 24 × 3600)
-    # },
+    # ── Seller ledger & payouts (payments/ledger.py) ─────────────────────────
+    # Post earnings for delivered shipments the request path missed
+    # (e.g. admin bulk actions). Idempotent.
+    "ledger-sweep-delivered-shipments": {
+        "task": "payments.tasks.sweep_delivered_shipments",
+        "schedule": 900,  # every 15 minutes
+    },
+    # Pay each store its available balance. Does nothing unless
+    # SELLER_PAYOUTS_ENABLED=True in the environment.
+    "seller-payouts": {
+        "task": "payments.tasks.run_seller_payouts",
+        "schedule": crontab(hour=3, minute=0, day_of_week="tue,fri"),
+    },
+    # Delete review photos/videos uploaded but never attached to a review.
+    "cleanup-orphan-review-media": {
+        "task": "product.tasks.cleanup_orphan_review_media",
+        "schedule": crontab(hour=4, minute=15),
+    },
+    # Remind stores about orders past their ship-by date.
+    "remind-late-orders": {
+        "task": "vendor.tasks.remind_late_orders",
+        "schedule": crontab(hour=7, minute=0),
+    },
 
     # ── Vendor subscription lifecycle tasks ───────────────────────────────────
     # These three tasks run on a crontab schedule defined in the

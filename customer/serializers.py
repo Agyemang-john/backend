@@ -195,6 +195,8 @@ class OptimizedVariantSerializer(serializers.ModelSerializer):
 class OrderProductSerializer(serializers.ModelSerializer):
     delivery_range = serializers.SerializerMethodField()
     delivery_status = serializers.SerializerMethodField()
+    returns = serializers.SerializerMethodField()
+    review = serializers.SerializerMethodField()
     product = OptimizedProductSerializer()
     variant = OptimizedVariantSerializer()
     selected_delivery_option = DeliveryOptionSerializer()
@@ -214,7 +216,52 @@ class OrderProductSerializer(serializers.ModelSerializer):
             'date_updated',
             'delivery_range',
             'delivery_status',
+            'returns',
+            'review',
         ]
+
+    def get_review(self, obj):
+        """
+        Review state for this line on the single-order page: the customer's
+        existing review of the product (if any) or whether they can write one.
+        """
+        if not self.context.get('include_returns') or not obj.product_id:
+            return None
+        from product.models import ProductReview
+        from product.review_services import eligibility
+        request = self.context.get('request')
+        existing = ProductReview.objects.filter(user=request.user, product_id=obj.product_id).only(
+            'id', 'moderation_status', 'rating').first()
+        if existing:
+            return {'review_id': existing.id, 'status': existing.moderation_status, 'rating': existing.rating,
+                    'can_review': False}
+        return {'review_id': None, 'status': None, 'rating': None,
+                'can_review': eligibility(request.user, obj.product).can_review}
+
+    def get_returns(self, obj):
+        """
+        Return state for this line, only on the single-order page
+        (context include_returns=True) to keep the order list cheap.
+          latest       – most recent return request, if any
+          can_request  – a new return can be opened now (for a seller-fault reason)
+          window_ends_at – last day a return can be requested
+        """
+        if not self.context.get('include_returns'):
+            return None
+        from order.returns import check_eligibility
+        latest = obj.return_requests.order_by('-created_at').first()
+        request = self.context.get('request')
+        eligibility = check_eligibility(obj, request.user, 'damaged') if request else None
+        return {
+            'latest': latest and {
+                'reference': latest.reference, 'status': latest.status,
+                'status_label': latest.get_status_display(), 'seller_note': latest.seller_note,
+                'refund_amount': str(latest.refund_amount),
+            },
+            'can_request': bool(eligibility and eligibility.allowed),
+            'window_ends_at': eligibility.window_ends_at if eligibility else None,
+            'accepts_change_of_mind': bool(obj.product and obj.product.return_period_days > 0),
+        }
 
     def get_delivery_range(self, obj):
         try:

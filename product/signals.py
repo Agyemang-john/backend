@@ -2,7 +2,7 @@ from django.contrib.auth.signals import user_logged_in, user_logged_out
 from django.dispatch import receiver
 from order.models import Cart
 from django.db.models.signals import post_save, post_delete
-from product.models import Product, ProductReview
+from product.models import Product, ProductReview, ReviewMedia
 from django.core.cache import cache
 from django.db.models import Avg, Count
 
@@ -85,3 +85,25 @@ def sync_product_rating(sender, instance, **kwargs):
         review_count=stats['count'] or 0,
     )
 
+
+
+# ── Review summary cache & media flag (product/review_views.py) ──────────────
+
+@receiver([post_save, post_delete], sender=ProductReview)
+def invalidate_review_summary(sender, instance, **kwargs):
+    if instance.product_id:
+        from .review_views import summary_cache_key
+        cache.delete(summary_cache_key(instance.product_id))
+
+
+@receiver([post_save, post_delete], sender=ReviewMedia)
+def sync_review_media_flag(sender, instance, **kwargs):
+    """Keep ProductReview.has_media true only while it has visible media (staff may hide some)."""
+    if not instance.review_id:
+        return
+    from .review_views import summary_cache_key
+    visible = ReviewMedia.objects.filter(review_id=instance.review_id, is_hidden=False).exists()
+    ProductReview.objects.filter(pk=instance.review_id).exclude(has_media=visible).update(has_media=visible)
+    product_id = ProductReview.objects.filter(pk=instance.review_id).values_list('product_id', flat=True).first()
+    if product_id:
+        cache.delete(summary_cache_key(product_id))

@@ -48,13 +48,10 @@ from .team_serializers import (
 
 logger = logging.getLogger(__name__)
 
-# Members + pending invites per store. Kept as a setting so it can later be
-# tied to the subscription plan (e.g. plan.max_team_members) without code churn.
-DEFAULT_MAX_TEAM_MEMBERS = 10
-
-
-def _max_team_members():
-    return getattr(settings, 'VENDOR_TEAM_MAX_MEMBERS', DEFAULT_MAX_TEAM_MEMBERS)
+def _max_team_members(vendor):
+    # Members + pending invites, set per subscription plan (owner included).
+    from payments.entitlements import team_member_limit
+    return team_member_limit(vendor)
 
 
 class TeamInviteThrottle(UserRateThrottle):
@@ -148,7 +145,7 @@ class TeamListView(APIView):
             'members': VendorMemberSerializer(members, many=True, context={'request': request}).data,
             'invitations': VendorInvitationSerializer(invitations, many=True).data,
             'limits': {
-                'max_members': _max_team_members(),
+                'max_members': _max_team_members(vendor),
                 'used': members.count() + _pending_invites(vendor).count(),
             },
         })
@@ -184,10 +181,15 @@ class TeamInvitationCreateView(APIView):
                 VendorMember.objects.filter(vendor=vendor, is_active=True).count()
                 + _pending_invites(vendor).count()
             )
-            if used >= _max_team_members():
+            limit = _max_team_members(vendor)
+            if used >= limit:
                 return Response(
-                    {'detail': f'Your team is full ({_max_team_members()} people including pending invites). '
-                               'Remove someone or revoke an invite first.', 'code': 'team_full'},
+                    {'detail': (
+                        'Your plan includes only the store owner. Upgrade to invite team members.'
+                        if limit <= 1 else
+                        f'Your plan allows {limit} people including pending invites. '
+                        'Remove someone, revoke an invite, or upgrade your plan.'
+                    ), 'code': 'team_full', 'limit': limit},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             invitation = VendorInvitation(

@@ -654,3 +654,24 @@ def sync_recently_viewed_db(user_id, product_id):
     except Exception as e:
         logger.error("sync_recently_viewed_db: user=%s product=%s err=%s", user_id, product_id, e)
 
+
+
+@shared_task(ignore_result=True)
+def cleanup_orphan_review_media():
+    """
+    Delete review photos/videos that were uploaded but never attached to a
+    review (the shopper abandoned the form). Kept for a day so a slow review
+    can still be submitted. Files are removed from storage too.
+    """
+    from datetime import timedelta
+    from .models import ReviewMedia
+    from .review_views import delete_media_files
+
+    cutoff = timezone.now() - timedelta(days=1)
+    stale = ReviewMedia.objects.filter(review__isnull=True, created_at__lt=cutoff)
+    removed = 0
+    for media in stale.iterator(chunk_size=200):
+        delete_media_files(media)
+        media.delete()
+        removed += 1
+    return removed

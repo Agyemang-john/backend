@@ -53,9 +53,11 @@ def _active_sub(user) -> VendorSubscription | None:
 
 
 def _plan(user) -> SubscriptionPlan | None:
-    sub = _active_sub(user)
-    if sub:
-        return sub.plan
+    # Same resolution everywhere (active/trial subscription, else free plan).
+    from payments.entitlements import plan_for_vendor
+    vendor = _vendor_of(user)
+    if vendor is not None:
+        return plan_for_vendor(vendor)
     return SubscriptionPlan.objects.filter(tier="free").order_by("price").first()
 
 

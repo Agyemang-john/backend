@@ -85,6 +85,16 @@ class Notification(models.Model):
         ("vendor_shop_reopened",      "Shop Reopened"),
         ("vendor_shop_paused",        "Shop Paused by Seller"),
         ("vendor_shop_resumed",       "Shop Resumed by Seller"),
+
+        # ── Fulfilment & returns ──
+        ("vendor_orders_late",        "Orders Past Ship-by Date"),
+        ("vendor_return_requested",   "Return Requested"),
+        ("customer_return_update",    "Return Update"),
+
+        # ── Reviews ──
+        ("customer_review_published", "Review Published"),
+        ("customer_review_pending",   "Review Awaiting Moderation"),
+        ("customer_review_rejected",  "Review Not Published"),
     ]
 
     recipient = models.ForeignKey(

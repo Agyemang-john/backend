@@ -201,6 +201,17 @@ class Vendor(models.Model):
         help_text="Vendor notification preferences, e.g. {new_order: true, marketing: false}.",
     )
 
+    # Operations settings (seller-editable; see vendor/operations.py)
+    handling_days = models.PositiveSmallIntegerField(
+        default=2,
+        help_text="Days the store needs to get a paid order ready for dispatch. "
+                  "An order line not shipped within this time is 'late'.",
+    )
+    low_stock_threshold = models.PositiveIntegerField(
+        default=5,
+        help_text="Products at or below this quantity are flagged as low stock.",
+    )
+
     def __str__(self):
         return self.name
 

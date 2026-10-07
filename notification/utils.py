@@ -53,6 +53,14 @@ VERB_META = {
     "support_reply":             {"title": "Support Reply",             "icon": "support_agent",   "color": "#00695C"},
     "verification_update":       {"title": "Verification Update",       "icon": "verified_user",   "color": "#2E7D32"},
     "subscription_reminder":     {"title": "Subscription Expiring",     "icon": "subscriptions",   "color": "#E65100"},
+    # Fulfilment & returns
+    "vendor_orders_late":        {"title": "Orders Past Ship-by Date",  "icon": "schedule",        "color": "#C62828"},
+    "vendor_return_requested":   {"title": "Return Requested",          "icon": "assignment_return", "color": "#E65100"},
+    "customer_return_update":    {"title": "Return Update",             "icon": "assignment_return", "color": "#1565C0"},
+    # Reviews
+    "customer_review_published": {"title": "Your Review Is Live",       "icon": "rate_review",     "color": "#2E7D32"},
+    "customer_review_pending":   {"title": "Review Received",           "icon": "rate_review",     "color": "#1565C0"},
+    "customer_review_rejected":  {"title": "Review Not Published",      "icon": "rate_review",     "color": "#C62828"},
 }
 
 

@@ -23,7 +23,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django_filters.rest_framework import DjangoFilterBackend
 
-from django.db.models import Avg, Count, Sum, F
+from django.db.models import Avg, Count, Sum, F, Q
 from django.db.models.functions import TruncWeek, TruncMonth, TruncDate
 from django.utils import timezone
 from datetime import timedelta
@@ -547,11 +547,17 @@ class ProductListCreateView(SubscriptionGateMixin, generics.ListCreateAPIView):
             search   = self.request.query_params.get('search', '').strip()
             status_f = self.request.query_params.get('status', '').strip()
             if search:
-                qs = qs.filter(title__icontains=search)
+                # Title or either SKU (sellers look products up by their own codes).
+                qs = qs.filter(Q(title__icontains=search) | Q(seller_sku__iexact=search) | Q(sku__iexact=search))
             if status_f and status_f != 'all':
                 qs = qs.filter(status=status_f)
+            stock_f = self.request.query_params.get('stock', '').strip()
+            if stock_f == 'out':
+                qs = qs.filter(total_quantity=0)
+            elif stock_f == 'low':
+                qs = qs.filter(total_quantity__gt=0, total_quantity__lte=vendor.low_stock_threshold)
             qs = qs.only(
-                'id', 'title', 'slug', 'sku', 'image', 'status',
+                'id', 'title', 'slug', 'sku', 'seller_sku', 'image', 'status', 'review_note',
                 'total_quantity', 'price', 'old_price', 'views', 'date',
             )
         return qs.order_by('-date')
@@ -1267,7 +1273,8 @@ class VendorProductReviewsAPIView(APIView):
     def get(self, request, *args, **kwargs):
         try:
             vendor  = request.user.current_vendor
-            reviews = ProductReview.objects.filter(vendor=vendor).select_related("product", "user")
+            # Published reviews only; moderation is Negromart staff's job.
+            reviews = ProductReview.objects.filter(vendor=vendor, moderation_status=ProductReview.APPROVED).select_related("product", "user")
             return Response(ProductReviewSerializer(reviews, many=True, context={'request': request}).data)
         except AttributeError:
             return Response({"non_field_errors": "Vendor not found."}, status=status.HTTP_404_NOT_FOUND)
@@ -1303,13 +1310,26 @@ class VendorOrderListAPIView(generics.ListAPIView):
     def get_queryset(self):
         try:
             vendor = get_vendor_or_404(self.request.user)
-            return Order.objects.filter(vendors=vendor).select_related(
+            # ?filter=to_ship | late — the action-center links (order/fulfilment.py).
+            quick = self.request.query_params.get('filter')
+            if quick == 'late':
+                from order.fulfilment import late_orders
+                base = late_orders(vendor)
+            elif quick == 'to_ship':
+                from order.fulfilment import awaiting_dispatch_orders
+                base = awaiting_dispatch_orders(vendor)
+            else:
+                base = Order.objects.filter(vendors=vendor)
+            return base.select_related(
                 'user', 'address'
             ).prefetch_related(
                 'order_products__product',
                 'order_products__selected_delivery_option',
                 'order_products__product__vendor',
+                'shipments',  # ship_by / is_late
             )
+        except Http404:
+            raise
         except Exception as e:
             logger.error(f"Error fetching vendor orders: {e}")
             raise APIException("An error occurred while fetching vendor orders.")
@@ -1444,41 +1464,12 @@ from order.models import Shipment, TrackingEvent
 from order.serializers import ShipmentSerializer, TrackingEventSerializer, OrderTrackingSerializer
 
 
-def _recompute_order_status(order):
-    """
-    Compute and persist the correct Order.status based on the current state of
-    all shipments in the order.
-
-    Rules (applied in priority order):
-    - No shipments at all        → 'processing'
-    - All shipments delivered     → 'delivered'
-    - Some (not all) delivered   → 'partially_delivered'
-    - Any out_for_delivery        → 'shipped'
-    - Any in_transit / label_created → 'shipped'
-    - Order already canceled      → leave untouched
-    """
-    if order.status == 'canceled':
-        return
-
-    shipments = list(order.shipments.all())
-    if not shipments:
-        return  # Nothing to recompute yet
-
-    statuses = [s.status for s in shipments]
-    total_vendors = order.vendors.count()
-
-    if all(s == 'delivered' for s in statuses) and len(statuses) == total_vendors:
-        new_status = 'delivered'
-    elif any(s == 'delivered' for s in statuses):
-        new_status = 'partially_delivered'
-    elif any(s in ('out_for_delivery', 'in_transit', 'label_created') for s in statuses):
-        new_status = 'shipped'
-    else:
-        new_status = 'processing'
-
-    if order.status != new_status:
-        order.status = new_status
-        order.save(update_fields=['status'])
+# Order status, delivery consequences and tracking events are shared with the
+# delivery team (admin) and courier webhooks; see order/fulfilment.py.
+from order.fulfilment import (  # noqa: E402
+    on_shipment_delivered, recompute_order_status as _recompute_order_status, record_tracking_event,
+)
+from order.delivery import DeliveryProviderError, default_provider  # noqa: E402
 
 
 class ShipmentAPIView(APIView):
@@ -1537,18 +1528,38 @@ class ShipmentAPIView(APIView):
         if not vendor_items:
             return Response({"error": "No items for your store in this order."}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Negromart's delivery provider (settings.DEFAULT_DELIVERY_PROVIDER)
+        # books the delivery and supplies tracking; a seller-entered carrier or
+        # tracking number is kept when given.
+        provider = default_provider()
         shipment = Shipment.objects.create(
             order=order,
             vendor=vendor,
-            carrier=request.data.get('carrier', ''),
-            carrier_code=request.data.get('carrier_code', ''),
+            provider=provider.code,
+            fulfilled_by=provider.fulfilled_by,
+            carrier=request.data.get('carrier', '') or provider.name,
+            carrier_code=request.data.get('carrier_code', '') or provider.code,
             tracking_number=request.data.get('tracking_number', ''),
             tracking_url=request.data.get('tracking_url', ''),
-            status=request.data.get('status', 'label_created'),
+            # A new shipment always starts at "label created"; only the party
+            # making the delivery moves it on (see put / TrackingEventAddAPIView).
+            status=(request.data.get('status') or 'label_created') if provider.fulfilled_by == 'seller' else 'label_created',
             estimated_delivery_date=request.data.get('estimated_delivery_date') or None,
             is_international=request.data.get('is_international', False),
         )
         shipment.items.set(vendor_items)
+        try:
+            booking = provider.book(shipment)
+        except DeliveryProviderError as exc:
+            shipment.delete()
+            return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        shipment.tracking_number = shipment.tracking_number or booking.tracking_number
+        shipment.tracking_url = shipment.tracking_url or booking.tracking_url
+        shipment.external_reference = booking.external_reference
+        shipment.label_url = booking.label_url
+        shipment.provider_data = booking.raw
+        shipment.save(update_fields=['tracking_number', 'tracking_url', 'external_reference',
+                                     'label_url', 'provider_data', 'updated_at'])
 
         _recompute_order_status(order)
         self._broadcast_tracking(order)
@@ -1576,6 +1587,18 @@ class ShipmentAPIView(APIView):
         vendor, order = self._get_vendor_order(request, id)
         shipment = get_object_or_404(Shipment, shipment_id=shipment_id, order=order, vendor=vendor)
 
+        # Delivery status releases the seller's earnings, so only whoever makes
+        # the delivery may report it. On Negromart/courier shipments the seller
+        # can still adjust the estimated date.
+        if shipment.fulfilled_by != 'seller':
+            blocked = [f for f in ('carrier', 'carrier_code', 'tracking_number', 'tracking_url', 'status',
+                                   'shipped_at', 'delivered_at') if request.data.get(f) is not None]
+            if blocked:
+                return Response(
+                    {"error": "Negromart Delivery updates this shipment's status and tracking."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
         for field in ('carrier', 'carrier_code', 'tracking_number', 'tracking_url', 'status',
                       'estimated_delivery_date', 'is_international', 'shipped_at', 'delivered_at'):
             val = request.data.get(field)
@@ -1583,6 +1606,9 @@ class ShipmentAPIView(APIView):
                 setattr(shipment, field, val)
         shipment.save()
 
+        if shipment.status == 'delivered':
+            on_shipment_delivered(shipment)
+        _recompute_order_status(order)
         self._broadcast_tracking(order)
         return Response(ShipmentSerializer(shipment).data)
 
@@ -1599,6 +1625,12 @@ class TrackingEventAddAPIView(APIView):
         order    = get_object_or_404(Order, id=id, vendors__in=[vendor])
         shipment = get_object_or_404(Shipment, shipment_id=shipment_id, order=order, vendor=vendor)
 
+        if shipment.fulfilled_by != 'seller':
+            return Response(
+                {"error": "Negromart Delivery adds tracking updates for this shipment."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         for field in ('status', 'description', 'event_date'):
             if not request.data.get(field):
                 return Response({"error": f"'{field}' is required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -1606,8 +1638,8 @@ class TrackingEventAddAPIView(APIView):
         if request.data['status'] not in dict(TrackingEvent.STATUS_CHOICES).keys():
             return Response({"error": "Invalid event status."}, status=status.HTTP_400_BAD_REQUEST)
 
-        event = TrackingEvent.objects.create(
-            shipment=shipment,
+        event = record_tracking_event(
+            shipment,
             status=request.data['status'],
             description=request.data['description'],
             location=request.data.get('location', ''),
@@ -1615,22 +1647,6 @@ class TrackingEventAddAPIView(APIView):
             country=request.data.get('country', ''),
             event_date=request.data['event_date'],
         )
-
-        # Sync shipment status with the latest event
-        status_map = {
-            'in_transit': 'in_transit',
-            'out_for_delivery': 'out_for_delivery',
-            'delivered': 'delivered',
-            'failed_attempt': 'failed',
-            'returned_to_sender': 'returned',
-        }
-        if event.status in status_map:
-            shipment.status = status_map[event.status]
-            shipment.save(update_fields=['status'])
-
-        # Recompute order-level status based on all shipments
-        if event.status in ('delivered', 'returned_to_sender', 'failed_attempt'):
-            _recompute_order_status(order)
 
         # Notify buyer of tracking update
         if order.user:

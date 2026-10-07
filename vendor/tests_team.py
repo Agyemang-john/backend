@@ -59,6 +59,12 @@ class TeamAccessTests(TestCase):
             name='Team Test Shop', user=self.owner, email='shop@example.com',
             contact='+233550001111', is_approved=True, status='VERIFIED',
         )
+        # Team size comes from the subscription plan (payments/entitlements.py).
+        from datetime import timedelta
+        from payments.models import SubscriptionPlan, VendorSubscription
+        plan = SubscriptionPlan.objects.create(name='Team Plan', tier='pro', max_team_members=10)
+        VendorSubscription.objects.create(vendor=self.vendor, plan=plan, status='active',
+                                          end_date=timezone.now() + timedelta(days=30))
 
     # ── helpers ──
 

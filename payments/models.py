@@ -31,11 +31,18 @@ class Payment(models.Model):
 
 
 class Payout(models.Model):
+    # processing: ledger entries are reserved and the transfer is in flight.
+    # success: money sent; failed: entries released back to the balance.
+    STATUS_CHOICES = [
+        ('processing', 'Processing'),
+        ('success', 'Paid'),
+        ('failed', 'Failed'),
+    ]
     vendor = models.ForeignKey(Vendor, on_delete=models.SET_NULL, null=True, blank=True)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     product_total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     delivery_fee = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    status = models.CharField(max_length=20, choices=[('success', 'Success'), ('failed', 'Failed')])
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES)
     transaction_id = models.CharField(max_length=100, null=True, blank=True)
     error_message = models.TextField(null=True, blank=True)
     order = models.ManyToManyField(Order, related_name='payouts')
@@ -84,6 +91,11 @@ class SubscriptionPlan(models.Model):
         default=2,
         help_text="Maximum number of product categories a vendor can list in."
     )
+    max_team_members = models.PositiveIntegerField(
+        default=1,
+        help_text="People who can sign in to the store's Seller Centre, owner included "
+                  "(1 = owner only). Pending invitations count towards the limit."
+    )
 
     # Feature Flags
     can_feature_products = models.BooleanField(
@@ -113,6 +125,10 @@ class SubscriptionPlan(models.Model):
     is_featured_vendor = models.BooleanField(
         default=False,
         help_text="Vendor profile is featured/promoted on the platform."
+    )
+    can_export_reports = models.BooleanField(
+        default=False,
+        help_text="Vendor can download orders and account statements as CSV."
     )
 
     # Commission & Financials
@@ -363,3 +379,5 @@ from .email_models import EmailTemplate, SubscriptionEmailConfig
 
 EmailTemplate
 SubscriptionEmailConfig
+
+from .ledger_models import LedgerEntry  # noqa: E402,F401  (seller money ledger)

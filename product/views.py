@@ -1,3 +1,4 @@
+from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework.response import Response
 from .models import *
@@ -23,39 +24,30 @@ from .utils import (
 )
 from .shipping import can_product_ship_to_user
 
+from .review_serializers import PublicReviewSerializer  # noqa: E402
+from .review_views import visible_reviews  # noqa: E402
+
+
 class AddProductReviewView(APIView):
+    """
+    POST /api/v1/product/add-review/  {product, rating, title?, review, media_ids?}
+
+    Older path kept for existing clients; same rules as
+    POST /api/v1/product/<id>/reviews/ (product/review_services.py).
+    """
     permission_classes = [IsAuthenticated]
 
+    def get_throttles(self):
+        from .review_views import ReviewWriteThrottle
+        return [ReviewWriteThrottle()]
+
     def post(self, request, *args, **kwargs):
+        from .review_views import ProductReviewListView
         product_id = request.data.get('product')
-        product = get_object_or_404(Product, id=product_id)
+        if not str(product_id or '').isdigit():
+            return Response({'detail': 'Choose a product to review.'}, status=status.HTTP_400_BAD_REQUEST)
+        return ProductReviewListView().post(request, int(product_id))
 
-        if not self.user_has_purchased_product(request.user, product.id):
-            return Response(
-                {'detail': 'You must purchase and receive this product before reviewing it.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        if ProductReview.objects.filter(user=request.user, product=product).exists():
-            return Response(
-                {'detail': 'You have already reviewed this product.'},
-                status=status.HTTP_409_CONFLICT
-            )
-
-        serializer = ProductReviewSerializer(data=request.data, context={'request': request})
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-    def user_has_purchased_product(self, user, product_id):
-        return OrderProduct.objects.filter(
-            order__user=user,
-            product_id=product_id,
-            order__is_ordered=True,
-            order__status="delivered",
-        ).exists()
 
 class SitemapDataAPIView(APIView):
     permission_classes = [AllowAny]
@@ -132,7 +124,6 @@ def get_cached_product_data(sku: str, slug: str, request):
         .select_related('vendor', 'sub_category')
         .prefetch_related(
             Prefetch('p_images', queryset=ProductImages.objects.order_by('id')),
-            Prefetch('reviews', queryset=ProductReview.objects.filter(status=True))
         ),
         sku=sku,
         slug=slug
@@ -144,8 +135,11 @@ def get_cached_product_data(sku: str, slug: str, request):
         "p_images": ProductImageSerializer(
             product.p_images.all(), many=True, context={'request': request}
         ).data,
-        "reviews": ProductReviewSerializer(
-            product.reviews.filter(status=True), many=True, context={'request': request}
+        # Only the most helpful few, for first paint and search engines; the page
+        # loads the live, paginated list and summary from product/review_views.py.
+        "reviews": PublicReviewSerializer(
+            visible_reviews(product.id).order_by('-helpful_count', '-date')[:5],
+            many=True, context={'request': request},
         ).data,
         "average_rating": product.avg_rating,
         "review_count": product.review_count,
@@ -443,9 +437,8 @@ class ProductAuthStateAPIView(APIView):
             follower_count  = product.vendor.followers.count()
             can_ship, user_region = can_product_ship_to_user(request, product)
 
-            has_reviewed = ProductReview.objects.filter(
-                user=request.user, product=product
-            ).exists()
+            from .review_services import eligibility
+            review_check = eligibility(request.user, product)
 
             return Response({
                 **cart_data,
@@ -455,7 +448,9 @@ class ProductAuthStateAPIView(APIView):
                 'follower_count':   follower_count,
                 'can_ship':         can_ship,
                 'user_region':      user_region,
-                'has_reviewed':     has_reviewed,
+                'has_reviewed':     review_check.reason == 'already_reviewed',
+                # Whether to offer the review form: delivered purchase, not yet reviewed.
+                'can_review':       review_check.can_review,
             })
 
         else:

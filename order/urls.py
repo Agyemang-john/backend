@@ -1,8 +1,17 @@
 from django.urls import path
 from . import views
 from . import admin_views
+from . import returns_views
 
 urlpatterns = [
+    # ── Returns (customer) ─────────────────────────────────────────────────
+    path('returns/', returns_views.CustomerReturnListCreateView.as_view(), name='customer-returns'),
+    path('returns/reasons/', returns_views.ReturnReasonsView.as_view(), name='return-reasons'),
+    path('returns/<str:reference>/cancel/', returns_views.CustomerReturnCancelView.as_view(), name='customer-return-cancel'),
+
+    # ── Delivery providers (external couriers) ─────────────────────────────
+    path('delivery/webhooks/<str:code>/', returns_views.DeliveryWebhookView.as_view(), name='delivery-webhook'),
+
     # ── Customer tracking ──────────────────────────────────────────────────
     path('tracking/<int:order_id>/', views.OrderTrackingAPIView.as_view(), name='order-tracking'),
 

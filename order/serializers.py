@@ -364,6 +364,7 @@ class ShipmentSerializer(serializers.ModelSerializer):
             'status', 'status_display', 'vendor_name', 'shipped_at', 'delivered_at',
             'estimated_delivery_date', 'progress_percentage', 'is_international',
             'tracking_events', 'latest_event', 'items_summary', 'created_at',
+            'provider', 'fulfilled_by',
         ]
 
     def get_items_summary(self, obj):
