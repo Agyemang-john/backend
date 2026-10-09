@@ -989,4 +989,5 @@ JAZZMIN_SETTINGS = {
     "default_icon_children": "fas fa-circle",
     "related_modal_active": False,  # X_FRAME_OPTIONS = 'DENY' blocks the modal iframes
     "show_ui_builder": False,
+    "custom_css": "admin/jazzmin_fixes.css",
 }

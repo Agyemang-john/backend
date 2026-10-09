@@ -398,12 +398,19 @@ class CollectionAdmin(admin.ModelAdmin):
     list_editable = ['is_active']
     search_fields = ['title', 'slug']
     prepopulated_fields = {'slug': ('title',)}
-    autocomplete_fields = ['products', 'sub_category']
+    autocomplete_fields = ['sub_category']
+    filter_horizontal = ['products']
     fieldsets = (
         (None, {'fields': ('title', 'slug', 'subtitle', 'description', 'is_active')}),
         ('Appearance', {'fields': ('banner_image', 'accent_color', 'icon')}),
         ('Product Source', {'fields': ('filter_type', 'sub_category', 'products')}),
     )
+
+    def formfield_for_manytomany(self, db_field, request, **kwargs):
+        # The dual-list picker renders every product; labels only need the title.
+        if db_field.name == 'products':
+            kwargs['queryset'] = Product.objects.only('id', 'title').order_by('title')
+        return super().formfield_for_manytomany(db_field, request, **kwargs)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
