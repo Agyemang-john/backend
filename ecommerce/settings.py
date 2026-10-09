@@ -189,10 +189,11 @@ if ENV == 'production':
                 "location": "media",  # Media files in media/ directory
             },
         },
-        # Content-hashed names via the collectstatic manifest, so a deploy can
-        # never be served stale CSS/JS from browser or CDN caches (core/storage.py).
         "staticfiles": {
-            "BACKEND": "core.storage.StaticStorage",
+            "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+            "OPTIONS": {
+                "location": "static",  # Static files in static/ directory
+            },
         },
     }
     STATIC_URL = f"https://{AWS_S3_CUSTOM_DOMAIN}/static/"
