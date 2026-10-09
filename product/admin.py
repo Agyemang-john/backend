@@ -334,8 +334,28 @@ admin.site.register(Coupon, CouponAdmin)
 admin.site.register(ClippedCoupon, ClippedCouponAdmin)
 
 
+class FlashSaleAdminForm(forms.ModelForm):
+    class Meta:
+        model = FlashSale
+        fields = '__all__'
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Filled from the product/variant's current price when left blank
+        # (FlashSale.clean), so admins only have to type the sale price.
+        self.fields['original_price'].required = False
+        self.fields['original_price'].help_text = (
+            "Leave blank to use the product's (or variant's) current price."
+        )
+        self.fields['sale_price'].help_text = "Price customers pay during the sale (GHS)."
+        self.fields['variant'].help_text = (
+            "Optional. Leave blank to put every variant of the product on sale."
+        )
+
+
 @admin.register(FlashSale)
 class FlashSaleAdmin(admin.ModelAdmin):
+    form = FlashSaleAdminForm
     list_display  = ['__str__', 'label', 'sale_price', 'discount_percentage', 'start_time', 'end_time', 'is_active', 'sold_count']
     list_filter   = ['label', 'is_active', 'created_by']
     list_editable = ['is_active']

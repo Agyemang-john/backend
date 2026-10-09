@@ -7,6 +7,7 @@ from product.serializers import ProductSerializer, VariantSerializer
 from .serializers import CartItemSerializer
 from core.service import get_exchange_rates
 from decimal import Decimal
+from .pricing import line_pricing
 
 from decimal import InvalidOperation
 import logging
@@ -82,12 +83,12 @@ def get_guest_cart_response(request):
         try:
             product = Product.objects.get(id=product_id, status="published")
             variant = Variants.objects.get(id=variant_id, product=product) if variant_id else None
-            price = variant.price if variant else product.price
-            price = Decimal(str(price))
         except (Product.DoesNotExist, Variants.DoesNotExist):
             continue
 
-        subtotal = price * quantity
+        # Same flash-sale pricing as signed-in carts
+        pricing = line_pricing(product, variant, quantity)
+        subtotal = Decimal(str(pricing['amount']))
         item_packaging = calculate_packaging_fee(product.weight, product.volume) * quantity
 
         items.append({
@@ -95,6 +96,8 @@ def get_guest_cart_response(request):
             "variant": VariantSerializer(variant, context={'request': request}).data if variant else None,
             "quantity": quantity,
             "subtotal": float(subtotal),
+            "effective_unit_price": float(pricing['unit_price']),
+            "is_flash_sale": pricing['flash_sale'] is not None,
             "item_packaging_fee": float(item_packaging),
         })
 
@@ -114,7 +117,7 @@ from .models import CartItem
 from product.models import Product, Variants, ProductDeliveryOption
 
 
-def handle_authenticated_cart(user, product, variant, quantity_change, flash_sale_price=None):
+def handle_authenticated_cart(user, product, variant, quantity_change):
     cart, _ = Cart.objects.get_or_create(user=user)
 
     cart_item, created = CartItem.objects.get_or_create(
@@ -137,10 +140,6 @@ def handle_authenticated_cart(user, product, variant, quantity_change, flash_sal
         }
 
     cart_item.quantity = new_quantity
-
-    # Lock in the flash sale price on first add only
-    if created and flash_sale_price is not None:
-        cart_item.flash_sale_price = flash_sale_price
 
     # Set delivery option only on first add
     if created or not cart_item.delivery_option:

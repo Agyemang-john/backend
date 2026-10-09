@@ -929,6 +929,59 @@ class FlashSale(models.Model):
         product_title = self.product.title if self.product else "Deleted Product"
         return f"{self.get_label_display()} — {product_title}"
 
+    @classmethod
+    def live_for(cls, product, variant=None):
+        """
+        The sale currently pricing this product/variant, or None.
+        A variant-specific sale wins over a product-wide one; a sale whose
+        max_quantity is used up no longer counts.
+        """
+        if product is None:
+            return None
+        now = timezone.now()
+        qs = cls.objects.filter(
+            product=product, is_active=True, start_time__lte=now, end_time__gte=now,
+        ).filter(
+            models.Q(max_quantity__isnull=True) | models.Q(max_quantity__gt=models.F('sold_count'))
+        )
+        if variant is not None:
+            sale = qs.filter(variant=variant).order_by('end_time').first()
+            if sale:
+                return sale
+        return qs.filter(variant__isnull=True).order_by('end_time').first()
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        errors = {}
+
+        if self.variant_id and self.product_id and self.variant.product_id != self.product_id:
+            errors['variant'] = "This variant belongs to a different product."
+
+        # Default the "was" price to the current listed price.
+        if self.original_price is None and self.product_id:
+            self.original_price = self.variant.price if self.variant_id else self.product.price
+
+        if self.sale_price is not None and self.sale_price <= 0:
+            errors['sale_price'] = "Sale price must be greater than zero."
+        elif (self.sale_price is not None and self.original_price is not None
+              and self.sale_price >= self.original_price):
+            errors['sale_price'] = (
+                f"Sale price must be lower than the original price ({self.original_price})."
+            )
+
+        if self.start_time and self.end_time and self.end_time <= self.start_time:
+            errors['end_time'] = "End time must be after the start time."
+
+        if (self.max_quantity is not None and self.sold_count
+                and self.max_quantity < self.sold_count):
+            errors['max_quantity'] = f"{self.sold_count} already sold; the cap can't be lower."
+
+        if errors:
+            raise ValidationError(errors)
+
+        if not self.created_by_id and self.product_id:
+            self.created_by_id = self.product.vendor_id
+
     @property
     def discount_percentage(self):
         if not self.original_price or self.original_price == 0:

@@ -46,7 +46,7 @@ def colored_status(status):
 def _has_price(item):
     """CartItem.price falls back to variant/product price; both are NULL once
     the product is deleted, and the property then raises AttributeError."""
-    return item.flash_sale_price is not None or item.variant_id or item.product_id
+    return bool(item.variant_id or item.product_id)
 
 
 class CartPriceColumns:

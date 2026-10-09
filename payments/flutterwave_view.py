@@ -7,7 +7,11 @@ from rest_framework.views import APIView
 
 from userauths.models import User
 from address.models import Address
+from django.db import transaction
+
 from order.models import Order, OrderProduct, Cart
+from order.pricing import price_and_reserve
+from order.stock import deduct_stock
 from .models import Payment
 
 
@@ -93,29 +97,25 @@ class FlutterwaveCallbackAPIView(APIView):
         order.save()
 
         # Create OrderProduct items and update stock
-        for cart_item in cart.cart_items.all():
-            price = cart_item.variant.price if cart_item.variant else cart_item.product.price
+        with transaction.atomic():
+            for cart_item in cart.cart_items.all():
+                # Flash price from the live sale; its units count towards max_quantity
+                price, amount = price_and_reserve(cart_item.product, cart_item.variant, cart_item.quantity)
 
-            OrderProduct.objects.create(
-                order=order,
-                product=cart_item.product,
-                variant=cart_item.variant,
-                quantity=cart_item.quantity,
-                price=price,
-                amount=price * cart_item.quantity,
-                selected_delivery_option=cart_item.delivery_option
-            )
+                OrderProduct.objects.create(
+                    order=order,
+                    product=cart_item.product,
+                    variant=cart_item.variant,
+                    quantity=cart_item.quantity,
+                    price=price,
+                    amount=amount,
+                    selected_delivery_option=cart_item.delivery_option
+                )
 
-            # Update product or variant stock
-            if cart_item.variant:
-                cart_item.variant.quantity -= cart_item.quantity
-                cart_item.variant.save()
-            else:
-                cart_item.product.total_quantity -= cart_item.quantity
-                cart_item.product.save()
+                deduct_stock(cart_item.product, cart_item.variant, cart_item.quantity)
 
-            # Remove the cart item
-            cart_item.delete()
+                # Remove the cart item
+                cart_item.delete()
 
         return Response({"message": "Payment verified and order created successfully"}, status=200)
 

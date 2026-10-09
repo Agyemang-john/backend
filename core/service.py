@@ -27,7 +27,10 @@ def get_exchange_rates():
     if not rates:
         try:
             response = requests.get(
-                f'https://v6.exchangerate-api.com/v6/{settings.EXCHANGE_RATE_API_KEY}/latest/GHS'
+                f'https://v6.exchangerate-api.com/v6/{settings.EXCHANGE_RATE_API_KEY}/latest/GHS',
+                # Without a timeout a slow upstream stalls every request that
+                # prices a product until the socket gives up.
+                timeout=5,
             )
             response.raise_for_status()
             rates = response.json()['conversion_rates']

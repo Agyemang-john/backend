@@ -13,6 +13,7 @@ import uuid
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
+from django.utils.functional import cached_property
 from django.utils.html import mark_safe
 from django.contrib.auth import get_user_model
 from decimal import Decimal
@@ -172,8 +173,9 @@ class CartItem(models.Model):
     delivery_option = models.ForeignKey(
         DeliveryOption, on_delete=models.SET_NULL, null=True, blank=True
     )
-    # Locked-in flash sale price — set when item is first added during an active sale.
-    # Overrides the product/variant base price for the lifetime of this cart item.
+    # Legacy: the flash price used to be locked in here on first add, which kept
+    # it after the sale ended. Pricing now comes from the live sale
+    # (order/pricing.py); this column is no longer read or written.
     flash_sale_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
 
     def __str__(self):
@@ -184,15 +186,23 @@ class CartItem(models.Model):
     class Meta:
         ordering = ('-created_at',)
 
+    @cached_property
+    def pricing(self):
+        """Live flash-sale aware pricing for this line (see order/pricing.py)."""
+        from order.pricing import line_pricing
+        return line_pricing(self.product, self.variant, self.quantity)
+
+    @property
+    def flash_sale(self):
+        return self.pricing['flash_sale']
+
     @property
     def price(self):
-        if self.flash_sale_price is not None:
-            return self.flash_sale_price
-        return self.variant.price if self.variant else self.product.price
-    
+        return self.pricing['unit_price']
+
     @property
     def amount(self):
-        return Decimal(self.quantity) * self.price
+        return self.pricing['amount']
 
     def packaging_fee(self):
         return calculate_packaging_fee(self.product.weight, self.product.volume) * self.quantity

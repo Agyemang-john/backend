@@ -73,6 +73,7 @@ def plan_summary(vendor):
         'name': plan.name if plan else 'Free',
         'tier': plan.tier if plan else 'free',
         'can_export_reports': bool(plan and plan.can_export_reports),
+        'can_offer_discounts': bool(plan and plan.can_offer_discounts),
         'max_team_members': team_member_limit(vendor),
         'commission_rate': str(commission_rate(vendor)),
         'payout_delay_days': payout_delay_days(vendor),

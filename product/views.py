@@ -269,30 +269,10 @@ class ProductDetailAPIView(APIView):
                 is_wishlisted = wishlist_item is not None
                 wishlist_item_id = wishlist_item.id if wishlist_item else None
 
-            # Fresh flash sale lookup — never cached, changes every minute
-            # Variant-specific sale takes priority over product-level; product-level only
-            # shows when no variant is selected or no variant-specific sale exists.
-            from django.utils import timezone as tz
-            from django.db.models import Case, When, IntegerField as _IntField
-            now = tz.now()
-            base_qs = FlashSale.objects.filter(
-                product=product, is_active=True,
-                start_time__lte=now, end_time__gte=now,
-            )
-            if variant:
-                active_flash = (
-                    base_qs
-                    .filter(Q(variant=variant) | Q(variant__isnull=True))
-                    .annotate(specificity=Case(
-                        When(variant__isnull=False, then=0),
-                        default=1,
-                        output_field=_IntField(),
-                    ))
-                    .order_by('specificity')
-                    .first()
-                )
-            else:
-                active_flash = base_qs.filter(variant__isnull=True).first()
+            # Fresh flash sale lookup — never cached, changes every minute.
+            # Same rule as cart pricing: variant-specific beats product-wide,
+            # sold-out sales don't count.
+            active_flash = FlashSale.live_for(product, variant)
             flash_data = FlashSaleSerializer(active_flash, context={'request': request}).data if active_flash else None
 
             response_data = {
@@ -613,12 +593,14 @@ class CategoryProductListView(APIView):
         # 'featured' and any unknown value → trending score (most engaging first)
         filtered_qs = filtered_qs.order_by(_sort_map.get(sort, '-trending_score'))
 
-        # ── Filtered price range ───────────────────────────────────────────────
-        price_range = filtered_qs.aggregate(min_price=Min('price'), max_price=Max('price'))
+        # ── Filtered price range + total in one query ─────────────────────────
+        price_range = filtered_qs.aggregate(
+            total=Count('id'), min_price=Min('price'), max_price=Max('price'),
+        )
 
         # ── Pagination ─────────────────────────────────────────────────────────
         PAGE_SIZE = 12
-        total_items = filtered_qs.count()
+        total_items = price_range['total']
         total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
         page = min(page, total_pages)
         paged_products = list(filtered_qs[(page - 1) * PAGE_SIZE: page * PAGE_SIZE])
@@ -773,12 +755,14 @@ class BrandProductListView(APIView):
         # 'featured' and any unknown value → trending score
         filtered_qs = filtered_qs.order_by(_sort_map.get(sort, '-trending_score'))
 
-        # ── Filtered price range ───────────────────────────────────────────────
-        filtered_bounds = filtered_qs.aggregate(min_price=Min("price"), max_price=Max("price"))
+        # ── Filtered price range + total in one query ─────────────────────────
+        filtered_bounds = filtered_qs.aggregate(
+            total=Count('id'), min_price=Min('price'), max_price=Max('price'),
+        )
 
         # ── Pagination ─────────────────────────────────────────────────────────
         PAGE_SIZE = 12
-        total_items = filtered_qs.count()
+        total_items = filtered_bounds['total']
         total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
         page = min(page, total_pages)
         paged_products = list(filtered_qs[(page - 1) * PAGE_SIZE: page * PAGE_SIZE])
@@ -840,6 +824,7 @@ class BrandProductListView(APIView):
 
 # from elasticsearch8 import Elasticsearch
 
+import hashlib
 import logging
 
 # Configure logging
@@ -898,11 +883,27 @@ class ProductSearchAPIView(APIView):
             )
         )
 
-        # ── Unfiltered price range for slider bounds ────────────────────────────
-        unfiltered_pr = base_qs.aggregate(
-            min_price_unfiltered=Min('price'),
-            max_price_unfiltered=Max('price'),
-        )
+        # ── Unfiltered price range + filter options (cached 10 min per query) ──
+        # Both depend only on q, but each re-runs the full-text match; without
+        # this, every page/filter/sort change repeated six search queries.
+        facets_key = f"search_facets:{hashlib.md5(query.lower().encode()).hexdigest()}"
+        facets = cache.get(facets_key)
+        if facets is None:
+            base_ids = base_qs.values('id')
+            facets = {
+                "price_range": base_qs.aggregate(
+                    min_price_unfiltered=Min('price'),
+                    max_price_unfiltered=Max('price'),
+                ),
+                "colors":     list(Color.objects.filter(variants__product_id__in=base_ids).distinct().values('id', 'name', 'code')),
+                "sizes":      list(Size.objects.filter(variants__product_id__in=base_ids).distinct().values('id', 'name')),
+                "vendors":    list(Vendor.objects.filter(product__id__in=base_ids).distinct().values('id', 'name', 'slug')),
+                "brands":     list(Brand.objects.filter(product__id__in=base_ids).distinct().values('id', 'title', 'slug')),
+                "categories": list(Sub_Category.objects.filter(product__id__in=base_ids).distinct().values('id', 'title', 'slug')),
+            }
+            cache.set(facets_key, facets, 600)
+
+        unfiltered_pr = facets["price_range"]
         min_price_unfiltered = unfiltered_pr['min_price_unfiltered'] or Decimal('0')
         max_price_unfiltered = unfiltered_pr['max_price_unfiltered'] or Decimal('0')
 
@@ -943,12 +944,14 @@ class ProductSearchAPIView(APIView):
             # 'relevance' (default): search rank first, trending score as tiebreaker
             filtered_qs = filtered_qs.order_by('-rank', '-trending_score')
 
-        # ── Filtered price range ───────────────────────────────────────────────
-        price_range = filtered_qs.aggregate(min_price=Min('price'), max_price=Max('price'))
+        # ── Filtered price range + total in one query ─────────────────────────
+        price_range = filtered_qs.aggregate(
+            total=Count('id'), min_price=Min('price'), max_price=Max('price'),
+        )
 
         # ── Pagination ─────────────────────────────────────────────────────────
         PAGE_SIZE = 12
-        total_items = filtered_qs.count()
+        total_items = price_range['total']
         total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
         page = min(page, total_pages)
         paged_products = list(filtered_qs[(page - 1) * PAGE_SIZE: page * PAGE_SIZE])
@@ -972,14 +975,6 @@ class ProductSearchAPIView(APIView):
                 'colors': list(color_map.values()),
             })
 
-        # ── Sidebar filter options from unfiltered base ────────────────────────
-        base_ids = base_qs.values('id')
-        colors_qs   = Color.objects.filter(variants__product_id__in=base_ids).distinct().values('id', 'name', 'code')
-        sizes_qs    = Size.objects.filter(variants__product_id__in=base_ids).distinct().values('id', 'name')
-        brands_qs   = Brand.objects.filter(product__id__in=base_ids).distinct().values('id', 'title', 'slug')
-        vendors_qs  = Vendor.objects.filter(product__id__in=base_ids).distinct().values('id', 'name', 'slug')
-        cats_qs     = Sub_Category.objects.filter(product__id__in=base_ids).distinct().values('id', 'title', 'slug')
-
         def build_url(page_num):
             if page_num < 1 or page_num > total_pages or total_items == 0:
                 return None
@@ -988,11 +983,11 @@ class ProductSearchAPIView(APIView):
             return f"/api/v1/product/search/?{params.urlencode()}"
 
         return Response({
-            "colors":     list(colors_qs),
-            "sizes":      list(sizes_qs),
-            "vendors":    list(vendors_qs),
-            "brands":     list(brands_qs),
-            "categories": list(cats_qs),
+            "colors":     facets["colors"],
+            "sizes":      facets["sizes"],
+            "vendors":    facets["vendors"],
+            "brands":     facets["brands"],
+            "categories": facets["categories"],
             "products_with_details": products_with_details,
             "min_price": round((price_range['min_price'] or min_price_unfiltered) * exchange_rate, 2),
             "max_price": round((price_range['max_price'] or max_price_unfiltered) * exchange_rate, 2),
@@ -1278,19 +1273,39 @@ class FlashSaleListAPIView(APIView):
 
     def get(self, request):
         from django.utils import timezone as tz
+        from django.utils.dateparse import parse_datetime
         cache_key = "flash_sales_live"
         data = cache.get(cache_key)
 
+        # Cached in base currency (GHS) and converted per request — caching the
+        # converted payload served the first visitor's currency to everyone.
         if data is None:
             now = tz.now()
             sales = (
                 FlashSale.objects
                 .filter(is_active=True, start_time__lte=now, end_time__gte=now)
-                .select_related('product', 'variant', 'created_by')
+                .select_related('product__brand', 'product__vendor', 'variant', 'created_by')
                 .order_by('end_time')
             )
-            serializer = FlashSaleSerializer(sales, many=True, context={'request': request})
+            serializer = FlashSaleSerializer(
+                sales, many=True, context={'request': request, 'base_currency': True}
+            )
             data = serializer.data
             cache.set(cache_key, data, timeout=30)
 
-        return Response(data, status=status.HTTP_200_OK)
+        currency = request.headers.get('X-Currency', 'GHS')
+        rate = Decimal(str(get_exchange_rates().get(currency, 1)))
+        now = tz.now()
+        result = []
+        for item in data:
+            item = dict(item)
+            item['sale_price'] = round(Decimal(str(item['sale_price'])) * rate, 2)
+            item['original_price'] = round(Decimal(str(item['original_price'])) * rate, 2)
+            item['currency'] = currency
+            # The cache can be up to 30 s old; keep the countdown exact.
+            end = parse_datetime(str(item['end_time'])) if item.get('end_time') else None
+            if end:
+                item['seconds_remaining'] = max(0, int((end - now).total_seconds()))
+            result.append(item)
+
+        return Response(result, status=status.HTTP_200_OK)

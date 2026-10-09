@@ -249,10 +249,16 @@ class ProductListSerializer(serializers.ModelSerializer):
         ]
 
     def _currency_and_rate(self):
+        # Memoised in the (shared) context: a 12-product page would otherwise
+        # hit the cache for exchange rates 36 times.
+        cached = self.context.get('_currency_and_rate')
+        if cached:
+            return cached
         request = self.context.get('request')
         currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
         rates = get_exchange_rates()
         rate = Decimal(str(rates.get(currency, 1)))
+        self.context['_currency_and_rate'] = (currency, rate)
         return currency, rate
 
     def get_currency(self, obj):
@@ -457,6 +463,8 @@ class FlashSaleSerializer(serializers.ModelSerializer):
     stock_remaining = serializers.IntegerField(read_only=True, allow_null=True)
     stock_percentage = serializers.FloatField(read_only=True)
     seconds_remaining = serializers.IntegerField(read_only=True)
+    brand           = serializers.SerializerMethodField()
+    vendor          = serializers.SerializerMethodField()
 
     class Meta:
         model = FlashSale
@@ -481,9 +489,14 @@ class FlashSaleSerializer(serializers.ModelSerializer):
             'stock_remaining',
             'stock_percentage',
             'is_live',
+            'brand',
+            'vendor',
         ]
 
     def _currency_and_rate(self):
+        # FlashSaleListAPIView caches in GHS and converts per request.
+        if self.context.get('base_currency'):
+            return 'GHS', Decimal('1')
         request = self.context.get('request')
         currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
         rates = get_exchange_rates()
@@ -524,15 +537,33 @@ class FlashSaleSerializer(serializers.ModelSerializer):
     def get_variant_title(self, obj):
         return obj.variant.title if obj.variant else None
 
+    def get_brand(self, obj):
+        brand = obj.product.brand if obj.product else None
+        return {'id': brand.id, 'title': brand.title} if brand else None
+
+    def get_vendor(self, obj):
+        vendor = obj.product.vendor if obj.product else None
+        return {'id': vendor.id, 'name': vendor.name} if vendor else None
+
 
 class OccasionProductSerializer(serializers.ModelSerializer):
     image = serializers.SerializerMethodField()
     price = serializers.SerializerMethodField()
     currency = serializers.SerializerMethodField()
 
+    old_price = serializers.SerializerMethodField()
+
     class Meta:
         model = Product
-        fields = ['id', 'title', 'slug', 'sku', 'image', 'price', 'currency']
+        fields = ['id', 'title', 'slug', 'sku', 'image', 'price', 'old_price', 'currency']
+
+    def get_old_price(self, obj):
+        if not obj.old_price:
+            return None
+        request = self.context.get('request')
+        currency = request.headers.get('X-Currency', 'GHS') if request else 'GHS'
+        rate = Decimal(str(get_exchange_rates().get(currency, 1)))
+        return round(obj.old_price * rate, 2)
 
     def get_image(self, obj):
         request = self.context.get('request')

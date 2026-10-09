@@ -41,6 +41,8 @@ class PlaceOrderCODAPIView(APIView):
         from django.db import transaction
         from django.utils.crypto import get_random_string
         from order.models import CartItem, OrderProduct
+        from order.pricing import price_and_reserve
+        from order.stock import deduct_stock
         from product.models import Product, Variants
         from notification.utils import send_notification
 
@@ -89,7 +91,8 @@ class PlaceOrderCODAPIView(APIView):
                     if product.vendor:
                         unique_vendors.add(product.vendor)
 
-                    price = variant.price if variant else product.price
+                    # Flash price from the live sale; its units count towards max_quantity
+                    price, amount = price_and_reserve(product, variant, item.quantity)
 
                     order_products.append(
                         OrderProduct(
@@ -98,19 +101,12 @@ class PlaceOrderCODAPIView(APIView):
                             variant=variant,
                             quantity=item.quantity,
                             price=price,
-                            amount=price * item.quantity,
+                            amount=amount,
                             selected_delivery_option_id=item.delivery_option.id if item.delivery_option else None,
                         )
                     )
 
-                    if variant:
-                        variant.quantity -= item.quantity
-                        variant.full_clean()
-                        variant.save()
-                    else:
-                        product.total_quantity -= item.quantity
-                        product.full_clean()
-                        product.save()
+                    deduct_stock(product, variant, item.quantity)
 
                 OrderProduct.objects.bulk_create(order_products)
                 order.vendors.set(unique_vendors)
@@ -252,14 +248,30 @@ class VerifyPaymentAPIView(APIView):
             payment.amount = payment_data["amount"] / 100
             payment.save()
 
-        # Serialize cart items for Celery (avoid passing queryset)
+        # The order is created by a Celery task. If this payment was already
+        # verified, a task is already on its way; dispatching again would create a
+        # duplicate order and count flash-sale units twice.
+        if not created:
+            return Response({
+                "status": "success",
+                "message": "Payment verified. Your order is being processed...",
+                "reference": reference,
+            }, status=status.HTTP_200_OK)
+
+        # Serialize cart items for Celery (avoid passing queryset). Prices are
+        # fixed here, at payment time, so the order matches what was charged
+        # even if a flash sale ends before the task runs.
         cart_items_data = []
         for item in cart.cart_items.select_related('product', 'variant').all():
+            pricing = item.pricing
             cart_items_data.append({
                 "product_id": item.product.id,
                 "variant_id": item.variant.id if item.variant else None,
                 "quantity": item.quantity,
                 "delivery_option_id": item.delivery_option.id if item.delivery_option else None,
+                "amount": str(pricing['amount']),
+                "flash_sale_id": pricing['flash_sale'].id if pricing['flash_sale'] else None,
+                "flash_units": pricing['flash_units'],
             })
 
         # Offload heavy work to Celery

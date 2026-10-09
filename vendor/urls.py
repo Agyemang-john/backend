@@ -47,6 +47,9 @@ from vendor.bulk_upload_views import (
     BulkUploadMetaAPIView,
     BulkUploadJobStatusAPIView,
 )
+from vendor.flash_sale_views import (
+    SellerFlashSaleDetailView, SellerFlashSaleListView, SellerFlashSaleProductsView,
+)
 from vendor.operations_views import (
     ActionCenterView,
     PlanSummaryView,
@@ -101,6 +104,11 @@ urlpatterns = [
     path('reviews/manage/', SellerReviewListView.as_view(), name='vendor-reviews-manage'),
     path('reviews/<int:pk>/reply/', ReviewReplyView.as_view(), name='vendor-review-reply'),
     path('reviews/<int:pk>/report/', ReviewReportView.as_view(), name='vendor-review-report'),
+
+    # Flash sales on the store's own products (vendor/flash_sale_views.py)
+    path('flash-sales/', SellerFlashSaleListView.as_view(), name='vendor-flash-sales'),
+    path('flash-sales/products/', SellerFlashSaleProductsView.as_view(), name='vendor-flash-sale-products'),
+    path('flash-sales/<int:pk>/', SellerFlashSaleDetailView.as_view(), name='vendor-flash-sale-detail'),
     path('product-related-data/', ProductRelatedDataAPIView.as_view(), name='product-related-data'),
 
     # Product Routes

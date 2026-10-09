@@ -175,6 +175,7 @@ class CartItemSerializer(serializers.ModelSerializer):
     delivery_option = DeliveryOptionSerializer()
     effective_unit_price = serializers.SerializerMethodField()
     is_flash_sale = serializers.SerializerMethodField()
+    flash_sale_price = serializers.SerializerMethodField()
 
     class Meta:
         model = CartItem
@@ -197,7 +198,11 @@ class CartItemSerializer(serializers.ModelSerializer):
         return round(obj.price * self._rate(), 2)
 
     def get_is_flash_sale(self, obj):
-        return obj.flash_sale_price is not None
+        return obj.flash_sale is not None
+
+    def get_flash_sale_price(self, obj):
+        sale = obj.flash_sale
+        return round(sale.sale_price * self._rate(), 2) if sale else None
 
     def get_packaging_fee(self, obj):
         return obj.packaging_fee()

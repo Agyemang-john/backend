@@ -31,6 +31,7 @@ def _invalidate_deals():
 def flash_sale_changed(sender, instance, **kwargs):
     """A flash sale starting or ending changes the deals page immediately."""
     _invalidate_deals()
+    cache.delete('flash_sales_live')  # product.views.FlashSaleListAPIView
 
 
 @receiver(post_save, sender='recommendation.ProductDealScore')

@@ -26,107 +26,119 @@ def create_order_from_payment_task(
     ip,
     reference
 ):
+    from django.db import transaction
+    from order.pricing import order_unit_price, reserve_flash_units
+    from order.stock import deduct_stock
+
     try:
-        user = User.objects.get(id=user_id)
-        address = Address.objects.get(id=address_id)
-        payment_amount = payment_data["amount"] / 100
+        # Atomic so a retry after a failure part-way doesn't leave a half-built
+        # order or count flash-sale units twice.
+        with transaction.atomic():
+            user = User.objects.get(id=user_id)
+            address = Address.objects.get(id=address_id)
+            payment_amount = payment_data["amount"] / 100
 
-        # Create Order
-        order = Order.objects.create(
-            user=user,
-            total=payment_amount,
-            payment_method='paystack',
-            payment_id=payment_id,
-            status="pending",
-            address=address,
-            ip=ip,
-            is_ordered=True,
-        )
+            # Create Order
+            order = Order.objects.create(
+                user=user,
+                total=payment_amount,
+                payment_method='paystack',
+                payment_id=payment_id,
+                status="pending",
+                address=address,
+                ip=ip,
+                is_ordered=True,
+            )
 
-        # Assign vendors
-        unique_vendors = set()
-        order_products = []
+            # Assign vendors
+            unique_vendors = set()
+            order_products = []
 
-        for item_data in cart_items_data:
-            product = Product.objects.get(id=item_data["product_id"])
-            variant = Variants.objects.get(id=item_data["variant_id"]) if item_data["variant_id"] else None
+            for item_data in cart_items_data:
+                product = Product.objects.get(id=item_data["product_id"])
+                variant = Variants.objects.get(id=item_data["variant_id"]) if item_data["variant_id"] else None
 
-            if product.vendor:
-                unique_vendors.add(product.vendor)
+                if product.vendor:
+                    unique_vendors.add(product.vendor)
 
-            price = variant.price if variant else product.price
+                quantity = item_data["quantity"]
+                if item_data.get("amount") is not None:
+                    # Priced at payment time (VerifyPaymentAPIView) — what the customer paid
+                    amount = Decimal(item_data["amount"])
+                    reserved = reserve_flash_units(item_data.get("flash_sale_id"), item_data.get("flash_units") or 0)
+                    if reserved < (item_data.get("flash_units") or 0):
+                        logger.warning(
+                            f"Flash sale {item_data.get('flash_sale_id')} sold out during payment {reference}; "
+                            f"honoured {item_data.get('flash_units')} paid units, {reserved} were left."
+                        )
+                else:
+                    # Tasks queued before this change carry no prices
+                    amount = (variant.price if variant else product.price) * quantity
 
-            order_products.append(OrderProduct(
-                order=order,
-                product=product,
-                variant=variant,
-                quantity=item_data["quantity"],
-                price=price,
-                amount=price * item_data["quantity"],
-                selected_delivery_option_id=item_data["delivery_option_id"],
-            ))
+                order_products.append(OrderProduct(
+                    order=order,
+                    product=product,
+                    variant=variant,
+                    quantity=quantity,
+                    price=order_unit_price(amount, quantity),
+                    amount=amount,
+                    selected_delivery_option_id=item_data["delivery_option_id"],
+                ))
 
-            # Update stock deduction
-            if variant:
-                variant.quantity -= item_data["quantity"]
-                variant.full_clean()
-                variant.save()
-            else:
-                product.total_quantity -= item_data["quantity"]
-                product.full_clean()
-                product.save()
+                # Update stock deduction
+                deduct_stock(product, variant, quantity)
 
-        # Bulk create order products
-        OrderProduct.objects.bulk_create(order_products)
-        order.vendors.set(unique_vendors)
+            # Bulk create order products
+            OrderProduct.objects.bulk_create(order_products)
+            order.vendors.set(unique_vendors)
 
-        # Generate unique order number
-        while True:
-            order_number = f"INVOICE_NO-{get_random_string(8).upper()}"
-            if not Order.objects.filter(order_number=order_number).exists():
-                break
+            # Generate unique order number
+            while True:
+                order_number = f"INVOICE_NO-{get_random_string(8).upper()}"
+                if not Order.objects.filter(order_number=order_number).exists():
+                    break
 
-        order.order_number = order_number
-        order.save()
+            order.order_number = order_number
+            order.save()
 
-        # Send notifications to vendors
-        from notification.utils import send_notification
-        for vendor in unique_vendors:
-            if hasattr(vendor, 'user') and vendor.user:
-                send_notification(
-                    recipient=vendor.user,
-                    verb="vendor_new_order",
-                    actor=user,
-                    target=order,
-                    data={
-                        "order_number": order.order_number,
-                        "total_amount": f"GHS {order.total:,.2f}",
-                        "items_count": len(order_products),
-                        "buyer_name": user.first_name or user.email,
-                        "message": f"New order #{order.order_number} — GHS {order.total:,.2f}",
-                        "url": f"https://seller.negromart.com/orders/{order.id}/detail/",
-                    }
-                )
-            else:
-                logger.warning(f"Vendor {vendor.name} has no linked user. Notification skipped.")
+            # Send notifications to vendors
+            from notification.utils import send_notification
+            for vendor in unique_vendors:
+                if hasattr(vendor, 'user') and vendor.user:
+                    send_notification(
+                        recipient=vendor.user,
+                        verb="vendor_new_order",
+                        actor=user,
+                        target=order,
+                        data={
+                            "order_number": order.order_number,
+                            "total_amount": f"GHS {order.total:,.2f}",
+                            "items_count": len(order_products),
+                            "buyer_name": user.first_name or user.email,
+                            "message": f"New order #{order.order_number} — GHS {order.total:,.2f}",
+                            "url": f"https://seller.negromart.com/orders/{order.id}/detail/",
+                        }
+                    )
+                else:
+                    logger.warning(f"Vendor {vendor.name} has no linked user. Notification skipped.")
 
-        # Notify buyer: order confirmed
-        send_notification(
-            recipient=user,
-            verb="customer_order_placed",
-            target=order,
-            data={
-                "order_number": order.order_number,
-                "total_amount": f"GHS {order.total:,.2f}",
-                "message": f"Your order #{order.order_number} has been placed successfully!",
-                "url": f"https://www.negromart.com/dashboard/order-history/{order.id}/",
-            }
-        )
+            # Notify buyer: order confirmed
+            send_notification(
+                recipient=user,
+                verb="customer_order_placed",
+                target=order,
+                data={
+                    "order_number": order.order_number,
+                    "total_amount": f"GHS {order.total:,.2f}",
+                    "message": f"Your order #{order.order_number} has been placed successfully!",
+                    "url": f"https://www.negromart.com/dashboard/order-history/{order.id}/",
+                }
+            )
 
-        # Clear user's cart (safe now)
-        CartItem.objects.filter(cart__user=user).delete()
+            # Clear user's cart (safe now)
+            CartItem.objects.filter(cart__user=user).delete()
 
-        logger.info(f"Order {order.order_number} created successfully for user {user.id}")
+            logger.info(f"Order {order.order_number} created successfully for user {user.id}")
 
     except Exception as exc:
         logger.error(f"Failed to create order for payment {reference}: {exc}", exc_info=True)

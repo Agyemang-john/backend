@@ -27,12 +27,10 @@ class AddToCartView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        from product.models import FlashSale
-        from django.utils import timezone as tz
-
+        # flash_sale_id is still sent by the storefront but no longer needed:
+        # cart lines are priced from the live sale (order/pricing.py).
         product_id = request.data.get("product_id")
         variant_id = request.data.get("variant_id")
-        flash_sale_id = request.data.get("flash_sale_id")
         quantity_change = int(request.data.get("quantity", 1))
 
         if not product_id:
@@ -49,23 +47,9 @@ class AddToCartView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Resolve flash sale price if a valid flash_sale_id is provided
-        flash_sale_price = None
-        if flash_sale_id:
-            now = tz.now()
-            flash_sale = FlashSale.objects.filter(
-                id=flash_sale_id,
-                product=product,
-                is_active=True,
-                start_time__lte=now,
-                end_time__gte=now,
-            ).first()
-            if flash_sale:
-                flash_sale_price = flash_sale.sale_price
-
         # Handle cart
         if request.user.is_authenticated:
-            result = handle_authenticated_cart(request.user, product, variant, quantity_change, flash_sale_price=flash_sale_price)
+            result = handle_authenticated_cart(request.user, product, variant, quantity_change)
             cart_item_id = result.get("cart_item_id")
         else:
             result = handle_guest_cart(request.session, item_key, quantity_change)
