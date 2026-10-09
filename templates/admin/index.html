@@ -22,9 +22,9 @@
   .nm-delta { font-size: .8rem; font-weight: 600; }
   .nm-delta.up { color: #2e7d32; } .nm-delta.down { color: #c62828; }
   .nm-queue a { display: flex; align-items: center; justify-content: space-between; padding: .55rem .25rem;
-                border-bottom: 1px solid var(--bs-border-color-translucent); color: inherit; }
+                border-bottom: 1px solid rgba(0,0,0,.06); color: inherit; }
   .nm-queue a:last-child { border-bottom: 0; }
-  .nm-queue a:hover { background: var(--bs-tertiary-bg); text-decoration: none; }
+  .nm-queue a:hover { background: rgba(0,0,0,.03); text-decoration: none; }
   .nm-queue i { width: 1.4rem; text-align: center; opacity: .7; margin-right: .5rem; }
   .nm-queue .clear { opacity: .45; }
   .nm-chart { position: relative; height: 280px; }
@@ -48,7 +48,7 @@
   <div class="row">
     <div class="col-xl-3 col-md-6 col-12">
       <div class="info-box nm-kpi">
-        <span class="info-box-icon text-bg-success"><i class="fas fa-coins"></i></span>
+        <span class="info-box-icon bg-success"><i class="fas fa-coins"></i></span>
         <div class="info-box-content">
           <span class="info-box-text">{% trans 'Revenue today' %}</span>
           <span class="info-box-number">GHS {{ dash.kpis.revenue_today|floatformat:"2g" }}</span>
@@ -58,7 +58,7 @@
     </div>
     <div class="col-xl-3 col-md-6 col-12">
       <div class="info-box nm-kpi">
-        <span class="info-box-icon text-bg-primary"><i class="fas fa-chart-line"></i></span>
+        <span class="info-box-icon bg-primary"><i class="fas fa-chart-line"></i></span>
         <div class="info-box-content">
           <span class="info-box-text">{% trans 'Revenue, last 30 days' %}</span>
           <span class="info-box-number">GHS {{ dash.kpis.revenue_30|floatformat:"2g" }}</span>
@@ -72,7 +72,7 @@
     </div>
     <div class="col-xl-3 col-md-6 col-12">
       <div class="info-box nm-kpi">
-        <span class="info-box-icon text-bg-info"><i class="fas fa-shopping-bag"></i></span>
+        <span class="info-box-icon bg-info"><i class="fas fa-shopping-bag"></i></span>
         <div class="info-box-content">
           <span class="info-box-text">{% trans 'Orders, last 30 days' %}</span>
           <span class="info-box-number">{{ dash.kpis.orders_30 }}</span>
@@ -86,7 +86,7 @@
     </div>
     <div class="col-xl-3 col-md-6 col-12">
       <div class="info-box nm-kpi">
-        <span class="info-box-icon text-bg-warning"><i class="fas fa-receipt"></i></span>
+        <span class="info-box-icon bg-warning"><i class="fas fa-receipt"></i></span>
         <div class="info-box-content">
           <span class="info-box-text">{% trans 'Average order, 30 days' %}</span>
           <span class="info-box-number">GHS {{ dash.kpis.avg_order_30|floatformat:"2g" }}</span>
@@ -116,8 +116,8 @@
             {% for p in dash.top_products %}
               <tr>
                 <td>{% if p.url %}<a href="{{ p.url }}">{{ p.title|truncatechars:40 }}</a>{% else %}{{ p.title }}{% endif %}</td>
-                <td class="text-end text-nowrap">{{ p.units }} {% trans 'sold' %}</td>
-                <td class="text-end text-nowrap"><strong>GHS {{ p.revenue|floatformat:"2g" }}</strong></td>
+                <td class="text-right text-nowrap">{{ p.units }} {% trans 'sold' %}</td>
+                <td class="text-right text-nowrap"><strong>GHS {{ p.revenue|floatformat:"2g" }}</strong></td>
               </tr>
             {% empty %}
               <tr><td class="text-muted p-3">{% trans 'No sales in the last 30 days.' %}</td></tr>
@@ -136,8 +136,8 @@
             {% for v in dash.top_vendors %}
               <tr>
                 <td>{% if v.url %}<a href="{{ v.url }}">{{ v.name|truncatechars:32 }}</a>{% else %}{{ v.name }}{% endif %}</td>
-                <td class="text-end text-nowrap">{{ v.orders }} {% trans 'orders' %}</td>
-                <td class="text-end text-nowrap"><strong>GHS {{ v.revenue|floatformat:"2g" }}</strong></td>
+                <td class="text-right text-nowrap">{{ v.orders }} {% trans 'orders' %}</td>
+                <td class="text-right text-nowrap"><strong>GHS {{ v.revenue|floatformat:"2g" }}</strong></td>
               </tr>
             {% empty %}
               <tr><td class="text-muted p-3">{% trans 'No sales in the last 30 days.' %}</td></tr>
@@ -152,20 +152,20 @@
   <div class="card mb-3">
     <div class="card-header d-flex justify-content-between align-items-center">
       <h5 class="m-0">{% trans 'Latest orders' %}</h5>
-      <a href="{{ dash.links.orders }}" class="btn btn-sm btn-outline-secondary ms-auto">{% trans 'All orders' %}</a>
+      <a href="{{ dash.links.orders }}" class="btn btn-xs btn-outline-secondary ml-auto">{% trans 'All orders' %}</a>
     </div>
     <div class="card-body p-0">
       <div class="table-responsive">
       <table class="table table-sm table-hover nm-table mb-0">
-        <thead><tr><th>{% trans 'Order' %}</th><th>{% trans 'Customer' %}</th><th>{% trans 'Status' %}</th><th class="text-end">{% trans 'Total' %}</th><th class="text-end">{% trans 'Placed' %}</th></tr></thead>
+        <thead><tr><th>{% trans 'Order' %}</th><th>{% trans 'Customer' %}</th><th>{% trans 'Status' %}</th><th class="text-right">{% trans 'Total' %}</th><th class="text-right">{% trans 'Placed' %}</th></tr></thead>
         <tbody>
         {% for o in dash.recent_orders %}
           <tr>
             <td><a href="{{ o.url }}" style="font-family:monospace">{{ o.number|default:o.label }}</a></td>
             <td>{{ o.customer|truncatechars:32 }}</td>
-            <td><span class="badge text-bg-{{ o.badge }}">{{ o.status_label }}</span></td>
-            <td class="text-end text-nowrap">GHS {{ o.total|floatformat:"2g" }}</td>
-            <td class="text-end text-nowrap nm-meta">{{ o.created|timesince }} {% trans 'ago' %}</td>
+            <td><span class="badge badge-{{ o.badge }}">{{ o.status_label }}</span></td>
+            <td class="text-right text-nowrap">GHS {{ o.total|floatformat:"2g" }}</td>
+            <td class="text-right text-nowrap nm-meta">{{ o.created|timesince }} {% trans 'ago' %}</td>
           </tr>
         {% empty %}
           <tr><td colspan="5" class="text-muted p-3">{% trans 'No orders yet.' %}</td></tr>
@@ -182,12 +182,12 @@
   {% if dash.attention %}
   <div class="card mb-3 {% if dash.attention_total %}card-outline card-danger{% endif %}">
     <div class="card-header"><h5 class="m-0">{% trans 'Needs attention' %}
-      {% if dash.attention_total %}<span class="badge text-bg-danger ms-1">{{ dash.attention_total }}</span>{% endif %}</h5></div>
+      {% if dash.attention_total %}<span class="badge badge-danger ml-1">{{ dash.attention_total }}</span>{% endif %}</h5></div>
     <div class="card-body py-1 nm-queue">
       {% for item in dash.attention %}
         <a href="{{ item.url }}" class="{% if not item.count %}clear{% endif %}">
           <span><i class="fas {{ item.icon }}"></i>{{ item.label }}</span>
-          <span class="badge {% if item.count %}text-bg-danger{% else %}text-bg-light{% endif %}">{{ item.count }}</span>
+          <span class="badge {% if item.count %}badge-danger{% else %}badge-light{% endif %}">{{ item.count }}</span>
         </a>
       {% endfor %}
     </div>
@@ -199,7 +199,7 @@
     <div class="card-header"><h5 class="m-0">{% trans 'Orders by status' %}</h5></div>
     <div class="card-body py-1 nm-queue">
       {% for s in dash.order_status %}
-        <a href="{{ s.url }}"><span>{{ s.label }}</span><span class="badge text-bg-{{ s.badge }}">{{ s.count }}</span></a>
+        <a href="{{ s.url }}"><span>{{ s.label }}</span><span class="badge badge-{{ s.badge }}">{{ s.count }}</span></a>
       {% endfor %}
     </div>
   </div>
@@ -251,8 +251,8 @@
   var canvas = document.getElementById('nm-sales-chart');
   if (!el || !canvas || !window.Chart) return;
   var d = JSON.parse(el.textContent);
-  // Jazzmin 3.0.3+ (Bootstrap 5) sets the colour mode on <html data-bs-theme>.
-  var dark = document.documentElement.getAttribute('data-bs-theme') === 'dark';
+  var dark = document.body.classList.contains('theme-dark') ||
+             (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches && document.body.classList.contains('dark-mode'));
   var grid = dark ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)';
   var text = dark ? '#cfd4da' : '#495057';
   new Chart(canvas, {
