@@ -1,15 +1,7 @@
 from django.contrib import admin
+from django.utils.html import format_html, format_html_join
 from vendor.models import *
 from .tasks import send_vendor_approval_email, send_vendor_sms
-
-
-class VendorActivityLogInline(admin.TabularInline):
-    model = VendorActivityLog
-    extra = 0
-    readonly_fields = ('event_type', 'ip_address', 'user_agent', 'metadata', 'created_at')
-    can_delete = False
-    max_num = 20
-    ordering = ('-created_at',)
 
 
 class VendorMemberInline(admin.TabularInline):
@@ -44,7 +36,11 @@ class VendorAdmin(admin.ModelAdmin):
         'inactivity_auto_closed',
     )
     search_fields = ('name', 'email', 'contact')
-    inlines = [VendorMemberInline, VendorActivityLogInline]
+    # Activity is a read-only summary field, not an inline: the inline rendered
+    # every log row the store ever produced (heartbeats included) as a form.
+    inlines = [VendorMemberInline]
+    autocomplete_fields = ('user',)
+    raw_id_fields = ('followers',)  # a <select> listing every customer otherwise
 
     fieldsets = (
         ('Basic Information', {
@@ -66,6 +62,7 @@ class VendorAdmin(admin.ModelAdmin):
             'fields': (
                 'last_login_at', 'last_seen_at', 'last_logout_at',
                 'total_login_count', 'inactivity_auto_closed', 'inactivity_closed_at',
+                'recent_activity',
             ),
             'classes': ('collapse',),
         }),
@@ -74,7 +71,21 @@ class VendorAdmin(admin.ModelAdmin):
     readonly_fields = (
         'last_login_at', 'last_seen_at', 'last_logout_at',
         'total_login_count', 'inactivity_closed_at', 'shop_paused_at',
+        'recent_activity',
     )
+
+    @admin.display(description='Recent activity (last 20, heartbeats excluded)')
+    def recent_activity(self, obj):
+        if not obj.pk:
+            return '-'
+        logs = (VendorActivityLog.objects.filter(vendor=obj).exclude(event_type='heartbeat')
+                .order_by('-created_at')[:20])
+        rows = format_html_join('', '<tr><td>{}</td><td>{}</td><td>{}</td></tr>', (
+            (f"{log.created_at:%Y-%m-%d %H:%M}", log.get_event_type_display(), log.ip_address or '-')
+            for log in logs))
+        if not rows:
+            return 'No activity recorded.'
+        return format_html('<table><tr><th>When</th><th>Event</th><th>IP</th></tr>{}</table>', rows)
 
     actions = ['approve_vendors', 'reject_vendors', 'suspend_vendors', 'reopen_inactive_shops']
 
@@ -158,12 +169,22 @@ class VendorAdmin(admin.ModelAdmin):
                 fields.remove('student_id')
         return fields
 
-class VendorProfileAdmin(admin.ModelAdmin):
-    list_display = '_all_'
+class AboutAdmin(admin.ModelAdmin):
+    list_display = ('__str__', 'vendor')
+    list_select_related = ('vendor__user',)
+    search_fields = ('vendor__name',)
+    autocomplete_fields = ('vendor',)
+
+
+class VendorPaymentMethodAdmin(admin.ModelAdmin):
+    list_select_related = ('vendor',)
+    search_fields = ('vendor__name',)
+    autocomplete_fields = ('vendor',)
 
 class OpeningHourAdmin(admin.ModelAdmin):
     list_display = ('vendor', 'day', 'from_hour', 'to_hour', 'is_closed')
     list_filter = ('is_closed', 'day')
+    autocomplete_fields = ('vendor',)
 
 
 @admin.register(VendorActivityLog)
@@ -173,6 +194,7 @@ class VendorActivityLogAdmin(admin.ModelAdmin):
     search_fields = ('vendor__name', 'ip_address')
     readonly_fields = ('vendor', 'event_type', 'ip_address', 'user_agent', 'metadata', 'created_at')
     ordering      = ('-created_at',)
+    show_full_result_count = False  # heartbeats make this a big table
 
     def has_add_permission(self, request):
         return False
@@ -182,6 +204,6 @@ class VendorActivityLogAdmin(admin.ModelAdmin):
 
 
 admin.site.register(Vendor, VendorAdmin)
-admin.site.register(About)
-admin.site.register(VendorPaymentMethod)
+admin.site.register(About, AboutAdmin)
+admin.site.register(VendorPaymentMethod, VendorPaymentMethodAdmin)
 admin.site.register(OpeningHour, OpeningHourAdmin)

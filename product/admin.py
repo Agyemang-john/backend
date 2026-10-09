@@ -1,5 +1,6 @@
 from django import forms
 from django.contrib.admin.helpers import ActionForm
+from django.db.models import Count, Q
 from django.utils.safestring import mark_safe
 from django.contrib import admin
 
@@ -17,6 +18,8 @@ class ProductViewLogAdmin(admin.ModelAdmin):
     list_filter   = ['is_bot', 'is_returning', 'device_type', 'date']
     search_fields = ['product__title', 'visitor_key']
     readonly_fields = ['viewed_at']
+    raw_id_fields = ['product', 'user']
+    show_full_result_count = False  # big log table: skip the second COUNT(*)
 
 
 @admin.register(ProductDailyStats)
@@ -24,6 +27,8 @@ class ProductDailyStatsAdmin(admin.ModelAdmin):
     list_display  = ['product', 'date', 'total_views', 'unique_views', 'returning_views', 'bot_views']
     list_filter   = ['date']
     search_fields = ['product__title']
+    raw_id_fields = ['product']
+    show_full_result_count = False
 
 
 @admin.register(RecentlyViewedProduct)
@@ -32,9 +37,12 @@ class RecentlyViewedProductAdmin(admin.ModelAdmin):
     list_filter   = ['viewed_at']
     search_fields = ['user__email', 'product__title']
     readonly_fields = ['viewed_at']
+    raw_id_fields = ['user', 'product']
+    show_full_result_count = False
 
 class ProductVariantsAdmin(admin.TabularInline):
     model = Variants
+    extra = 0
     show_change_link = True
 
 class VariantImageAdmin(admin.TabularInline):
@@ -46,17 +54,45 @@ class ProductImagesAdmin(admin.TabularInline):
     readonly_fields = ('id',)
     
 class ProductDeliveryOptionAdmin(admin.TabularInline):
+    """Delivery options on the product page. The variant choices are this
+    product's own variants, not every variant in the store (each label costs
+    three queries, so the full list made this page run thousands)."""
     model = ProductDeliveryOption
-    list_display = ['delivery_option']
+    fk_name = 'product'
+    extra = 0
 
-    
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == 'variant':
+            parent = getattr(request, '_admin_parent_product', None)
+            variants = Variants.objects.filter(product=parent) if parent else Variants.objects.none()
+            kwargs['queryset'] = variants.select_related('product', 'size', 'color')
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    def get_formset(self, request, obj=None, **kwargs):
+        request._admin_parent_product = obj
+        return super().get_formset(request, obj, **kwargs)
+
+
+class VariantDeliveryOptionInline(admin.TabularInline):
+    """Delivery options on the variant page (the variant is the parent)."""
+    model = ProductDeliveryOption
+    fk_name = 'variant'
+    extra = 0
+    autocomplete_fields = ['product']
+
+
 class ProductAdmin(admin.ModelAdmin):
     prepopulated_fields = {'slug': ('title',)}
     list_editable = ['status']
-    list_filter = ['status', 'vendor', 'sub_category']
+    # No 'vendor' filter: it lists every store in the sidebar. Search by store name instead.
+    list_filter = ['status', 'sub_category__category__main_category']
+    search_fields = ['title', 'sku', 'seller_sku', 'vendor__name']
     inlines = [ProductImagesAdmin, ProductVariantsAdmin, ProductDeliveryOptionAdmin]
     list_display = ['title', 'product_image', "price",'sub_category', 'vendor', 'status']
+    list_select_related = ['sub_category__category__main_category', 'vendor']
+    autocomplete_fields = ['vendor', 'brand', 'sub_category']
     readonly_fields = ['search_vector']
+    list_per_page = 50
 
     # actions = ['index_selected_products', 'setup_periodic_indexing']
 
@@ -92,22 +128,56 @@ class ProductVariantImageAdmin(admin.ModelAdmin):
 
 class Main_CategoryAdmin(admin.ModelAdmin):
     list_display = ['title',]
+    search_fields = ['title']
     prepopulated_fields = {'slug': ('title',)}
 
 class CategoryAdmin(admin.ModelAdmin):
-    list_display = ['title', 'category_image',]
+    list_display = ['title', 'main_category', 'category_image',]
+    list_select_related = ['main_category']
+    search_fields = ['title', 'main_category__title']
     prepopulated_fields = {'slug': ('title',)}
-    
+
+    def get_queryset(self, request):
+        # __str__ is "main category -- title"
+        return super().get_queryset(request).select_related('main_category')
+
+
 class Sub_CategoryAdmin(admin.ModelAdmin):
-    list_display = ['title', 'subcategory_image','product_count']
+    list_display = ['title', 'subcategory_image', 'product_count']
+    search_fields = ['title', 'category__title', 'category__main_category__title']
+    autocomplete_fields = ['category']
     prepopulated_fields = {'slug': ('title',)}
+
+    def get_queryset(self, request):
+        # __str__ follows category -> main_category; joined here so dropdowns and
+        # autocomplete don't run two queries per row.
+        return (super().get_queryset(request)
+                .select_related('category__main_category')
+                .annotate(_published=Count('product', filter=Q(product__status='published'))))
+
+    @admin.display(description='Published products', ordering='_published')
+    def product_count(self, obj):
+        return obj._published
+
 
 class BrandAdmin(admin.ModelAdmin):
     prepopulated_fields = {'slug': ('title',)}
     list_display = ['title', 'image', 'brand_count']
+    search_fields = ['title']
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).annotate(
+            _published=Count('product', filter=Q(product__status='published')))
+
+    @admin.display(description='Published products', ordering='_published')
+    def brand_count(self, obj):
+        return obj._published
+
 
 class WishlistAdmin(admin.ModelAdmin):
     list_display = ['user', 'product', "saved_at"]
+    search_fields = ['user__email', 'product__title']
+    autocomplete_fields = ['user', 'product']
 
 class ReviewMediaInline(admin.TabularInline):
     """Photos/videos on a review. Tick 'is hidden' to take one down."""
@@ -211,8 +281,36 @@ class SizeAdmin(admin.ModelAdmin):
     list_display = ['name', 'code']
 
 class VariantsAdmin(admin.ModelAdmin):
-    inlines = [VariantImageAdmin, ProductDeliveryOptionAdmin]
+    inlines = [VariantImageAdmin, VariantDeliveryOptionInline]
     list_display = ['title', 'product_image', 'size','color', 'price', 'quantity']
+    search_fields = ['title', 'product__title', 'product__sku', 'seller_sku']
+    list_filter = ['product__status']
+    autocomplete_fields = ['product']
+
+    def get_queryset(self, request):
+        # __str__ is "product - size - color"
+        return super().get_queryset(request).select_related('product', 'size', 'color')
+
+
+class ProductDeliveryOptionModelAdmin(admin.ModelAdmin):
+    list_display = ['product', 'variant', 'delivery_option', 'default']
+    list_filter = ['delivery_option', 'default']
+    search_fields = ['product__title', 'product__sku']
+    autocomplete_fields = ['product', 'variant']
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related(
+            'product', 'variant__product', 'variant__size', 'variant__color', 'delivery_option')
+
+
+class CouponAdmin(admin.ModelAdmin):
+    search_fields = ['code']
+    autocomplete_fields = ['applicable_products', 'applicable_categories']
+
+
+class ClippedCouponAdmin(admin.ModelAdmin):
+    list_display = ['user', 'coupon']
+    autocomplete_fields = ['user', 'coupon']
 
 class VariantImageAdmin(admin.ModelAdmin):
     list_display = ['image']
@@ -227,13 +325,13 @@ admin.site.register(Wishlist, WishlistAdmin)
 admin.site.register(Color, ColorAdmin)
 admin.site.register(Size, SizeAdmin)
 admin.site.register(DeliveryOption)
-admin.site.register(ProductDeliveryOption)
-admin.site.register(Brand)
+admin.site.register(ProductDeliveryOption, ProductDeliveryOptionModelAdmin)
+admin.site.register(Brand, BrandAdmin)
 admin.site.register(Type)
 admin.site.register(Variants, VariantsAdmin)
 admin.site.register(VariantImage, VariantImageAdmin)
-admin.site.register(Coupon)
-admin.site.register(ClippedCoupon)
+admin.site.register(Coupon, CouponAdmin)
+admin.site.register(ClippedCoupon, ClippedCouponAdmin)
 
 
 @admin.register(FlashSale)
@@ -242,6 +340,8 @@ class FlashSaleAdmin(admin.ModelAdmin):
     list_filter   = ['label', 'is_active', 'created_by']
     list_editable = ['is_active']
     search_fields = ['product__title']
+    autocomplete_fields = ['product']
+    list_select_related = ['product']
     date_hierarchy = 'start_time'
     readonly_fields = ['sold_count', 'discount_percentage', 'is_live', 'stock_remaining', 'seconds_remaining']
 
@@ -278,7 +378,7 @@ class CollectionAdmin(admin.ModelAdmin):
     list_editable = ['is_active']
     search_fields = ['title', 'slug']
     prepopulated_fields = {'slug': ('title',)}
-    filter_horizontal = ['products']
+    autocomplete_fields = ['products', 'sub_category']
     fieldsets = (
         (None, {'fields': ('title', 'slug', 'subtitle', 'description', 'is_active')}),
         ('Appearance', {'fields': ('banner_image', 'accent_color', 'icon')}),
@@ -297,6 +397,7 @@ class ReviewReportAdmin(admin.ModelAdmin):
     list_display = ('created_at', 'vendor', 'reason', 'status', 'review_rating', 'review_excerpt')
     list_filter = ('status', 'reason')
     search_fields = ('vendor__name', 'review__review')
+    list_select_related = ('review', 'vendor')
     readonly_fields = ('review', 'vendor', 'reported_by', 'reason', 'details', 'created_at', 'resolved_at')
     actions = ['uphold', 'dismiss']
 

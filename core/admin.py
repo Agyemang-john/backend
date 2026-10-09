@@ -14,6 +14,8 @@ class SearchHistoryAdmin(admin.ModelAdmin):
     list_filter   = ['searched_at']
     search_fields = ['user__email', 'query']
     readonly_fields = ['searched_at']
+    raw_id_fields = ['user']
+    show_full_result_count = False
 
 
 @admin.register(PromoCard)

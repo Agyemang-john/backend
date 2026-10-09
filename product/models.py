@@ -75,9 +75,14 @@ class Category(models.Model):
         verbose_name_plural = "categories"
 
     def category_image(self):
+        if not self.image:
+            return "No Image"
         return mark_safe('<img src="%s" width="50" height="50" />' % (self.image.url))
 
     def __str__(self):
+        # main_category is nullable
+        if self.main_category is None:
+            return self.title
         return self.main_category.title + " -- " + self.title
     
     def save(self, *args, **kwargs):
@@ -107,10 +112,15 @@ class Sub_Category(models.Model):
         return Product.published.filter(sub_category=self.id).count()
 
     def subcategory_image(self):
+        if not self.image:
+            return "No Image"
         return mark_safe('<img src="%s" width="50" height="50" />' % (self.image.url))
 
     def __str__(self):
-        return self.category.main_category.title + " -- " + self.category.title + " -- " + self.title
+        # category (and its main_category) are nullable
+        if self.category is None:
+            return self.title
+        return str(self.category) + " -- " + self.title
 
 class PublishedManager(models.Manager):
     def get_queryset(self):

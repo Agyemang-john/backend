@@ -43,11 +43,35 @@ def colored_status(status):
 # Cart
 # ─────────────────────────────────────────────────────────────────────────────
 
-class CartItemInline(admin.TabularInline):
+def _has_price(item):
+    """CartItem.price falls back to variant/product price; both are NULL once
+    the product is deleted, and the property then raises AttributeError."""
+    return item.flash_sale_price is not None or item.variant_id or item.product_id
+
+
+class CartPriceColumns:
+    """Price/amount columns that show '—' instead of crashing on items whose
+    product was deleted."""
+
+    @admin.display(description='Price')
+    def item_price(self, obj):
+        return obj.price if _has_price(obj) else '—'
+
+    @admin.display(description='Amount')
+    def item_amount(self, obj):
+        return obj.amount if _has_price(obj) else '—'
+
+
+class CartItemInline(CartPriceColumns, admin.TabularInline):
     model = CartItem
     extra = 0
-    readonly_fields = ('product', 'variant', 'quantity', 'price', 'amount', 'created_at')
+    fields = ('product', 'variant', 'quantity', 'item_price', 'item_amount', 'created_at')
+    readonly_fields = fields
     can_delete = False
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related(
+            'product', 'variant__product', 'variant__size', 'variant__color')
 
 
 @admin.register(Cart)
@@ -55,14 +79,36 @@ class CartAdmin(admin.ModelAdmin):
     list_display = ('user', 'updated_at', 'total_price', 'total_items')
     list_filter = ('updated_at',)
     search_fields = ('user__email',)
+    list_select_related = ('user',)
+    raw_id_fields = ('user',)
     inlines = (CartItemInline,)
+
+    def get_queryset(self, request):
+        # CartItem.amount is a Python property (flash-sale/variant/product
+        # price), so the totals are summed over prefetched items, not in SQL.
+        return super().get_queryset(request).prefetch_related(
+            Prefetch('cart_items', queryset=CartItem.objects.select_related('product', 'variant')))
+
+    @admin.display(description='Total price')
+    def total_price(self, obj):
+        return sum(item.amount for item in obj.cart_items.all() if _has_price(item))
+
+    @admin.display(description='Items')
+    def total_items(self, obj):
+        return len(obj.cart_items.all())
 
 
 @admin.register(CartItem)
-class CartItemAdmin(admin.ModelAdmin):
-    list_display = ('cart', 'product', 'variant', 'quantity', 'price', 'amount', 'created_at')
+class CartItemAdmin(CartPriceColumns, admin.ModelAdmin):
+    list_display = ('cart', 'product', 'variant', 'quantity', 'item_price', 'item_amount', 'created_at')
     list_filter = ('created_at',)
     search_fields = ('cart__user__email', 'product__title')
+    autocomplete_fields = ('product', 'variant')
+    raw_id_fields = ('cart',)
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related(
+            'cart__user', 'product', 'variant__product', 'variant__size', 'variant__color')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -84,6 +130,7 @@ class TrackingEventInline(admin.TabularInline):
 class ShipmentInline(admin.StackedInline):
     model = Shipment
     extra = 0
+    autocomplete_fields = ('vendor',)
     fields = (
         'shipment_id', 'vendor', 'carrier', 'tracking_number', 'tracking_url',
         'status', 'estimated_delivery_date', 'shipped_at', 'delivered_at', 'is_international',
@@ -113,6 +160,13 @@ class ShipmentAdmin(admin.ModelAdmin):
     inlines       = (TrackingEventInline,)
     date_hierarchy = 'created_at'
     list_per_page  = 30
+    autocomplete_fields = ('order', 'vendor', 'items')
+
+    def get_queryset(self, request):
+        return (super().get_queryset(request)
+                .select_related('order', 'vendor')
+                .prefetch_related('tracking_events')
+                .annotate(_event_count=Count('tracking_events')))
 
     fieldsets = (
         ('Shipment Identity', {
@@ -177,7 +231,7 @@ class ShipmentAdmin(admin.ModelAdmin):
     progress_bar.short_description = 'Progress'
 
     def event_count(self, obj):
-        count = obj.tracking_events.count()
+        count = obj._event_count
         return format_html('<span style="font-weight:700">{}</span>', count) if count else '—'
     event_count.short_description = '# Events'
 
@@ -270,6 +324,9 @@ class TrackingEventAdmin(admin.ModelAdmin):
     date_hierarchy = 'event_date'
     list_per_page  = 50
     readonly_fields = ('created_at',)
+    list_select_related = ('shipment__order', 'shipment__vendor')
+    autocomplete_fields = ('shipment',)
+    show_full_result_count = False
 
     fields = ('shipment', 'status', 'description', 'location', 'city', 'country', 'event_date', 'created_at')
 
@@ -341,6 +398,10 @@ class OrderProductInline(admin.TabularInline):
     show_change_link = True
     can_delete = False
 
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related(
+            'product', 'variant__product', 'variant__size', 'variant__color')
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Order admin
@@ -361,6 +422,13 @@ class OrderAdmin(admin.ModelAdmin):
     readonly_fields = ('order_number', 'payment_id', 'date_created', 'date_updated', 'tracking_overview')
 
     inlines = (OrderProductInline, ShipmentInline)
+    autocomplete_fields = ('user', 'vendors', 'address')
+
+    def get_queryset(self, request):
+        return (super().get_queryset(request)
+                .select_related('user')
+                .prefetch_related('shipments')
+                .annotate(_item_count=Count('order_products', distinct=True)))
 
     fieldsets = (
         ('Order Identity', {
@@ -413,8 +481,9 @@ class OrderAdmin(admin.ModelAdmin):
     total_display.admin_order_field = 'total'
 
     def item_count(self, obj):
-        return obj.order_products.count()
+        return obj._item_count
     item_count.short_description = '# Items'
+    item_count.admin_order_field = '_item_count'
 
     def shipment_summary(self, obj):
         shipments = obj.shipments.all()
@@ -526,6 +595,8 @@ class OrderProductAdmin(admin.ModelAdmin):
     search_fields = ('order__order_number', 'product__title')
     ordering      = ('-date_created',)
     readonly_fields = ('date_created', 'date_updated', 'amount', 'tracking_number')
+    list_select_related = ('order', 'product')
+    autocomplete_fields = ('order', 'product', 'variant')
 
     def order_link(self, obj):
         url = reverse('admin:order_order_change', args=[obj.order_id])
@@ -568,6 +639,7 @@ class ReturnRequestAdmin(admin.ModelAdmin):
     list_display = ('reference', 'order', 'vendor', 'reason', 'quantity', 'refund_amount', 'status', 'created_at')
     list_filter = ('status', 'reason')
     search_fields = ('reference', 'order__order_number', 'vendor__name', 'customer__email')
+    list_select_related = ('order__user', 'vendor')
     readonly_fields = ('reference', 'order', 'order_product', 'vendor', 'customer', 'refund_amount',
                        'created_at', 'decided_at', 'decided_by', 'received_at', 'refunded_at')
     actions = ['mark_refunded']

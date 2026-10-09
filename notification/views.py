@@ -139,7 +139,7 @@ from django.contrib import messages
 from django.core.mail import send_mail
 from django.conf import settings
 from django.utils import timezone
-from .models import ContactInquiry, TicketReply
+from .models import ContactInquiry, SupportTicket, TicketReply
 def send_reply_view(request, inquiry_id):
     if not request.user.is_staff:
         messages.error(request, "Access denied.")
@@ -151,44 +151,26 @@ def send_reply_view(request, inquiry_id):
         reply_msg = request.POST.get('reply_message', '').strip()
         internal_note = request.POST.get('internal_note', '').strip()
 
+        # The reverse accessor of SupportTicket.inquiry is `supportticket`
+        # (no related_name); inquiries created before tickets existed have none.
+        ticket, _ = SupportTicket.objects.get_or_create(inquiry=inquiry)
+
         if reply_msg:
-            # Save public reply
+            # Saving a public reply queues the customer email through the
+            # TicketReply post_save signal (notification.tasks.send_ticket_reply_email),
+            # which also marks the inquiry resolved once the email is sent.
+            # Mailing here as well sent the customer two copies.
             TicketReply.objects.create(
-                ticket=inquiry.support_ticket,
+                ticket=ticket,
                 replied_by=request.user,
                 message=reply_msg,
                 is_internal=False
             )
-
-            # Send email
-            send_mail(
-                subject=f"Re: {inquiry.subject} | Ticket {inquiry.support_ticket.ticket_id}",
-                message=f"""
-                {reply_msg}
-
-                ---
-                Ticket ID: {inquiry.support_ticket.ticket_id}
-                We usually reply within 2 hours.
-                Thank you for shopping with us!
-
-                Best regards,
-                Customer Support
-                """.strip(),
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[inquiry.email],
-                fail_silently=False,
-            )
-
-            # Update status
-            inquiry.status = 'in_progress'
-            inquiry.replied_at = timezone.now()
-            inquiry.save()
-
-            messages.success(request, f"Reply sent to {inquiry.email}!")
+            messages.success(request, f"Reply queued for {inquiry.email}.")
 
         if internal_note:
             TicketReply.objects.create(
-                ticket=inquiry.support_ticket,
+                ticket=ticket,
                 replied_by=request.user,
                 message=internal_note,
                 is_internal=True

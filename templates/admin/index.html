@@ -1,0 +1,282 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static jazzmin admin_dashboard %}
+{% comment %}
+  Admin home: an operations dashboard instead of Jazzmin's default list of
+  every model (the sidebar already has that). Numbers come from
+  core/admin_dashboard.py, cached for 5 minutes; ?refresh=1 recomputes.
+{% endcomment %}
+
+{% block bodyclass %}{{ block.super }} dashboard{% endblock %}
+{% block content_title %}{% trans 'Dashboard' %}{% endblock %}
+{% block breadcrumbs %}
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="{% url 'admin:index' %}">{% trans 'Home' %}</a></li>
+        <li class="breadcrumb-item">{% trans 'Dashboard' %}</li>
+    </ol>
+{% endblock %}
+
+{% block extrastyle %}
+{{ block.super }}
+<style>
+  .nm-kpi .info-box-number { font-size: 1.35rem; }
+  .nm-delta { font-size: .8rem; font-weight: 600; }
+  .nm-delta.up { color: #2e7d32; } .nm-delta.down { color: #c62828; }
+  .nm-queue a { display: flex; align-items: center; justify-content: space-between; padding: .55rem .25rem;
+                border-bottom: 1px solid var(--bs-border-color-translucent); color: inherit; }
+  .nm-queue a:last-child { border-bottom: 0; }
+  .nm-queue a:hover { background: var(--bs-tertiary-bg); text-decoration: none; }
+  .nm-queue i { width: 1.4rem; text-align: center; opacity: .7; margin-right: .5rem; }
+  .nm-queue .clear { opacity: .45; }
+  .nm-chart { position: relative; height: 280px; }
+  .nm-meta { font-size: .8rem; opacity: .7; }
+  .nm-table td, .nm-table th { vertical-align: middle; }
+</style>
+{% endblock %}
+
+{% block content %}
+{% admin_dashboard as dash %}
+
+<div class="col-12">
+  <p class="nm-meta mb-3">
+    {% blocktrans with ago=dash.generated_at|timesince %}Figures as of {{ ago }} ago{% endblocktrans %} ·
+    <a href="?refresh=1">{% trans 'Refresh now' %}</a>
+  </p>
+</div>
+
+{% if dash.kpis %}
+<div class="col-12">
+  <div class="row">
+    <div class="col-xl-3 col-md-6 col-12">
+      <div class="info-box nm-kpi">
+        <span class="info-box-icon text-bg-success"><i class="fas fa-coins"></i></span>
+        <div class="info-box-content">
+          <span class="info-box-text">{% trans 'Revenue today' %}</span>
+          <span class="info-box-number">GHS {{ dash.kpis.revenue_today|floatformat:"2g" }}</span>
+          <span class="nm-meta">{{ dash.kpis.orders_today }} {% trans 'orders' %}</span>
+        </div>
+      </div>
+    </div>
+    <div class="col-xl-3 col-md-6 col-12">
+      <div class="info-box nm-kpi">
+        <span class="info-box-icon text-bg-primary"><i class="fas fa-chart-line"></i></span>
+        <div class="info-box-content">
+          <span class="info-box-text">{% trans 'Revenue, last 30 days' %}</span>
+          <span class="info-box-number">GHS {{ dash.kpis.revenue_30|floatformat:"2g" }}</span>
+          {% if dash.kpis.revenue_change is not None %}
+            <span class="nm-delta {% if dash.kpis.revenue_change >= 0 %}up{% else %}down{% endif %}">
+              {% if dash.kpis.revenue_change >= 0 %}▲{% else %}▼{% endif %} {{ dash.kpis.revenue_change }}% {% trans 'vs previous 30 days' %}
+            </span>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    <div class="col-xl-3 col-md-6 col-12">
+      <div class="info-box nm-kpi">
+        <span class="info-box-icon text-bg-info"><i class="fas fa-shopping-bag"></i></span>
+        <div class="info-box-content">
+          <span class="info-box-text">{% trans 'Orders, last 30 days' %}</span>
+          <span class="info-box-number">{{ dash.kpis.orders_30 }}</span>
+          {% if dash.kpis.orders_change is not None %}
+            <span class="nm-delta {% if dash.kpis.orders_change >= 0 %}up{% else %}down{% endif %}">
+              {% if dash.kpis.orders_change >= 0 %}▲{% else %}▼{% endif %} {{ dash.kpis.orders_change }}%
+            </span>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    <div class="col-xl-3 col-md-6 col-12">
+      <div class="info-box nm-kpi">
+        <span class="info-box-icon text-bg-warning"><i class="fas fa-receipt"></i></span>
+        <div class="info-box-content">
+          <span class="info-box-text">{% trans 'Average order, 30 days' %}</span>
+          <span class="info-box-number">GHS {{ dash.kpis.avg_order_30|floatformat:"2g" }}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="col-lg-8 col-12">
+  {% if dash.chart %}
+  <div class="card mb-3">
+    <div class="card-header"><h5 class="m-0">{% trans 'Sales, last 30 days' %}</h5></div>
+    <div class="card-body"><div class="nm-chart"><canvas id="nm-sales-chart" aria-label="{% trans 'Daily revenue and orders' %}" role="img"></canvas></div></div>
+  </div>
+  {% endif %}
+
+  {% if dash.can_sales %}
+  <div class="row">
+    <div class="col-md-6 col-12">
+      <div class="card mb-3">
+        <div class="card-header"><h5 class="m-0">{% trans 'Top products, 30 days' %}</h5></div>
+        <div class="card-body p-0">
+          <table class="table table-sm nm-table mb-0">
+            <tbody>
+            {% for p in dash.top_products %}
+              <tr>
+                <td>{% if p.url %}<a href="{{ p.url }}">{{ p.title|truncatechars:40 }}</a>{% else %}{{ p.title }}{% endif %}</td>
+                <td class="text-end text-nowrap">{{ p.units }} {% trans 'sold' %}</td>
+                <td class="text-end text-nowrap"><strong>GHS {{ p.revenue|floatformat:"2g" }}</strong></td>
+              </tr>
+            {% empty %}
+              <tr><td class="text-muted p-3">{% trans 'No sales in the last 30 days.' %}</td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-6 col-12">
+      <div class="card mb-3">
+        <div class="card-header"><h5 class="m-0">{% trans 'Top stores, 30 days' %}</h5></div>
+        <div class="card-body p-0">
+          <table class="table table-sm nm-table mb-0">
+            <tbody>
+            {% for v in dash.top_vendors %}
+              <tr>
+                <td>{% if v.url %}<a href="{{ v.url }}">{{ v.name|truncatechars:32 }}</a>{% else %}{{ v.name }}{% endif %}</td>
+                <td class="text-end text-nowrap">{{ v.orders }} {% trans 'orders' %}</td>
+                <td class="text-end text-nowrap"><strong>GHS {{ v.revenue|floatformat:"2g" }}</strong></td>
+              </tr>
+            {% empty %}
+              <tr><td class="text-muted p-3">{% trans 'No sales in the last 30 days.' %}</td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <h5 class="m-0">{% trans 'Latest orders' %}</h5>
+      <a href="{{ dash.links.orders }}" class="btn btn-sm btn-outline-secondary ms-auto">{% trans 'All orders' %}</a>
+    </div>
+    <div class="card-body p-0">
+      <div class="table-responsive">
+      <table class="table table-sm table-hover nm-table mb-0">
+        <thead><tr><th>{% trans 'Order' %}</th><th>{% trans 'Customer' %}</th><th>{% trans 'Status' %}</th><th class="text-end">{% trans 'Total' %}</th><th class="text-end">{% trans 'Placed' %}</th></tr></thead>
+        <tbody>
+        {% for o in dash.recent_orders %}
+          <tr>
+            <td><a href="{{ o.url }}" style="font-family:monospace">{{ o.number|default:o.label }}</a></td>
+            <td>{{ o.customer|truncatechars:32 }}</td>
+            <td><span class="badge text-bg-{{ o.badge }}">{{ o.status_label }}</span></td>
+            <td class="text-end text-nowrap">GHS {{ o.total|floatformat:"2g" }}</td>
+            <td class="text-end text-nowrap nm-meta">{{ o.created|timesince }} {% trans 'ago' %}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="5" class="text-muted p-3">{% trans 'No orders yet.' %}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+<div class="col-lg-4 col-12">
+  {% if dash.attention %}
+  <div class="card mb-3 {% if dash.attention_total %}card-outline card-danger{% endif %}">
+    <div class="card-header"><h5 class="m-0">{% trans 'Needs attention' %}
+      {% if dash.attention_total %}<span class="badge text-bg-danger ms-1">{{ dash.attention_total }}</span>{% endif %}</h5></div>
+    <div class="card-body py-1 nm-queue">
+      {% for item in dash.attention %}
+        <a href="{{ item.url }}" class="{% if not item.count %}clear{% endif %}">
+          <span><i class="fas {{ item.icon }}"></i>{{ item.label }}</span>
+          <span class="badge {% if item.count %}text-bg-danger{% else %}text-bg-light{% endif %}">{{ item.count }}</span>
+        </a>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if dash.can_sales %}
+  <div class="card mb-3">
+    <div class="card-header"><h5 class="m-0">{% trans 'Orders by status' %}</h5></div>
+    <div class="card-body py-1 nm-queue">
+      {% for s in dash.order_status %}
+        <a href="{{ s.url }}"><span>{{ s.label }}</span><span class="badge text-bg-{{ s.badge }}">{{ s.count }}</span></a>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="card mb-3">
+    <div class="card-header"><h5 class="m-0">{% trans 'Store' %}</h5></div>
+    <div class="card-body py-1 nm-queue">
+      <a href="{{ dash.links.customers }}"><span><i class="fas fa-users"></i>{% trans 'Accounts' %}</span>
+        <span>{{ dash.snapshot.customers }} <span class="nm-meta">(+{{ dash.snapshot.new_customers_30 }} {% trans 'in 30d' %})</span></span></a>
+      <a href="{{ dash.links.vendors }}"><span><i class="fas fa-store"></i>{% trans 'Active stores' %}</span><span>{{ dash.snapshot.active_vendors }}</span></a>
+      <a href="{{ dash.links.products }}"><span><i class="fas fa-box-open"></i>{% trans 'Published products' %}</span><span>{{ dash.snapshot.published_products }}</span></a>
+    </div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-header"><h5 class="m-0">{% trans 'Recent admin actions' %}</h5></div>
+    <div class="card-body py-2">
+      {% load log %}
+      {% get_admin_log 6 as admin_log for_user user %}
+      {% if not admin_log %}
+        <p class="text-muted mb-0">{% trans 'None available' %}</p>
+      {% else %}
+        <ul class="list-unstyled mb-0">
+        {% for entry in admin_log %}
+          <li class="mb-2">
+            {% if entry.is_change %}<i class="fas fa-edit text-muted"></i>{% elif entry.is_deletion %}<i class="fas fa-trash text-danger"></i>{% else %}<i class="fas fa-plus-circle text-success"></i>{% endif %}
+            {% if entry.is_deletion or not entry.get_admin_url %}{{ entry.object_repr|truncatechars:40 }}{% else %}<a href="{{ entry.get_admin_url }}">{{ entry.object_repr|truncatechars:40 }}</a>{% endif %}
+            <div class="nm-meta">{% if entry.model %}{{ entry.model|capfirst }} · {% endif %}{{ entry.action_time|timesince }} {% trans 'ago' %}</div>
+          </li>
+        {% endfor %}
+        </ul>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% if dash.chart %}
+{{ dash.chart|json_script:"nm-chart-data" }}
+{% endif %}
+{% endblock %}
+
+{% block extrajs %}
+{{ block.super }}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+(function () {
+  var el = document.getElementById('nm-chart-data');
+  var canvas = document.getElementById('nm-sales-chart');
+  if (!el || !canvas || !window.Chart) return;
+  var d = JSON.parse(el.textContent);
+  // Jazzmin 3.0.3+ (Bootstrap 5) sets the colour mode on <html data-bs-theme>.
+  var dark = document.documentElement.getAttribute('data-bs-theme') === 'dark';
+  var grid = dark ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)';
+  var text = dark ? '#cfd4da' : '#495057';
+  new Chart(canvas, {
+    data: {
+      labels: d.labels,
+      datasets: [
+        { type: 'bar', label: 'Revenue (GHS)', data: d.revenue, yAxisID: 'y',
+          backgroundColor: 'rgba(0,123,255,.55)', borderRadius: 3 },
+        { type: 'line', label: 'Orders', data: d.orders, yAxisID: 'y1',
+          borderColor: '#fd7e14', backgroundColor: '#fd7e14', tension: .3, pointRadius: 2 }
+      ]
+    },
+    options: {
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { labels: { color: text } } },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: text, maxRotation: 0, autoSkip: true, maxTicksLimit: 10 } },
+        y: { beginAtZero: true, grid: { color: grid }, ticks: { color: text } },
+        y1: { beginAtZero: true, position: 'right', grid: { drawOnChartArea: false },
+              ticks: { color: text, precision: 0 } }
+      }
+    }
+  });
+})();
+</script>
+{% endblock %}

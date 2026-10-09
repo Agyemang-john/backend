@@ -929,3 +929,64 @@ if not DEBUG:
     SECURE_BROWSER_XSS_FILTER = True
 
 X_FRAME_OPTIONS = 'DENY'
+
+# ── Django admin (Jazzmin) ────────────────────────────────────────────────────
+# The admin home is a custom dashboard: templates/admin/index.html + core/admin_dashboard.py.
+JAZZMIN_SETTINGS = {
+    "site_title": "Negromart Admin",
+    "site_header": "Negromart",
+    "site_brand": "Negromart",
+    "welcome_sign": "Sign in to the Negromart admin",
+    "copyright": "Negromart Inc.",
+    # Top-bar search box (each needs search_fields on its ModelAdmin).
+    "search_model": ["order.Order", "product.Product", "vendor.Vendor", "userauths.User"],
+    "topmenu_links": [
+        {"name": "Dashboard", "url": "admin:index"},
+        {"name": "Orders", "url": "admin:order_order_changelist"},
+        {"name": "View store", "url": SITE_URL, "new_window": True},
+    ],
+    # Day-to-day apps first, plumbing last.
+    "order_with_respect_to": [
+        "order", "product", "vendor", "payments", "userauths", "notification", "core",
+        "newsletter", "address", "recommendation", "auth", "django_celery_beat",
+        "social_django", "token_blacklist",
+    ],
+    "icons": {
+        "order.Order": "fas fa-shopping-bag",
+        "order.OrderProduct": "fas fa-list",
+        "order.Shipment": "fas fa-truck",
+        "order.TrackingEvent": "fas fa-map-marker-alt",
+        "order.ReturnRequest": "fas fa-undo",
+        "order.Cart": "fas fa-shopping-cart",
+        "order.CartItem": "fas fa-cart-plus",
+        "product.Product": "fas fa-box-open",
+        "product.Variants": "fas fa-cubes",
+        "product.ProductReview": "fas fa-star",
+        "product.ReviewReport": "fas fa-flag",
+        "product.Main_Category": "fas fa-sitemap",
+        "product.Category": "fas fa-folder",
+        "product.Sub_Category": "fas fa-folder-open",
+        "product.Brand": "fas fa-tag",
+        "product.FlashSale": "fas fa-bolt",
+        "product.Coupon": "fas fa-ticket-alt",
+        "product.Collection": "fas fa-layer-group",
+        "product.Wishlist": "fas fa-heart",
+        "vendor.Vendor": "fas fa-store",
+        "vendor.VendorActivityLog": "fas fa-history",
+        "payments.Payout": "fas fa-money-bill-wave",
+        "payments.LedgerEntry": "fas fa-book",
+        "payments.Payment": "fas fa-credit-card",
+        "payments.VendorSubscription": "fas fa-id-card",
+        "userauths.User": "fas fa-user",
+        "auth.Group": "fas fa-users-cog",
+        "notification.Notification": "fas fa-bell",
+        "notification.SupportTicket": "fas fa-life-ring",
+        "notification.ContactInquiry": "fas fa-envelope",
+        "newsletter.Campaign": "fas fa-paper-plane",
+        "newsletter.Subscriber": "fas fa-user-check",
+    },
+    "default_icon_parents": "fas fa-folder",
+    "default_icon_children": "fas fa-circle",
+    "related_modal_active": False,  # X_FRAME_OPTIONS = 'DENY' blocks the modal iframes
+    "show_ui_builder": False,
+}

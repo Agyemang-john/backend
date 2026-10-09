@@ -1,8 +1,9 @@
 # notification/admin.py
 from django.contrib import admin
 from django.utils.html import format_html
-from django.urls import reverse
+from django.urls import NoReverseMatch, reverse
 from django.contrib.contenttypes.models import ContentType
+from django.contrib.contenttypes.prefetch import GenericPrefetch
 from .models import Notification, ContactInquiry, SupportTicket, TicketReply
 
 
@@ -16,7 +17,11 @@ class NotificationAdmin(admin.ModelAdmin):
         "is_read",
         "created_at_formatted",
     ]
-    list_filter = ["verb", "is_read", "created_at", "recipient"]
+    # No "recipient" filter: it rendered every user account in the sidebar.
+    # Search by recipient email instead.
+    list_filter = ["verb", "is_read", "created_at"]
+    list_select_related = ["recipient"]
+    show_full_result_count = False
     search_fields = [
         "recipient__email",
         "recipient__username",
@@ -27,6 +32,19 @@ class NotificationAdmin(admin.ModelAdmin):
     date_hierarchy = "created_at"
     ordering = ["-created_at"]
     list_per_page = 50
+
+    def get_queryset(self, request):
+        # actor/target are generic relations: without this every row ran two
+        # lookups. GenericPrefetch needs a queryset per model, so prefetch the
+        # models notifications point at (anything else still resolves lazily).
+        from order.models import Order
+        from product.models import Product, ProductReview
+        from userauths.models import User
+        from vendor.models import Vendor
+        targets = [User.objects.all(), Vendor.objects.all(), Order.objects.select_related('user'),
+                   Product.objects.all(), ProductReview.objects.select_related('product', 'user')]
+        return super().get_queryset(request).prefetch_related(
+            GenericPrefetch('actor', targets), GenericPrefetch('target', targets))
 
     def has_add_permission(self, request):
         # Optional: disable manual creation (notifications should be created programmatically)
@@ -61,20 +79,25 @@ class NotificationAdmin(admin.ModelAdmin):
         return format_html('<a href="{}">{}</a>', url, obj.recipient)
     recipient_link.short_description = "Recipient"
 
-    def actor_link(self, obj):
-        if not obj.actor:
+    @staticmethod
+    def _object_link(target):
+        if not target:
             return "—"
-        ct = ContentType.objects.get_for_model(obj.actor)
-        url = reverse(f"admin:{ct.app_label}_{ct.model}_change", args=[obj.actor.id])
-        return format_html('<a href="{}">{}</a>', url, str(obj.actor))
+        meta = target._meta
+        try:
+            url = reverse(f"admin:{meta.app_label}_{meta.model_name}_change", args=[target.pk])
+        except NoReverseMatch:
+            # Model not registered in the admin: show it without a link
+            # rather than crashing the whole list.
+            return str(target)
+        return format_html('<a href="{}">{}</a>', url, str(target))
+
+    def actor_link(self, obj):
+        return self._object_link(obj.actor)
     actor_link.short_description = "Actor"
 
     def target_link(self, obj):
-        if not obj.target:
-            return "—"
-        ct = ContentType.objects.get_for_model(obj.target)
-        url = reverse(f"admin:{ct.app_label}_{ct.model}_change", args=[obj.target.id])
-        return format_html('<a href="{}">{}</a>', url, str(obj.target))
+        return self._object_link(obj.target)
     target_link.short_description = "Target"
 
     def created_at_formatted(self, obj):
@@ -126,9 +149,12 @@ class TicketReplyInline(admin.TabularInline):
 @admin.register(SupportTicket)
 class SupportTicketAdmin(admin.ModelAdmin):
     list_display = ['ticket_id', 'inquiry', 'priority', 'assigned_to', 'get_status', 'get_email']
-    list_filter = ['priority', 'inquiry__status', 'assigned_to']
+    # RelatedOnly: list the staff who actually have tickets, not every user.
+    list_filter = ['priority', 'inquiry__status', ('assigned_to', admin.RelatedOnlyFieldListFilter)]
     search_fields = ['ticket_id', 'inquiry__email', 'inquiry__subject']
     readonly_fields = ['ticket_id']
+    list_select_related = ['inquiry', 'assigned_to']
+    raw_id_fields = ['inquiry', 'assigned_to']
 
     # Show replies inline under each ticket
     inlines = [TicketReplyInline]
@@ -149,7 +175,9 @@ class ContactInquiryAdmin(admin.ModelAdmin):
     list_filter = ['status', 'inquiry_type', 'created_at']
     search_fields = ['name', 'email', 'subject']
     readonly_fields = ['created_at', 'updated_at', 'replied_at']
+    list_select_related = ['supportticket']
+    raw_id_fields = ['user']
 
     def get_ticket_id(self, obj):
-        return obj.support_ticket.ticket_id if hasattr(obj, 'support_ticket') else '-'
+        return obj.supportticket.ticket_id if hasattr(obj, 'supportticket') else '-'
     get_ticket_id.short_description = "Ticket ID"

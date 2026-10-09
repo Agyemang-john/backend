@@ -327,7 +327,13 @@ class SupportTicket(models.Model):
     
     def save(self, *args, **kwargs):
         if not self.ticket_id:
-            self.ticket_id = f"TKT-{timezone.now().strftime('%Y%m%d')}-{SupportTicket.objects.count()+1:04d}"
+            # count()+1 reused an existing id once any ticket had been deleted
+            # (unique constraint -> IntegrityError); step past ids already taken.
+            prefix = f"TKT-{timezone.now().strftime('%Y%m%d')}-"
+            n = SupportTicket.objects.filter(ticket_id__startswith=prefix).count() + 1
+            while SupportTicket.objects.filter(ticket_id=f"{prefix}{n:04d}").exists():
+                n += 1
+            self.ticket_id = f"{prefix}{n:04d}"
         super().save(*args, **kwargs)
 
 # models.py — add this new model

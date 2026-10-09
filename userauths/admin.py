@@ -43,9 +43,16 @@ class SubscribedUsersAdmin(admin.ModelAdmin):
     list_display = ('email', 'created_date')
 
 
+class ProfileAdmin(admin.ModelAdmin):
+    list_display = ('__str__', 'gender', 'created_at')
+    list_select_related = ('user',)  # __str__ is the user's email
+    search_fields = ('user__email',)
+    raw_id_fields = ('user',)
+
+
 # admin.site.register(User, UserAdmin, CustomUserAdmin)
 admin.site.register(ContactUs, ContactUsAdmin)
-admin.site.register(Profile)
+admin.site.register(Profile, ProfileAdmin)
 admin.site.register(SubscribedUsers, SubscribedUsersAdmin)
 admin.site.register(MailMessage)
 admin.site.register(User, UserAdmin)

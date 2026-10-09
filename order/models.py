@@ -73,6 +73,9 @@ class Cart(models.Model):
     def __str__(self):
         if self.user and self.user.email:
             return f"Cart (User: {self.user.email})"
+        # Must always return a str: None here crashed every admin page that
+        # shows a guest cart ("__str__ returned non-string").
+        return f"Guest cart #{self.pk}"
 
     @property
     def is_guest_cart(self):
@@ -174,8 +177,9 @@ class CartItem(models.Model):
     flash_sale_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
 
     def __str__(self):
-        if self.cart.user:
-            return f"CartItem for {self.cart.user.email} - Product: {self.product.title}"
+        product = self.product.title if self.product else "Deleted product"
+        owner = self.cart.user.email if self.cart.user else f"guest cart #{self.cart_id}"
+        return f"CartItem for {owner} - Product: {product}"
 
     class Meta:
         ordering = ('-created_at',)
@@ -603,12 +607,13 @@ class Shipment(models.Model):
     @property
     def progress_percentage(self):
         # Simple progress estimation
-        events = self.tracking_events.order_by('event_date')
-        total = len(events)
-        if total == 0:
+        # .all() + sort in Python so a prefetch_related('tracking_events') is used
+        # (the admin lists many shipments; ordering in SQL re-queried per row).
+        events = sorted(self.tracking_events.all(), key=lambda e: e.event_date)
+        if not events:
             return 0
         # Very rough: delivered = 100%, in transit = 60%, etc.
-        latest = events.last()
+        latest = events[-1]
         mapping = {
             'delivered': 100,
             'out_for_delivery': 90,

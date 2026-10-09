@@ -9,6 +9,8 @@ from .email_admin import *
 class PaymentAdmin(admin.ModelAdmin):
     list_editable = ['verified']
     list_display = ['id','user', 'amount', 'ref', 'email', 'verified', 'date_created']
+    search_fields = ['ref', 'email', 'user__email']
+    raw_id_fields = ['user']
 
 admin.site.register(Payment, PaymentAdmin)
 
@@ -19,13 +21,14 @@ class PayoutAdmin(admin.ModelAdmin):
     list_filter = ('status', 'created_at')
     search_fields = ('vendor__name', 'transaction_id', 'error_message')
     readonly_fields = ('created_at', 'updated_at')
+    autocomplete_fields = ('vendor', 'order')
 
 
 # subscriptions/admin.py
 
 from django.contrib import admin
 from django.utils.html import format_html
-from django.db.models import Count
+from django.db.models import Count, Q
 from .models import (
     SubscriptionPlan,
     VendorSubscription,
@@ -97,13 +100,13 @@ class SubscriptionPlanAdmin(admin.ModelAdmin):
     commission_display.short_description = "Commission"
 
     def active_subscribers(self, obj):
-        count = obj.vendor_subscriptions.filter(status="active").count()
-        return count
+        return obj._active_subscribers
     active_subscribers.short_description = "Active subs"
+    active_subscribers.admin_order_field = "_active_subscribers"
 
     def get_queryset(self, request):
         return super().get_queryset(request).annotate(
-            _subscriber_count=Count("vendor_subscriptions")
+            _active_subscribers=Count("vendor_subscriptions", filter=Q(vendor_subscriptions__status="active"))
         )
 
 
@@ -125,6 +128,8 @@ class VendorSubscriptionAdmin(admin.ModelAdmin):
     ]
     list_filter  = ["status", "plan__tier", "auto_renew", "plan__billing_cycle"]
     search_fields = ["vendor__name", "vendor__email", "payment_reference"]
+    list_select_related = ["vendor", "plan"]
+    autocomplete_fields = ["vendor"]
     ordering = ["-created_at"]
     readonly_fields = [
         "created_at", "updated_at",
@@ -194,6 +199,7 @@ class SubscriptionUsageAdmin(admin.ModelAdmin):
     ]
     search_fields = ["vendor__name"]
     readonly_fields = ["updated_at", "usage_bar"]
+    list_select_related = ["vendor", "subscription__plan"]
 
     def max_products_display(self, obj):
         if obj.subscription and obj.subscription.plan:
@@ -226,6 +232,7 @@ class PaystackCustomerAdmin(admin.ModelAdmin):
     list_display  = ["vendor", "customer_code", "email", "created_at"]
     search_fields = ["vendor__name", "customer_code", "email"]
     readonly_fields = ["created_at"]
+    list_select_related = ["vendor"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -240,6 +247,7 @@ class PaystackAuthorizationAdmin(admin.ModelAdmin):
     ]
     list_filter   = ["card_type", "is_default", "is_reusable"]
     search_fields = ["vendor__name", "last4", "bank"]
+    list_select_related = ["vendor"]
     readonly_fields = ["authorization_code", "created_at"]
     # authorization_code is read-only — never let it be edited in the UI
 
@@ -273,6 +281,7 @@ class PaymentTransactionAdmin(admin.ModelAdmin):
         "paystack_transaction_id",
         "subscription__plan__name",
     ]
+    list_select_related = ["vendor", "subscription__plan"]
     ordering = ["-created_at"]
     date_hierarchy = "created_at"
     readonly_fields = [
@@ -347,6 +356,7 @@ class MomoAccountAdmin(admin.ModelAdmin):
 
     list_filter = ("provider", "is_default", "created_at")
     search_fields = ("phone", "nickname", "vendor__name")
+    list_select_related = ("vendor",)
     ordering = ("-is_default", "-created_at")
 
     readonly_fields = ("created_at", "updated_at", "last_reference")
@@ -387,6 +397,7 @@ class BillingProfileAdmin(admin.ModelAdmin):
     )
 
     list_filter = ("country", "created_at")
+    list_select_related = ("vendor",)
 
     readonly_fields = ("created_at", "updated_at")
 
@@ -413,6 +424,7 @@ class LedgerEntryAdmin(admin.ModelAdmin):
     list_filter = ('entry_type',)
     search_fields = ('vendor__name', 'description', 'order__order_number')
     raw_id_fields = ('vendor',)
+    list_select_related = ('vendor', 'payout')
     date_hierarchy = 'created_at'
 
     def get_fields(self, request, obj=None):

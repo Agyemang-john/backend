@@ -72,3 +72,6 @@ class CampaignRecipientAdmin(admin.ModelAdmin):
     list_display = ["campaign", "subscriber", "sent_at", "delivered", "opened", "bounced"]
     list_filter  = ["campaign", "delivered", "opened", "bounced"]
     search_fields= ["subscriber__email", "campaign__name"]
+    list_select_related = ["campaign", "subscriber"]
+    raw_id_fields = ["subscriber"]
+    show_full_result_count = False
