@@ -675,3 +675,26 @@ def cleanup_orphan_review_media():
         media.delete()
         removed += 1
     return removed
+
+
+# ── Review reminders (product/review_reminders.py) ───────────────────────────
+
+@shared_task(ignore_result=True)
+def send_review_reminders():
+    """Daily: queue a "how was your purchase?" message for every customer who is due."""
+    from .review_reminders import queue_due_reminders
+    return queue_due_reminders()
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=600, ignore_result=True)
+def send_review_reminder(self, reminder_ids):
+    """Send one customer's reminder. Email failures retry, then the rows are marked failed."""
+    from .review_reminders import deliver, mark_failed
+    try:
+        return deliver(reminder_ids)
+    except Exception as exc:  # noqa: BLE001 - mail server, template or network
+        if self.request.retries >= self.max_retries:
+            logger.exception("review reminder %s failed for good", reminder_ids)
+            mark_failed(reminder_ids, exc)
+            return []
+        raise self.retry(exc=exc)

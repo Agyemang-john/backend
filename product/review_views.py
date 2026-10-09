@@ -14,6 +14,11 @@ Customer
     POST   /api/v1/product/reviews/media/                              upload one photo/video
     DELETE /api/v1/product/reviews/media/<id>/                         discard an unattached upload
     POST   /api/v1/product/reviews/<id>/helpful/  (DELETE to undo)     helpful vote
+    GET    /api/v1/product/reviews/awaiting/                           delivered purchases not reviewed yet
+    GET    /api/v1/product/reviews/reminders/                          {opted_out} reminder preference
+    PUT    /api/v1/product/reviews/reminders/                          {opted_out: bool}
+Anyone with the signed link from a reminder email
+    POST   /api/v1/product/reviews/reminders/unsubscribe/              {token} stop review reminders
 Staff (is_staff + product.moderate_productreview, or superuser)
     GET    /api/v1/product/reviews/moderation/?status=pending          moderation queue
     POST   /api/v1/product/reviews/<id>/moderate/                      {action: approve|reject|hide, reason}
@@ -39,6 +44,7 @@ from rest_framework.throttling import UserRateThrottle
 from rest_framework.views import APIView
 
 from . import review_media
+from . import review_reminders as reminders
 from . import review_services as services
 from .models import ProductReview, ReviewHelpfulVote, ReviewMedia
 from .review_serializers import (
@@ -206,6 +212,64 @@ class MyReviewsView(APIView):
         paginator = ReviewPagination()
         page = paginator.paginate_queryset(qs, request, view=self)
         return paginator.get_paginated_response(OwnReviewSerializer(page, many=True, context={'request': request}).data)
+
+
+class AwaitingReviewView(APIView):
+    """Products the customer received and hasn't reviewed ("Waiting for your review")."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        out = []
+        for line in reminders.awaiting_review(request.user):
+            product = line.product
+            try:
+                image = request.build_absolute_uri(product.image.url) if product.image else None
+            except ValueError:
+                image = None
+            out.append({
+                'product_id': product.pk,
+                'title': product.title,
+                'sku': product.sku,
+                'slug': product.slug,
+                'image': image,
+                'variant': services.describe_variant(line),
+                'order_id': line.order_id,
+                'delivered_on': line.delivered_on,
+            })
+        return Response({'results': out})
+
+
+class ReminderPreferenceView(APIView):
+    """The signed-in customer's "remind me to review purchases" setting."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response({'opted_out': reminders.is_opted_out(request.user)})
+
+    def put(self, request):
+        opted_out = request.data.get('opted_out')
+        if not isinstance(opted_out, bool):
+            return Response({'detail': 'opted_out must be true or false.'}, status=status.HTTP_400_BAD_REQUEST)
+        reminders.set_opted_out(request.user, opted_out)
+        return Response({'opted_out': opted_out})
+
+
+class ReminderUnsubscribeView(APIView):
+    """
+    One-click opt-out from the link in a reminder email; no sign-in needed.
+    The token is signed with SECRET_KEY and only identifies the account.
+    A POST, so link scanners that prefetch emails can't opt people out.
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []   # a stale login cookie must not turn this into a 401
+
+    def post(self, request):
+        user = reminders.user_from_opt_out_token(str(request.data.get('token') or ''))
+        if user is None:
+            return Response({'detail': 'This link is invalid. Sign in and turn reminders off in My reviews.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        reminders.set_opted_out(user, True)
+        return Response({'opted_out': True})
 
 
 class ReviewDetailView(APIView):

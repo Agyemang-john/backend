@@ -26,6 +26,13 @@ from django.conf import settings
 from django.contrib.postgres.indexes import GinIndex
 from django.contrib.postgres.search import SearchVectorField
 from django.contrib.postgres.search import SearchVector
+
+# Text-search config used to build Product.search_vector AND every query against
+# it. Must be explicit: without it Postgres falls back to the server's
+# default_text_search_config, which differs between hosts ('simple' vs
+# 'english'), and a vector stemmed one way never matches a query stemmed the
+# other ('iphone' vs 'iphon').
+SEARCH_CONFIG = 'english'
 from django.db.models import F, Sum
 from django.utils import timezone
 import os
@@ -316,10 +323,10 @@ class Product(models.Model):
         # Update search vector field in the database
         Product.objects.filter(pk=self.pk).update(
             search_vector=(
-                SearchVector(F('title'), weight='A') +
-                SearchVector(F('description'), weight='B') +
-                SearchVector(F('features'), weight='C') +
-                SearchVector(F('specifications'), weight='C')
+                SearchVector(F('title'), weight='A', config=SEARCH_CONFIG) +
+                SearchVector(F('description'), weight='B', config=SEARCH_CONFIG) +
+                SearchVector(F('features'), weight='C', config=SEARCH_CONFIG) +
+                SearchVector(F('specifications'), weight='C', config=SEARCH_CONFIG)
             )
         )
 
@@ -737,6 +744,58 @@ class ReviewReport(models.Model):
 
     def __str__(self):
         return f"Report on review {self.review_id} ({self.get_reason_display()})"
+
+
+class ReviewReminder(models.Model):
+    """
+    One "how was your purchase?" reminder for one product a customer received
+    (product/review_reminders.py). The row is written before anything is sent,
+    and (user, product, stage) is unique, so a re-run or a duplicate worker can
+    never message a customer twice about the same product.
+    """
+    FIRST = 1
+    FOLLOW_UP = 2
+    STAGE_CHOICES = [(FIRST, 'First reminder'), (FOLLOW_UP, 'Follow-up')]
+
+    QUEUED = 'queued'
+    SENT = 'sent'
+    FAILED = 'failed'
+    SKIPPED = 'skipped'      # became ineligible between queueing and sending
+    STATUS_CHOICES = [(QUEUED, 'Queued'), (SENT, 'Sent'), (FAILED, 'Failed'), (SKIPPED, 'Skipped')]
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='review_reminders')
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='review_reminders')
+    order_item = models.ForeignKey('order.OrderProduct', on_delete=models.SET_NULL, null=True,
+                                   related_name='review_reminders')
+    stage = models.PositiveSmallIntegerField(choices=STAGE_CHOICES, default=FIRST)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=QUEUED, db_index=True)
+    # Channels that actually went out, e.g. ["email", "sms", "in_app"].
+    channels = models.JSONField(default=list, blank=True)
+    error = models.CharField(max_length=255, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    sent_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    # Set when the customer reviews the product afterwards (conversion reporting).
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'product', 'stage'], name='uniq_review_reminder_stage'),
+        ]
+        indexes = [models.Index(fields=['user', 'sent_at'], name='review_reminder_user_sent_idx')]
+
+    def __str__(self):
+        return f"Review reminder {self.get_stage_display()} → user {self.user_id} / product {self.product_id}"
+
+
+class ReviewReminderOptOut(models.Model):
+    """The customer asked not to be reminded to review purchases (one-click link in the email)."""
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                                related_name='review_reminder_opt_out')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Review reminders off for user {self.user_id}"
 
 
 class Wishlist(models.Model):

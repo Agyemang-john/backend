@@ -262,6 +262,8 @@ FRONTEND_LOGIN_URL = config("FRONTEND_LOGIN_URL")
 
 # Emailing settings
 SITE_URL = config('FRONTEND_BASE_URL')   # set correctly in each environment
+# Public URL of this API; makes local /media/ paths absolute in emails (blank: S3 URLs already are).
+BACKEND_BASE_URL = config('BACKEND_BASE_URL', default='')
 
 EMAIL_TIMEOUT = 30  # seconds
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
@@ -376,6 +378,23 @@ REVIEW_MODERATION = {
     'MEDIA_REQUIRES_MODERATION': config('REVIEW_MEDIA_REQUIRES_MODERATION', default=False, cast=bool),
     # Optional external checker: dotted path to a review_moderation.AIModerationAdapter subclass.
     'AI_ADAPTER': config('REVIEW_AI_MODERATION_ADAPTER', default='') or None,
+}
+
+# "How was your purchase?" reminders (product/review_reminders.py).
+REVIEW_REMINDERS = {
+    'ENABLED': config('REVIEW_REMINDERS_ENABLED', default=True, cast=bool),
+    # First reminder this many days after delivery, follow-up after this many
+    # (0 turns the follow-up off). Nothing older than MAX_AGE_DAYS is ever
+    # reminded, so switching the feature on doesn't mail every past customer.
+    'FIRST_AFTER_DAYS': config('REVIEW_REMINDER_FIRST_DAYS', default=7, cast=int),
+    'FOLLOW_UP_AFTER_DAYS': config('REVIEW_REMINDER_FOLLOW_UP_DAYS', default=21, cast=int),
+    'MAX_AGE_DAYS': config('REVIEW_REMINDER_MAX_AGE_DAYS', default=45, cast=int),
+    # At most one reminder message per customer in this many days; products
+    # waiting their turn are picked up on a later run.
+    'MIN_DAYS_BETWEEN': config('REVIEW_REMINDER_MIN_DAYS_BETWEEN', default=4, cast=int),
+    'MAX_ITEMS_PER_MESSAGE': 4,
+    # SMS costs money: off unless switched on, first reminder only, verified numbers only.
+    'SMS_ENABLED': config('REVIEW_REMINDER_SMS_ENABLED', default=False, cast=bool),
 }
 
 # ── Delivery providers (order/delivery/) ─────────────────────────────────────
@@ -522,6 +541,13 @@ CELERY_BEAT_SCHEDULE = {
     "cleanup-orphan-review-media": {
         "task": "product.tasks.cleanup_orphan_review_media",
         "schedule": crontab(hour=4, minute=15),
+    },
+    # Ask customers to review products delivered about a week ago (10:00 UTC,
+    # Ghana local time — a sensible hour to receive it).
+    "send-review-reminders": {
+        "task": "product.tasks.send_review_reminders",
+        "schedule": crontab(hour=10, minute=0),
+        "options": {"expires": 3 * 3600},
     },
     # Remind stores about orders past their ship-by date.
     "remind-late-orders": {

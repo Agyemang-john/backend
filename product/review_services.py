@@ -172,6 +172,8 @@ def create_review(user, product_id, data):
         # A concurrent request created it first (uniq_review_per_user_product).
         raise ReviewError("You've already reviewed this product.", 'already_reviewed', 409)
 
+    from .review_reminders import mark_reviewed
+    mark_reviewed(user, product)
     _notify(review, created=True)
     return review
 

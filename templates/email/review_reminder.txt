@@ -1,0 +1,19 @@
+{% autoescape off %}Hi {{ first_name }}, {% if follow_up %}do you have a minute now?{% else %}how did it go?{% endif %}
+
+Your review helps other shoppers decide, and helps sellers on {{ site_name }} improve.
+{% for item in items %}
+YOU ORDERED: {{ item.title }}{% if item.variant %} ({{ item.variant }}){% endif %}{% if item.seller %}
+Sold by {{ item.seller }}{% endif %}{% if item.delivered_on %}
+Delivered {{ item.delivered_on|date:"j M Y" }}{% endif %}
+
+Rate it:{% for stars, url in item.rating_urls %}
+  {{ stars }} star{{ stars|pluralize }}: {{ url }}{% endfor %}
+
+Write a review: {{ item.review_url }}
+{% endfor %}
+Rate and review your purchases: {{ reviews_url }}
+Had a problem with your order? Contact support@negromart.com before reviewing and we'll help put it right.
+
+Stop reminders to review purchases: {{ opt_out_url }}
+(c) {{ year }} {{ site_name }}
+{% endautoescape %}

@@ -102,7 +102,7 @@ class SitemapDataAPIView(APIView):
 #         return Response(response_data, status=status.HTTP_200_OK)
 
 
-from .models import Product
+from .models import Product, SEARCH_CONFIG
 from .serializers import ProductSerializer
 
 
@@ -487,12 +487,12 @@ class SearchSuggestionsAPIView(APIView):
         if cached_data:
             return Response(cached_data, status=status.HTTP_200_OK)
 
-        search_query = SearchQuery(query, search_type="plain")  # could also use 'phrase' or 'websearch'
+        search_query = SearchQuery(query, search_type="plain", config=SEARCH_CONFIG)
 
         suggestions_qs = (
             Product.published.all()
+            .filter(search_vector=search_query)
             .annotate(rank=SearchRank(F("search_vector"), search_query))
-            .filter(rank__gt=0.0)
             .select_related("sub_category")
             .order_by("-rank", "title")[:10]
         )
@@ -880,7 +880,7 @@ class ProductSearchAPIView(APIView):
             return Response({"detail": "Invalid filter parameters"}, status=400)
 
         # ── Build base search queryset using stored search_vector (GIN index) ──
-        search_query = SearchQuery(query, config='english')
+        search_query = SearchQuery(query, config=SEARCH_CONFIG)
         base_qs = (
             Product.published
             .filter(search_vector=search_query)

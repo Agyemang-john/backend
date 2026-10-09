@@ -328,3 +328,39 @@ class ReviewReportAdmin(admin.ModelAdmin):
         from django.utils import timezone
         count = queryset.filter(status='open').update(status='dismissed', resolved_at=timezone.now())
         self.message_user(request, f"{count} report(s) dismissed.")
+
+
+from product.models import ReviewReminder, ReviewReminderOptOut  # noqa: E402
+
+
+@admin.register(ReviewReminder)
+class ReviewReminderAdmin(admin.ModelAdmin):
+    """Read-only log of "how was your purchase?" reminders (product/review_reminders.py)."""
+    list_display = ('user', 'product', 'stage', 'status', 'channels', 'sent_at', 'reviewed_at')
+    list_filter = ('status', 'stage', 'sent_at')
+    search_fields = ('user__email', 'product__title', 'product__sku')
+    date_hierarchy = 'created_at'
+    list_select_related = ('user', 'product')
+    readonly_fields = [f.name for f in ReviewReminder._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def changelist_view(self, request, extra_context=None):
+        # Conversion at a glance: how many sent reminders led to a review.
+        sent = ReviewReminder.objects.filter(status=ReviewReminder.SENT)
+        total, converted = sent.count(), sent.filter(reviewed_at__isnull=False).count()
+        rate = f"{converted / total:.1%}" if total else "n/a"
+        extra_context = {**(extra_context or {}),
+                         'title': f"Review reminders — {converted} of {total} sent led to a review ({rate})"}
+        return super().changelist_view(request, extra_context)
+
+
+@admin.register(ReviewReminderOptOut)
+class ReviewReminderOptOutAdmin(admin.ModelAdmin):
+    list_display = ('user', 'created_at')
+    search_fields = ('user__email',)
+    raw_id_fields = ('user',)

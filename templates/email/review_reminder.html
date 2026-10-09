@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Share your experience</title>
+</head>
+<body style="margin:0; padding:0; background:#f4f4f4; font-family:Arial, Helvetica, sans-serif; color:#111111;">
+  {# Inbox preview line #}
+  <div style="display:none; max-height:0; overflow:hidden;">
+    {% if items|length == 1 %}Tell other shoppers what you think of {{ items.0.title }}.{% else %}Tell other shoppers what you think of your recent purchases.{% endif %}
+  </div>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f4;">
+    <tr><td align="center" style="padding:24px 12px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px; background:#ffffff; border:1px solid #e3e3e3;">
+
+        <tr><td style="padding:20px 28px; border-bottom:2px solid #111111;">
+          <a href="{{ site_url }}" style="text-decoration:none;">
+            <img src="{{ site_logo_url }}" alt="{{ site_name }}" height="36" style="display:block; border:0; height:36px;">
+          </a>
+        </td></tr>
+
+        <tr><td style="padding:28px 28px 8px;">
+          <p style="margin:0 0 6px; font-size:20px; line-height:28px; font-weight:bold;">
+            Hi {{ first_name }}, {% if follow_up %}do you have a minute now?{% else %}how did it go?{% endif %}
+          </p>
+          <p style="margin:0; font-size:15px; line-height:22px; color:#444444;">
+            {% if follow_up %}
+              You haven't reviewed {% if items|length == 1 %}this item{% else %}these items{% endif %} yet. A quick rating takes seconds and helps other shoppers buy with confidence.
+            {% else %}
+              Your review helps other shoppers decide, and helps sellers on {{ site_name }} improve.
+            {% endif %}
+          </p>
+        </td></tr>
+
+        {% for item in items %}
+        <tr><td style="padding:20px 28px 0;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e3e3e3;">
+            <tr><td style="padding:16px 18px 4px; font-size:12px; letter-spacing:0.6px; text-transform:uppercase; color:#8a6d00; font-weight:bold;">
+              You ordered
+            </td></tr>
+            <tr><td style="padding:8px 18px 0;">
+              <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                  {% if item.image_url %}
+                  <td width="88" valign="top" style="padding-right:14px;">
+                    <a href="{{ item.review_url }}"><img src="{{ item.image_url }}" alt="" width="88" height="88" style="display:block; border:1px solid #eeeeee; width:88px; height:88px; object-fit:cover;"></a>
+                  </td>
+                  {% endif %}
+                  <td valign="top">
+                    <a href="{{ item.review_url }}" style="font-size:15px; line-height:21px; font-weight:bold; color:#111111; text-decoration:none;">{{ item.title }}</a>
+                    {% if item.variant %}<div style="font-size:13px; line-height:19px; color:#555555; margin-top:2px;">{{ item.variant }}</div>{% endif %}
+                    {% if item.seller %}<div style="font-size:13px; line-height:19px; color:#555555;">Sold by {{ item.seller }}</div>{% endif %}
+                    {% if item.delivered_on %}<div style="font-size:12px; line-height:18px; color:#777777; font-style:italic; margin-top:2px;">Delivered {{ item.delivered_on|date:"j M Y" }}</div>{% endif %}
+                  </td>
+                </tr>
+              </table>
+            </td></tr>
+
+            <tr><td style="padding:18px 18px 6px; font-size:14px; font-weight:bold;">
+              How would you rate it?
+            </td></tr>
+            <tr><td style="padding:0 18px 4px;">
+              <table role="presentation" cellpadding="0" cellspacing="0">
+                {% for stars, url in item.rating_urls %}
+                <tr>
+                  <td style="padding:3px 0;">
+                    <a href="{{ url }}" style="text-decoration:none; font-size:18px; line-height:22px; color:#e0a100; letter-spacing:1px;">{% if stars == 5 %}&#9733;&#9733;&#9733;&#9733;&#9733;{% elif stars == 4 %}&#9733;&#9733;&#9733;&#9733;<span style="color:#cfcfcf;">&#9733;</span>{% elif stars == 3 %}&#9733;&#9733;&#9733;<span style="color:#cfcfcf;">&#9733;&#9733;</span>{% elif stars == 2 %}&#9733;&#9733;<span style="color:#cfcfcf;">&#9733;&#9733;&#9733;</span>{% else %}&#9733;<span style="color:#cfcfcf;">&#9733;&#9733;&#9733;&#9733;</span>{% endif %}</a>
+                  </td>
+                  <td style="padding:3px 0 3px 12px;">
+                    <a href="{{ url }}" style="font-size:14px; line-height:22px; color:#0b57d0;">{{ stars }} &ndash; {% if stars == 5 %}Excellent{% elif stars == 4 %}Good{% elif stars == 3 %}Fair{% elif stars == 2 %}Poor{% else %}Awful{% endif %}</a>
+                  </td>
+                </tr>
+                {% endfor %}
+              </table>
+            </td></tr>
+            <tr><td style="padding:14px 18px 18px;">
+              <a href="{{ item.review_url }}" style="display:inline-block; background:#111111; color:#ffffff; font-size:14px; font-weight:bold; text-decoration:none; padding:11px 18px;">Write a review</a>
+              <span style="font-size:13px; color:#555555; padding-left:10px;">Photos and videos are welcome.</span>
+            </td></tr>
+          </table>
+        </td></tr>
+        {% endfor %}
+
+        <tr><td style="padding:24px 28px 8px;">
+          <p style="margin:0 0 6px; font-size:14px; font-weight:bold;">Helpful links</p>
+          <p style="margin:0; font-size:13px; line-height:20px;">
+            <a href="{{ reviews_url }}" style="color:#0b57d0;">Rate and review your purchases</a>
+            {% if items.0.order_url %}&nbsp;|&nbsp; <a href="{{ items.0.order_url }}" style="color:#0b57d0;">View order details</a>{% endif %}
+            &nbsp;|&nbsp; <a href="mailto:support@negromart.com" style="color:#0b57d0;">Contact customer service</a>
+          </p>
+          <p style="margin:12px 0 0; font-size:12px; line-height:18px; color:#666666;">
+            Had a problem with your order? Contact us before reviewing and we'll help put it right.
+          </p>
+        </td></tr>
+
+        <tr><td style="padding:20px 28px 24px; border-top:1px solid #eeeeee; font-size:11px; line-height:17px; color:#888888;">
+          You're receiving this because you bought {% if items|length == 1 %}this item{% else %}these items{% endif %} on {{ site_name }}. Reviews are public and must follow our community guidelines.<br>
+          <a href="{{ opt_out_url }}" style="color:#888888;">Stop reminders to review purchases</a><br>
+          &copy; {{ year }} {{ site_name }}. All rights reserved.
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
