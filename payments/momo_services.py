@@ -171,9 +171,13 @@ def _activate_momo_subscription(reference, intent):
     plan_id   = intent['plan_id']
     billing   = intent.get('billing', 'monthly')
 
+    from .services import period_end_from
+
     vendor = Vendor.objects.select_related('user').get(pk=vendor_id)
     plan   = SubscriptionPlan.objects.get(pk=plan_id)
-    days   = BILLING_DAYS.get(billing, 30)
+
+    if intent.get('type') == 'renewal' and intent.get('sub_id'):
+        return _apply_momo_renewal(reference, intent)
 
     with db_transaction.atomic():
         # ── Idempotency: if this reference is already activated, return early ──
@@ -203,7 +207,7 @@ def _activate_momo_subscription(reference, intent):
                 plan=plan,
                 status='active',
                 start_date=timezone.now(),
-                end_date=timezone.now() + timedelta(days=days),
+                end_date=period_end_from(intent, billing),
                 auto_renew=True,
                 payment_reference=reference,
             )
@@ -262,15 +266,50 @@ def _activate_momo_subscription(reference, intent):
     return sub
 
 
+def _apply_momo_renewal(reference, intent):
+    """
+    A MoMo renewal was approved: extend the existing subscription (switching
+    to its scheduled plan, if any) rather than starting a fresh one, so the
+    days left before end_date aren't lost. Idempotent on the reference.
+    """
+    with db_transaction.atomic():
+        txn = (PaymentTransaction.objects.select_for_update()
+               .filter(paystack_reference=reference).first())
+        sub = VendorSubscription.objects.select_for_update().get(pk=intent['sub_id'])
+        if txn and txn.status == 'success':
+            return sub
+        sub.renew()
+        if txn:
+            txn.status = 'success'
+            txn.paid_at = timezone.now()
+            txn.save(update_fields=['status', 'paid_at'])
+        from .services import _sync_vendor_flags
+        _sync_vendor_flags(sub.vendor)
+
+    try:
+        from .email_tasks import send_renewal_success_email
+        send_renewal_success_email.delay(sub.vendor_id)
+    except Exception as exc:
+        logger.warning(f'Failed to queue renewal email for MoMo ref={reference}: {exc}')
+    logger.info(f'MoMo renewal applied: sub={sub.id} ref={reference} end={sub.end_date}')
+    return sub
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Initiate MoMo subscription charge
 # ─────────────────────────────────────────────────────────────────────────────
 
 def initiate_momo_charge(vendor, plan_id, billing, phone, provider, save=False):
+    from .services import prepare_plan_change
+
     profile        = require_billing_profile(vendor)
-    plan           = SubscriptionPlan.objects.get(pk=plan_id, is_active=True)
+    plan, quote, early = prepare_plan_change(vendor, plan_id, billing)
+    if early:
+        # Downgrade scheduled, free plan, or upgrade fully covered by credit.
+        return {**early, 'status': 'scheduled' if early.get('scheduled') else 'activated'}
+    plan_id        = plan.id
     ps_provider    = PROVIDER_PAYSTACK_MAP.get(provider, provider)
-    amount_pesewas = int(float(plan.price) * 100)
+    amount_pesewas = int(quote['amount_due'] * 100)
 
     # Step 1: idempotency
     existing_ref = _get_inflight(vendor.id, plan_id)
@@ -358,12 +397,13 @@ def initiate_momo_charge(vendor, plan_id, billing, phone, provider, save=False):
 
     _set_inflight(vendor.id, plan_id, reference)
     cache.set(f'momo_charge:{reference}', {
-        'plan_id':   plan_id,
-        'billing':   billing,
-        'vendor_id': vendor.id,
-        'phone':     phone,
-        'provider':  provider,
-        'save':      save,
+        'plan_id':    plan_id,
+        'billing':    billing,
+        'vendor_id':  vendor.id,
+        'phone':      phone,
+        'provider':   provider,
+        'save':       save,
+        'period_end': quote['period_end'].isoformat(),
     }, timeout=CHARGE_CACHE_TTL)
 
     active_sub = VendorSubscription.objects.filter(
@@ -371,8 +411,8 @@ def initiate_momo_charge(vendor, plan_id, billing, phone, provider, save=False):
     ).first()
     PaymentTransaction.objects.create(
         vendor=vendor, subscription=active_sub,
-        transaction_type='initial',
-        amount=plan.price, currency='GHS',
+        transaction_type=quote['change_type'],
+        amount=quote['amount_due'], currency='GHS',
         status='pending', paystack_reference=reference,
     )
 

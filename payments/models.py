@@ -198,6 +198,16 @@ class VendorSubscription(models.Model):
     cancelled_at = models.DateTimeField(null=True, blank=True)
     cancellation_reason = models.TextField(blank=True, null=True)
 
+    # A downgrade waits for the end of the paid period; the next renewal
+    # charges and switches to this plan.
+    scheduled_plan = models.ForeignKey(
+        SubscriptionPlan,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='+',
+        help_text="Plan to switch to at the next renewal (a scheduled downgrade).",
+    )
+
     # Payment Reference (link to your payment model/gateway)
     payment_reference = models.CharField(
         max_length=255,
@@ -223,24 +233,46 @@ class VendorSubscription(models.Model):
             return max(delta.days, 0)
         return 0
 
+    @property
+    def cancel_at_period_end(self):
+        return self.status == 'active' and self.cancelled_at is not None and not self.auto_renew
+
     def cancel(self, reason=None):
-        """Cancel this subscription."""
-        self.status = 'cancelled'
+        """
+        Stop renewing. The store keeps its plan until end_date, then
+        expire_old_subscriptions moves it to Free. status stays 'active'
+        so entitlements keep working for the days already paid for.
+        """
         self.auto_renew = False
         self.cancelled_at = timezone.now()
+        self.scheduled_plan = None
         if reason:
             self.cancellation_reason = reason
         self.save()
 
+    def resume(self):
+        """Undo a cancellation before the period ends."""
+        self.auto_renew = True
+        self.cancelled_at = None
+        self.cancellation_reason = None
+        self.save()
+
     def renew(self):
-        """Renew the subscription by extending the end date."""
+        """
+        Extend by one billing period of the plan in force after renewal
+        (the scheduled plan, if a downgrade is waiting). Renewals run a few
+        days before end_date, so extend from end_date, not from now.
+        """
         billing_cycle_days = {
             'monthly': 30,
             'quarterly': 90,
             'yearly': 365,
         }
+        if self.scheduled_plan_id:
+            self.plan = self.scheduled_plan
+            self.scheduled_plan = None
         days = billing_cycle_days.get(self.plan.billing_cycle, 30)
-        self.end_date = timezone.now() + timedelta(days=days)
+        self.end_date = max(self.end_date, timezone.now()) + timedelta(days=days)
         self.status = 'active'
         self.save()
 

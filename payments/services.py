@@ -10,8 +10,10 @@ import hmac
 import logging
 import requests
 from datetime import timedelta
+from decimal import Decimal, ROUND_HALF_UP
 
 from django.conf import settings
+from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from django.db import transaction
 
@@ -77,40 +79,198 @@ def get_plan_for_billing(plan_id: int, billing: str) -> SubscriptionPlan:
 # Tier ordering used to determine upgrade vs downgrade direction
 TIER_ORDER = {"free": 0, "basic": 1, "pro": 2, "enterprise": 3}
 
+# Proration below this is waived: the switch happens without a payment.
+MIN_CHARGE = Decimal("1.00")
+
+
+class SubscriptionChangeError(ValueError):
+    """The requested plan change isn't allowed (same plan, nothing to cancel…)."""
+
+
+def current_paid_subscription(vendor):
+    """The store's active, unexpired, paid subscription, or None."""
+    sub = (
+        VendorSubscription.objects.select_related('plan', 'scheduled_plan')
+        .filter(vendor=vendor, status='active', end_date__gt=timezone.now())
+        .order_by('-created_at')
+        .first()
+    )
+    return sub if sub and sub.plan.price > 0 else None
+
+
+def quote_change(vendor, plan: SubscriptionPlan) -> dict:
+    """
+    What moving to `plan` costs today and when it takes effect.
+
+    change_type:
+      'initial'   no paid plan yet: full price, new period starts today
+      'upgrade'   higher tier, or monthly → yearly: switch now and pay the
+                  prorated difference (unused days on the old plan are credited)
+      'downgrade' lower tier, or yearly → monthly: nothing to pay now; the
+                  switch happens at the next renewal
+      'current'   already on this plan
+
+    Same billing cycle upgrades keep the renewal date. A cycle change starts
+    a new period today; credit beyond the new price extends that period.
+    """
+    now = timezone.now()
+    new_days = BILLING_DAYS.get(plan.billing_cycle, 30)
+    sub = current_paid_subscription(vendor)
+
+    base = {
+        "plan_id": plan.id,
+        "plan_name": plan.name,
+        "billing_cycle": plan.billing_cycle,
+        "price": plan.price,
+        "credit": Decimal("0.00"),
+        "current_plan": sub.plan.name if sub else None,
+        "current_billing_cycle": sub.plan.billing_cycle if sub else None,
+    }
+
+    if sub is None:
+        return {**base, "change_type": "initial", "amount_due": plan.price,
+                "effective_date": now, "period_end": now + timedelta(days=new_days)}
+
+    old = sub.plan
+    if old.id == plan.id:
+        return {**base, "change_type": "current", "amount_due": Decimal("0.00"),
+                "effective_date": now, "period_end": sub.end_date}
+
+    old_rank, new_rank = TIER_ORDER.get(old.tier, 0), TIER_ORDER.get(plan.tier, 0)
+    old_days = BILLING_DAYS.get(old.billing_cycle, 30)
+    is_upgrade = new_rank > old_rank or (new_rank == old_rank and new_days > old_days)
+
+    if not is_upgrade:
+        return {**base, "change_type": "downgrade", "amount_due": Decimal("0.00"),
+                "effective_date": sub.end_date,
+                "period_end": sub.end_date + timedelta(days=new_days)}
+
+    remaining = max((sub.end_date - now).total_seconds(), 0)
+    fraction = Decimal(str(min(remaining / (old_days * 86400), 1)))
+    credit = (old.price * fraction).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    if old.billing_cycle == plan.billing_cycle:
+        amount = ((plan.price - old.price) * fraction).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        period_end = sub.end_date
+    else:
+        amount = plan.price - credit
+        period_end = now + timedelta(days=new_days)
+        if amount < 0:
+            # Leftover credit buys extra days on the new plan.
+            extra_days = float(-amount / plan.price) * new_days
+            period_end += timedelta(days=extra_days)
+            amount = Decimal("0.00")
+
+    if amount < MIN_CHARGE:
+        amount = Decimal("0.00")
+
+    return {**base, "change_type": "upgrade", "credit": credit, "amount_due": amount,
+            "effective_date": now, "period_end": period_end}
+
+
+def schedule_downgrade(vendor, plan: SubscriptionPlan) -> VendorSubscription:
+    """Queue `plan` for the next renewal. Re-enables renewal if it was off."""
+    with transaction.atomic():
+        sub = (VendorSubscription.objects.select_for_update()
+               .filter(pk=current_paid_subscription(vendor).pk).first())
+        sub.scheduled_plan = plan
+        sub.auto_renew = True
+        sub.cancelled_at = None
+        sub.save(update_fields=['scheduled_plan', 'auto_renew', 'cancelled_at', 'updated_at'])
+    return sub
+
+
+def clear_scheduled_change(vendor) -> VendorSubscription:
+    sub = current_paid_subscription(vendor)
+    if not sub or not sub.scheduled_plan_id:
+        raise SubscriptionChangeError("There is no scheduled plan change.")
+    sub.scheduled_plan = None
+    sub.save(update_fields=['scheduled_plan', 'updated_at'])
+    return sub
+
+
+def resume_subscription(vendor) -> VendorSubscription:
+    sub = current_paid_subscription(vendor)
+    if not sub or not sub.cancel_at_period_end:
+        raise SubscriptionChangeError("There is no cancelled subscription to resume.")
+    sub.resume()
+    return sub
+
+
+def _switch_plan_without_payment(vendor, plan, quote) -> dict:
+    """An upgrade fully covered by credit: switch now and log a zero-amount record."""
+    with transaction.atomic():
+        Vendor.objects.select_for_update().get(pk=vendor.pk)
+        sub = current_paid_subscription(vendor)
+        sub.plan = plan
+        sub.end_date = quote["period_end"]
+        sub.scheduled_plan = None
+        sub.auto_renew = True
+        sub.cancelled_at = None
+        sub.save()
+        PaymentTransaction.objects.create(
+            vendor=vendor, subscription=sub, transaction_type='upgrade',
+            amount=Decimal("0.00"), currency='GHS', status='success',
+            paystack_reference=_generate_reference(vendor, "UPG"), paid_at=timezone.now(),
+        )
+        _sync_vendor_flags(vendor)
+    return {"activated": True, "plan": plan.name, "end_date": sub.end_date.isoformat()}
+
+
+def prepare_plan_change(vendor, plan_id: int, billing: str):
+    """
+    Shared front half of every checkout (Paystack, MoMo, saved card).
+    Returns (plan, quote, early_result). When early_result is set the change
+    needed no payment and has already been applied.
+    """
+    plan = get_plan_for_billing(plan_id, billing)
+
+    if plan.price == 0:
+        if current_paid_subscription(vendor):
+            raise SubscriptionChangeError(
+                "To move to the Free plan, cancel your subscription. "
+                "You keep your current plan until the end of the period."
+            )
+        return plan, None, _activate_free_plan(vendor, plan)
+
+    quote = quote_change(vendor, plan)
+    if quote["change_type"] == "current":
+        raise SubscriptionChangeError("You're already on this plan.")
+    if quote["change_type"] == "downgrade":
+        sub = schedule_downgrade(vendor, plan)
+        return plan, quote, {
+            "scheduled": True, "plan": plan.name,
+            "effective_date": sub.end_date.isoformat(),
+        }
+    if quote["amount_due"] == 0 and quote["change_type"] == "upgrade":
+        return plan, quote, _switch_plan_without_payment(vendor, plan, quote)
+    return plan, quote, None
+
+
+def payment_metadata(vendor, plan, billing, quote, **extra) -> dict:
+    """Metadata carried through Paystack so activation applies the quoted period."""
+    return {
+        "vendor_id": str(vendor.id),
+        "plan_id": str(plan.id),
+        "billing": billing,
+        "transaction_type": quote["change_type"],
+        "period_end": quote["period_end"].isoformat(),
+        **extra,
+    }
+
 
 def initiate_subscription(vendor, plan_id: int, billing: str) -> dict:
     """
     Called when vendor clicks "Subscribe now".
-    1. Resolves the correct plan
-    2. Detects whether this is a new subscription, upgrade, or downgrade
-    3. Creates a pending PaymentTransaction with the correct type
-    4. Calls Paystack /transaction/initialize
-    5. Returns the authorization_url + upgrade_info for the frontend confirmation message
+    Downgrades are scheduled and fully-credited upgrades applied straight
+    away (no Paystack). Everything else gets a Paystack checkout for the
+    quoted amount.
     """
-    plan = get_plan_for_billing(plan_id, billing)
+    plan, quote, early = prepare_plan_change(vendor, plan_id, billing)
+    if early:
+        return early
 
-    # Free plan — activate immediately, no payment needed
-    if plan.price == 0:
-        return _activate_free_plan(vendor, plan)
-
-    # ── Detect subscription change type ──────────────────────────────────
-    existing_sub = VendorSubscription.objects.filter(
-        vendor=vendor, status='active'
-    ).select_related('plan').first()
-
-    if existing_sub and existing_sub.plan.tier != 'free':
-        old_tier_rank = TIER_ORDER.get(existing_sub.plan.tier, 0)
-        new_tier_rank = TIER_ORDER.get(plan.tier, 0)
-        if new_tier_rank > old_tier_rank:
-            txn_type = 'upgrade'
-        elif new_tier_rank < old_tier_rank:
-            txn_type = 'downgrade'
-        else:
-            # Same tier, different billing cycle (e.g. monthly → yearly)
-            txn_type = 'upgrade'
-    else:
-        txn_type = 'initial'
-
+    txn_type = quote["change_type"]
     reference = _generate_reference(vendor, "SUB")
 
     # Create pending transaction record before going to Paystack
@@ -118,7 +278,7 @@ def initiate_subscription(vendor, plan_id: int, billing: str) -> dict:
     transaction_obj = PaymentTransaction.objects.create(
         vendor=vendor,
         transaction_type=txn_type,
-        amount=plan.price,
+        amount=quote["amount_due"],
         currency='GHS',
         status='pending',
         paystack_reference=reference,
@@ -126,16 +286,12 @@ def initiate_subscription(vendor, plan_id: int, billing: str) -> dict:
 
     payload = {
         "email": vendor.email,
-        "amount": int(plan.price * 100),   # Paystack uses pesewas
+        "amount": int(quote["amount_due"] * 100),   # Paystack uses pesewas
         "reference": reference,
         "callback_url": f"{settings.SITE_URL}/subscription/verify/?ref={reference}",
-        "metadata": {
-            "vendor_id": str(vendor.id),
-            "plan_id": str(plan.id),
-            "billing": billing,
-            "transaction_db_id": str(transaction_obj.id),
-            "transaction_type": txn_type,
-        },
+        "metadata": payment_metadata(
+            vendor, plan, billing, quote, transaction_db_id=str(transaction_obj.id),
+        ),
         "channels": ["card", "mobile_money", "bank_transfer"],
     }
 
@@ -159,16 +315,6 @@ def initiate_subscription(vendor, plan_id: int, billing: str) -> dict:
             "transaction_type": txn_type,
         }
 
-        # Include context for the frontend confirmation message on upgrades/downgrades
-        if txn_type in ('upgrade', 'downgrade') and existing_sub:
-            result["upgrade_info"] = {
-                "from_plan": existing_sub.plan.name,
-                "to_plan": plan.name,
-                "charged_today": str(plan.price),
-                "current_plan_ends_now": True,
-                "new_plan_starts_today": True,
-            }
-
         return result
 
     except Exception as e:
@@ -178,6 +324,59 @@ def initiate_subscription(vendor, plan_id: int, billing: str) -> dict:
         transaction_obj.save()
         logger.error(f"Paystack initiate failed for vendor {vendor.id}: {e}")
         raise
+
+
+def charge_saved_card(vendor, plan_id: int, billing: str, card_id: int) -> dict:
+    """
+    Subscribe or upgrade by charging a card the store already saved — no
+    redirect to Paystack. Activation goes through verify_and_activate so it
+    shares the idempotency and locking of the redirect flow.
+    """
+    card = PaystackAuthorization.objects.filter(
+        pk=card_id, vendor=vendor, is_reusable=True,
+    ).first()
+    if not card:
+        raise SubscriptionChangeError("That card is no longer available. Choose another card.")
+
+    plan, quote, early = prepare_plan_change(vendor, plan_id, billing)
+    if early:
+        return early
+
+    reference = _generate_reference(vendor, "SUB")
+    txn = PaymentTransaction.objects.create(
+        vendor=vendor, authorization=card, transaction_type=quote["change_type"],
+        amount=quote["amount_due"], currency='GHS', status='pending',
+        paystack_reference=reference,
+    )
+
+    try:
+        response = requests.post(
+            f"{PAYSTACK_BASE}/transaction/charge_authorization",
+            json={
+                "authorization_code": card.authorization_code,
+                "email": vendor.email,
+                "amount": int(quote["amount_due"] * 100),
+                "reference": reference,
+                "metadata": payment_metadata(vendor, plan, billing, quote, transaction_db_id=str(txn.id)),
+            },
+            headers=PAYSTACK_HEADERS,
+            timeout=20,
+        )
+        ps_data = response.json().get("data") or {}
+    except Exception as exc:
+        txn.status, txn.failure_reason = 'failed', str(exc)
+        txn.save(update_fields=['status', 'failure_reason'])
+        logger.error(f"Saved-card charge failed for vendor {vendor.id}: {exc}")
+        raise SubscriptionChangeError("We couldn't reach the payment provider. Please try again.")
+
+    if ps_data.get("status") != "success":
+        reason = ps_data.get("gateway_response") or "The card was declined."
+        txn.status, txn.failure_reason = 'failed', reason
+        txn.save(update_fields=['status', 'failure_reason'])
+        raise SubscriptionChangeError(f"{reason} Try another card or Mobile Money.")
+
+    result = verify_and_activate(reference)
+    return {**result, "activated": True, "reference": reference}
 
 
 def _activate_free_plan(vendor, plan: SubscriptionPlan) -> dict:
@@ -324,14 +523,13 @@ def verify_and_activate(reference: str) -> dict:
             logger.info(f'verify_and_activate: cancelled {cancelled} sub(s) for vendor {vendor.id}')
 
         # ── Create new active subscription ────────────────────────────────────
-        days = BILLING_DAYS.get(billing, 30)
         try:
             sub = VendorSubscription.objects.create(
                 vendor=vendor,
                 plan=plan,
                 status='active',
                 start_date=timezone.now(),
-                end_date=timezone.now() + timedelta(days=days),
+                end_date=period_end_from(meta, billing),
                 auto_renew=True,
                 payment_reference=reference,
             )
@@ -398,9 +596,10 @@ def charge_for_renewal(subscription_id: int) -> dict:
     from django.utils import timezone
     from datetime import timedelta
 
-    sub    = VendorSubscription.objects.select_related('vendor', 'plan').get(pk=subscription_id)
+    sub    = VendorSubscription.objects.select_related('vendor', 'plan', 'scheduled_plan').get(pk=subscription_id)
     vendor = sub.vendor
-    plan   = sub.plan
+    # A scheduled downgrade takes effect at this renewal: charge its price.
+    plan   = sub.scheduled_plan or sub.plan
 
     # ── Idempotency: already renewed today? ───────────────────────────────────
     today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -637,11 +836,13 @@ def cancel_subscription(vendor, reason: str = "") -> VendorSubscription:
     """
     with transaction.atomic():
         sub = VendorSubscription.objects.filter(
-            vendor=vendor, status='active'
+            vendor=vendor, status='active', plan__price__gt=0, end_date__gt=timezone.now(),
         ).select_for_update().first()
 
         if not sub:
-            raise Exception("No active subscription found.")
+            raise SubscriptionChangeError("No active paid subscription found.")
+        if sub.cancel_at_period_end:
+            raise SubscriptionChangeError("This subscription is already cancelled.")
 
         sub.cancel(reason=reason)
 
@@ -886,6 +1087,13 @@ def _webhook_charge_success(data: dict) -> str:
     if not txn:
         return f"charge.success: unknown reference {reference}"
 
+    # MoMo renewals are started by Celery, so nobody is polling for them:
+    # the webhook is what extends the subscription once the seller approves.
+    if txn.transaction_type == 'renewal' and txn.subscription_id and txn.status != 'success':
+        from .momo_services import _apply_momo_renewal
+        _apply_momo_renewal(reference, {'sub_id': txn.subscription_id})
+        return f"charge.success: renewal applied {reference}"
+
     if txn.status != 'success':
         txn.status = 'success'
         txn.paystack_transaction_id = str(data.get("id", ""))
@@ -925,6 +1133,18 @@ def _webhook_refund_processed(data: dict) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # Internal helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+def period_end_from(meta: dict, billing: str):
+    """
+    End date for a newly paid subscription: the quoted period_end carried in
+    the payment metadata (prorated upgrades keep the old renewal date), or a
+    full billing period from now for older payments without one.
+    """
+    period_end = parse_datetime(meta.get("period_end") or "") if meta else None
+    if period_end and period_end > timezone.now():
+        return period_end
+    return timezone.now() + timedelta(days=BILLING_DAYS.get(billing, 30))
+
 
 def _generate_reference(vendor, prefix: str) -> str:
     uid = uuid.uuid4().hex[:10].upper()

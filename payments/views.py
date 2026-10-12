@@ -396,6 +396,8 @@ class InitiateSubscriptionView(APIView):
                 billing=serializer.validated_data["billing"],
             )
             return Response(result, status=status.HTTP_200_OK)
+        except services.SubscriptionChangeError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.error(f"InitiateSubscription error: {e}")
             return Response(
@@ -529,12 +531,135 @@ class AutoRenewToggleView(APIView):
         if not sub:
             return Response({"error": "No active subscription."}, status=status.HTTP_404_NOT_FOUND)
 
-        sub.auto_renew = serializer.validated_data["auto_renew"]
-        sub.save(update_fields=["auto_renew"])
+        if serializer.validated_data["auto_renew"]:
+            # Turning renewal back on also undoes a pending cancellation.
+            sub.resume()
+        else:
+            # Without a renewal, a scheduled downgrade can't take effect.
+            sub.auto_renew = False
+            sub.scheduled_plan = None
+            sub.save(update_fields=["auto_renew", "scheduled_plan", "updated_at"])
 
         return Response({
             "auto_renew": sub.auto_renew,
             "message": "Auto-renewal updated.",
+        })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6b. Plan changes: quote, saved-card checkout, resume, scheduled downgrade
+# ─────────────────────────────────────────────────────────────────────────────
+
+class PlanChangeQuoteView(APIView):
+    """
+    GET /api/v1/payments/quote/?plan_id=3&billing=monthly
+    What switching to this plan costs today and when it takes effect, so the
+    checkout can show the real amount before the seller pays.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        serializer = InitiateSubscriptionSerializer(data=request.query_params)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        vendor = get_finance_vendor(request)
+        if not vendor:
+            return Response({"error": "No vendor account."}, status=status.HTTP_403_FORBIDDEN)
+
+        plan = services.get_plan_for_billing(
+            serializer.validated_data["plan_id"], serializer.validated_data["billing"],
+        )
+        if plan.price == 0:
+            sub = services.current_paid_subscription(vendor)
+            return Response({
+                "plan_id": plan.id, "plan_name": plan.name, "billing_cycle": plan.billing_cycle,
+                "change_type": "cancel" if sub else "initial",
+                "price": "0.00", "credit": "0.00", "amount_due": "0.00",
+                "current_plan": sub.plan.name if sub else None,
+                "current_billing_cycle": sub.plan.billing_cycle if sub else None,
+                "effective_date": sub.end_date if sub else None,
+                "period_end": None,
+            })
+
+        quote = services.quote_change(vendor, plan)
+        return Response({
+            **quote,
+            "price": str(quote["price"]),
+            "credit": str(quote["credit"]),
+            "amount_due": str(quote["amount_due"]),
+        })
+
+
+class ChargeSavedCardView(APIView):
+    """
+    POST /api/v1/payments/charge-card/
+    Body: { plan_id, billing, card_id }
+    Charges a saved card directly — no Paystack redirect.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = InitiateSubscriptionSerializer(data=request.data)
+        card_id = request.data.get("card_id")
+        if not serializer.is_valid() or not card_id:
+            errors = dict(serializer.errors) if not serializer.is_valid() else {}
+            if not card_id:
+                errors["card_id"] = ["This field is required."]
+            return Response(errors, status=status.HTTP_400_BAD_REQUEST)
+
+        vendor = get_finance_vendor(request)
+        if not vendor:
+            return Response({"error": "No vendor account."}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            result = services.charge_saved_card(
+                vendor, serializer.validated_data["plan_id"],
+                serializer.validated_data["billing"], int(card_id),
+            )
+            return Response(result, status=status.HTTP_200_OK)
+        except services.SubscriptionChangeError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"ChargeSavedCard error vendor={vendor.id}: {e}", exc_info=True)
+            return Response(
+                {"error": "Payment could not be confirmed. Check Billing history before trying again."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class ResumeSubscriptionView(APIView):
+    """POST /api/v1/payments/resume/ — undo a cancellation before the period ends."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        vendor = get_finance_vendor(request)
+        if not vendor:
+            return Response({"error": "No vendor account."}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            sub = services.resume_subscription(vendor)
+        except services.SubscriptionChangeError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            "message": "Your subscription will renew as normal.",
+            "subscription": ActiveSubscriptionSerializer(sub).data,
+        })
+
+
+class ScheduledChangeView(APIView):
+    """DELETE /api/v1/payments/scheduled-change/ — keep the current plan after all."""
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request):
+        vendor = get_finance_vendor(request)
+        if not vendor:
+            return Response({"error": "No vendor account."}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            sub = services.clear_scheduled_change(vendor)
+        except services.SubscriptionChangeError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            "message": "Scheduled plan change removed.",
+            "subscription": ActiveSubscriptionSerializer(sub).data,
         })
 
 

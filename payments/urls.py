@@ -55,6 +55,10 @@ urlpatterns = [
         views.AutoRenewToggleView.as_view(),
         name="subscription-auto-renew",
     ),
+    path("quote/", views.PlanChangeQuoteView.as_view(), name="subscription-quote"),
+    path("charge-card/", views.ChargeSavedCardView.as_view(), name="subscription-charge-card"),
+    path("resume/", views.ResumeSubscriptionView.as_view(), name="subscription-resume"),
+    path("scheduled-change/", views.ScheduledChangeView.as_view(), name="subscription-scheduled-change"),
 
     # ── Billing history ──────────────────────────────────────────────────────
     path(

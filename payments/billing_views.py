@@ -44,8 +44,10 @@ def _get_vendor(request):
 def _active_sub(vendor):
     return (
         VendorSubscription.objects
-        .filter(vendor=vendor, status__in=['active', 'trial'])
-        .select_related('plan')
+        # past_due included so the overview can offer "Pay now".
+        .filter(vendor=vendor, status__in=['active', 'trial', 'past_due'])
+        .select_related('plan', 'scheduled_plan')
+        .order_by('-created_at')
         .first()
     )
 

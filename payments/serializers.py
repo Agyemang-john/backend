@@ -57,6 +57,8 @@ class SubscriptionPlanSerializer(serializers.ModelSerializer):
             'commission_rate',
             'commission_display',
             'payout_delay_days',
+            'max_team_members',
+            'can_export_reports',
             # Metadata
             'is_active',
             'is_recommended',
@@ -137,6 +139,16 @@ class PaystackCustomerSerializer(serializers.ModelSerializer):
 # Vendor Subscription
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _scheduled_plan_data(obj):
+    plan = obj.scheduled_plan
+    if not plan:
+        return None
+    return {
+        'id': plan.id, 'name': plan.name, 'tier': plan.tier,
+        'billing_cycle': plan.billing_cycle, 'price': str(plan.price),
+    }
+
+
 class VendorSubscriptionSerializer(serializers.ModelSerializer):
     """
     Full subscription record — used in dashboard, renewal checks, etc.
@@ -154,6 +166,8 @@ class VendorSubscriptionSerializer(serializers.ModelSerializer):
     is_active = serializers.SerializerMethodField()
     is_on_trial = serializers.SerializerMethodField()
     renewal_amount = serializers.SerializerMethodField()
+    cancel_at_period_end = serializers.BooleanField(read_only=True)
+    scheduled_plan = serializers.SerializerMethodField()
 
     class Meta:
         model = VendorSubscription
@@ -174,6 +188,8 @@ class VendorSubscriptionSerializer(serializers.ModelSerializer):
             'is_active',
             'is_on_trial',
             'renewal_amount',
+            'cancel_at_period_end',
+            'scheduled_plan',
             'created_at',
             'updated_at',
         ]
@@ -192,7 +208,10 @@ class VendorSubscriptionSerializer(serializers.ModelSerializer):
         return obj.is_on_trial()
 
     def get_renewal_amount(self, obj):
-        return float(obj.plan.price)
+        return float((obj.scheduled_plan or obj.plan).price)
+
+    def get_scheduled_plan(self, obj):
+        return _scheduled_plan_data(obj)
 
 
 class ActiveSubscriptionSerializer(serializers.ModelSerializer):
@@ -205,16 +224,22 @@ class ActiveSubscriptionSerializer(serializers.ModelSerializer):
     plan_tier         = serializers.CharField(source='plan.tier', read_only=True)
     plan_billing_cycle = serializers.CharField(source='plan.billing_cycle', read_only=True)
     days_remaining    = serializers.SerializerMethodField()
+    cancel_at_period_end = serializers.BooleanField(read_only=True)
+    scheduled_plan    = serializers.SerializerMethodField()
 
     class Meta:
         model = VendorSubscription
         fields = [
             'id', 'plan_name', 'plan_tier', 'plan_billing_cycle',
             'status', 'end_date', 'auto_renew', 'days_remaining',
+            'cancel_at_period_end', 'scheduled_plan',
         ]
 
     def get_days_remaining(self, obj):
         return obj.days_remaining()
+
+    def get_scheduled_plan(self, obj):
+        return _scheduled_plan_data(obj)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

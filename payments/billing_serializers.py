@@ -43,6 +43,9 @@ class BillingSubscriptionSerializer(serializers.ModelSerializer):
     is_active       = serializers.SerializerMethodField()
     status_display  = serializers.CharField(source='get_status_display')
     next_billing_date = serializers.SerializerMethodField()
+    cancel_at_period_end = serializers.BooleanField(read_only=True)
+    scheduled_plan  = BillingPlanSerializer(read_only=True)
+    renewal_amount  = serializers.SerializerMethodField()
 
     class Meta:
         model  = VendorSubscription
@@ -51,8 +54,12 @@ class BillingSubscriptionSerializer(serializers.ModelSerializer):
             'start_date', 'end_date', 'trial_end_date',
             'auto_renew', 'cancelled_at', 'cancellation_reason',
             'payment_reference', 'days_remaining', 'is_active',
-            'next_billing_date',
+            'next_billing_date', 'cancel_at_period_end',
+            'scheduled_plan', 'renewal_amount',
         ]
+
+    def get_renewal_amount(self, obj):
+        return str((obj.scheduled_plan or obj.plan).price)
 
     def get_days_remaining(self, obj):
         return obj.days_remaining()
