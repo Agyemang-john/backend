@@ -1,6 +1,7 @@
 from django import forms
 from django.contrib.admin.helpers import ActionForm
 from django.db.models import Count, Q
+from django.utils.html import escape
 from django.utils.safestring import mark_safe
 from django.contrib import admin
 
@@ -374,36 +375,121 @@ class OccasionSectionInline(admin.TabularInline):
     model = OccasionSection
     extra = 1
     autocomplete_fields = ['collection']
-    fields = ['title', 'collection', 'position']
+    fields = ['title', 'collection', 'position', 'accent_color', 'is_generated']
+    readonly_fields = ['is_generated']
+
+
+def _curate_after_commit(**kwargs):
+    from django.db import transaction
+    from product.tasks import curate_collections
+    transaction.on_commit(lambda: curate_collections.delay(**kwargs))
 
 
 @admin.register(Occasion)
 class OccasionAdmin(admin.ModelAdmin):
-    list_display  = ['title', 'icon', 'is_active', 'start_date', 'end_date', 'position']
+    list_display  = ['title', 'icon', 'is_active', 'auto_sections', 'color_mode', 'start_date', 'end_date',
+                     'event', 'position']
     list_editable = ['is_active', 'position']
-    list_filter   = ['is_active']
+    list_filter   = ['is_active', 'auto_sections', 'color_mode', 'event']
     search_fields = ['title', 'slug']
     prepopulated_fields = {'slug': ('title',)}
+    autocomplete_fields = ['auto_categories']
+    filter_horizontal = ['countries']
+    readonly_fields = ['last_rotated_at', 'event']
     inlines = [OccasionSectionInline]
+    actions = ['rebuild_now']
     fieldsets = (
-        (None,         {'fields': ('title', 'slug', 'subtitle', 'icon', 'accent_color')}),
-        ('Scheduling', {'fields': ('is_active', 'start_date', 'end_date', 'position')}),
+        (None,         {'fields': ('title', 'slug', 'subtitle', 'icon', 'accent_color', 'color_mode')}),
+        ('Scheduling', {'fields': ('is_active', 'start_date', 'end_date', 'position', 'event')}),
+        ('Countries', {'fields': ('countries',)}),
+        ('Automatic sections', {
+            'description': 'The curator picks the card themes from your catalogue and changes them '
+                           'every few days (one card at a time). Hand-made sections above stay and '
+                           'count toward the total.',
+            'fields': ('auto_sections', 'auto_section_count', 'auto_categories', 'auto_keywords',
+                       'rotation_days', 'last_rotated_at'),
+        }),
     )
+
+    def save_related(self, request, form, formsets, change):
+        super().save_related(request, form, formsets, change)
+        obj = form.instance
+        if obj.auto_sections or obj.sections.filter(collection__filter_type='auto').exists():
+            _curate_after_commit(occasion_slug=obj.slug)
+
+    @admin.action(description='Rebuild now (new themes, products and colours)')
+    def rebuild_now(self, request, queryset):
+        for occasion in queryset:
+            _curate_after_commit(force=True, occasion_slug=occasion.slug)
+        self.message_user(request, f'Rebuilding {queryset.count()} occasion(s) in the background.')
+
+
+@admin.register(SeasonalEvent)
+class SeasonalEventAdmin(admin.ModelAdmin):
+    list_display  = ['title', 'rule', 'next_date', 'lead_days', 'days_after', 'country_list', 'is_enabled']
+    list_editable = ['is_enabled']
+    list_filter   = ['is_enabled', 'rule', 'countries']
+    search_fields = ['title', 'slug', 'keywords']
+    prepopulated_fields = {'slug': ('title',)}
+    autocomplete_fields = ['categories']
+    filter_horizontal = ['countries']
+    actions = ['open_now']
+    fieldsets = (
+        (None, {'fields': ('title', 'slug', 'subtitle', 'icon', 'is_enabled', 'position')}),
+        ('When', {
+            'description': 'Fixed: month + day. Nth weekday: month + weekday + nth (-1 = last). '
+                           'Easter: nothing else needed. Listed dates: one per year, for moving holidays. '
+                           'Offset shifts any of them (Black Friday = 4th Thursday of November, offset +1).',
+            'fields': ('rule', ('month', 'day'), ('weekday', 'nth'), 'offset_days', 'dates',
+                       ('lead_days', 'days_after')),
+        }),
+        ('Where', {'fields': ('countries',)}),
+        ('What to show', {'fields': ('keywords', 'categories', 'section_count', 'rotation_days',
+                                     'color_mode', 'accent_color')}),
+    )
+
+    @admin.display(description='Next date')
+    def next_date(self, obj):
+        from django.utils import timezone
+        return obj.next_date(timezone.now().date()) or '— add a date'
+
+    @admin.display(description='Countries')
+    def country_list(self, obj):
+        return ', '.join(c.code or c.name for c in obj.countries.all()) or 'Everywhere'
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).prefetch_related('countries')
+
+    @admin.action(description="Open this year's occasion now if it's in season")
+    def open_now(self, request, queryset):
+        _curate_after_commit()
+        self.message_user(request, 'Checking the calendar and curating in the background.')
 
 
 @admin.register(Collection)
 class CollectionAdmin(admin.ModelAdmin):
-    list_display  = ['title', 'slug', 'filter_type', 'is_active', 'created_at']
-    list_filter   = ['filter_type', 'is_active']
+    list_display  = ['title', 'slug', 'filter_type', 'is_active', 'is_locked', 'last_curated_at', 'next_rotation_at']
+    list_filter   = ['filter_type', 'is_active', 'is_generated']
     list_editable = ['is_active']
     search_fields = ['title', 'slug']
     prepopulated_fields = {'slug': ('title',)}
-    autocomplete_fields = ['sub_category']
+    autocomplete_fields = ['sub_category', 'auto_categories', 'auto_sub_categories',
+                           'pinned_products', 'excluded_products']
     filter_horizontal = ['products']
+    readonly_fields = ['last_curated_at', 'curated_preview']
+    actions = ['curate_now']
     fieldsets = (
         (None, {'fields': ('title', 'slug', 'subtitle', 'description', 'is_active')}),
         ('Appearance', {'fields': ('banner_image', 'accent_color', 'icon')}),
         ('Product Source', {'fields': ('filter_type', 'sub_category', 'products')}),
+        ('Auto-curation (filter type "Auto")', {
+            'description': 'The curator scores every published, in-stock product against this recipe '
+                           'nightly, reshuffles every few days and swaps out sold-out items in between.',
+            'fields': ('auto_categories', 'auto_sub_categories', 'auto_keywords', 'auto_strategy',
+                       'auto_min_discount', ('auto_min_price', 'auto_max_price'), 'auto_size',
+                       'max_per_vendor', 'rotation_days', 'pinned_products', 'excluded_products',
+                       'is_locked', 'last_curated_at', 'next_rotation_at', 'curated_preview'),
+        }),
     )
 
     def formfield_for_manytomany(self, db_field, request, **kwargs):
@@ -411,6 +497,33 @@ class CollectionAdmin(admin.ModelAdmin):
         if db_field.name == 'products':
             kwargs['queryset'] = Product.objects.only('id', 'title').order_by('title')
         return super().formfield_for_manytomany(db_field, request, **kwargs)
+
+    @admin.display(description='Current picks')
+    def curated_preview(self, obj):
+        if not obj.pk or obj.filter_type != 'auto' or not obj.curated_product_ids:
+            return '—'
+        titles = dict(Product.objects.filter(id__in=obj.curated_product_ids).values_list('id', 'title'))
+        items = ''.join(f'<li>{escape(titles[pid])}</li>' for pid in obj.curated_product_ids if pid in titles)
+        return mark_safe(f'<ol style="margin:0;padding-left:18px">{items}</ol>')
+
+    def save_related(self, request, form, formsets, change):
+        super().save_related(request, form, formsets, change)
+        obj = form.instance
+        if obj.filter_type == 'auto' and not obj.is_locked and not obj.curated_product_ids:
+            _curate_after_commit()
+
+    @admin.action(description='Re-curate now (fresh picks)')
+    def curate_now(self, request, queryset):
+        from product.curation import CandidatePool, bump_occasions_cache, curate_collection
+        from django.utils import timezone
+        now = timezone.now()
+        pool = CandidatePool.load(now)
+        count = 0
+        for collection in queryset.filter(filter_type='auto'):
+            curate_collection(collection, pool, now, force=True)
+            count += 1
+        bump_occasions_cache()
+        self.message_user(request, f'Re-curated {count} auto collection(s).')
 
 
 # ─────────────────────────────────────────────────────────────────────────────

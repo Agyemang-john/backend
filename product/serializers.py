@@ -590,10 +590,14 @@ class OccasionProductSerializer(serializers.ModelSerializer):
 class OccasionSectionSerializer(serializers.ModelSerializer):
     collection_slug = serializers.SerializerMethodField()
     products        = serializers.SerializerMethodField()
+    accent_color    = serializers.SerializerMethodField()
 
     class Meta:
         model = OccasionSection
-        fields = ['id', 'title', 'collection_slug', 'products']
+        fields = ['id', 'title', 'collection_slug', 'accent_color', 'products']
+
+    def get_accent_color(self, obj):
+        return obj.accent_color or obj.occasion.accent_color
 
     def get_collection_slug(self, obj):
         return obj.collection.slug if obj.collection else None
@@ -601,7 +605,12 @@ class OccasionSectionSerializer(serializers.ModelSerializer):
     def get_products(self, obj):
         if not obj.collection:
             return []
-        qs = list(obj.collection.get_products_qs()[:4])
+        qs = obj.collection.get_products_qs()
+        country = self.context.get('country')
+        if country:
+            from product.regions import available_in
+            qs = available_in(qs, country)
+        qs = list(qs[:4])
         return OccasionProductSerializer(qs, many=True, context=self.context).data
 
 

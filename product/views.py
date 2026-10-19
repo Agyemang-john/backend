@@ -1115,8 +1115,13 @@ class OccasionListAPIView(APIView):
 
     def get(self, request):
         from django.db.models import Q as Qm
+        from product.curation import OCCASIONS_CACHE_VERSION_KEY
+        from product.regions import storefront_country
         today = timezone.now().date()
-        cache_key = f'occasions_list_{request.headers.get("X-Currency","GHS")}'
+        country = storefront_country(request)
+        # The curator bumps the version after each run so new cards show at once.
+        version = cache.get(OCCASIONS_CACHE_VERSION_KEY, 0)
+        cache_key = f'occasions_list_{version}_{country}_{request.headers.get("X-Currency","GHS")}'
         cached = cache.get(cache_key)
         if cached:
             return Response(cached)
@@ -1125,13 +1130,15 @@ class OccasionListAPIView(APIView):
             Qm(start_date__isnull=True) | Qm(start_date__lte=today)
         ).filter(
             Qm(end_date__isnull=True) | Qm(end_date__gte=today)
-        ).prefetch_related(
+        ).filter(
+            Qm(countries__isnull=True) | Qm(countries__code__iexact=country)
+        ).distinct().prefetch_related(
             Prefetch(
                 'sections',
                 queryset=OccasionSection.objects.select_related('collection').order_by('position')
             )
         )
-        data = OccasionSerializer(qs, many=True, context={'request': request}).data
+        data = OccasionSerializer(qs, many=True, context={'request': request, 'country': country}).data
         cache.set(cache_key, data, 60 * 30)
         return Response(data)
 
@@ -1163,7 +1170,9 @@ class CollectionAPIView(APIView):
         min_price = Decimal(str(raw_from)) if raw_from else None
         max_price = Decimal(str(raw_to))   if raw_to   else None
 
-        base_qs = collection.get_products_qs().select_related(
+        from product.regions import available_in, storefront_country
+        country = storefront_country(request)
+        base_qs = available_in(collection.get_products_qs(), country).select_related(
             'vendor', 'brand', 'sub_category'
         ).prefetch_related(
             Prefetch(
@@ -1203,7 +1212,8 @@ class CollectionAPIView(APIView):
 
         sort = request.GET.get('sort', 'featured')
         _sort_map = {'price_asc': 'price', 'price_desc': '-price', 'rating': '-avg_rating', 'newest': '-date'}
-        filtered = filtered.order_by(_sort_map.get(sort, '-date'))
+        if not (sort == 'featured' and collection.filter_type == 'auto'):  # keep the curator's ranking
+            filtered = filtered.order_by(_sort_map.get(sort, '-date'))
 
         PAGE_SIZE = 12
         total_items = filtered.count()
@@ -1230,7 +1240,9 @@ class CollectionAPIView(APIView):
             })
 
         # Sidebar filter options from the unfiltered base
-        filter_cache_key = f"collection_filters:{slug}"
+        # Per country (the product set differs) and per curation (auto collections change overnight).
+        curated = int(collection.last_curated_at.timestamp()) if collection.last_curated_at else 0
+        filter_cache_key = f"collection_filters:{slug}:{country}:{curated}"
         filter_options = cache.get(filter_cache_key)
         if not filter_options:
             sizes   = list(Size.objects.filter(variants__product__in=base_qs).distinct().values('id', 'name'))

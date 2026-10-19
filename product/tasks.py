@@ -698,3 +698,10 @@ def send_review_reminder(self, reminder_ids):
             mark_failed(reminder_ids, exc)
             return []
         raise self.retry(exc=exc)
+
+
+@shared_task(ignore_result=True, soft_time_limit=1800)
+def curate_collections(force=False, occasion_slug=None):
+    """Nightly occasion/collection curator — see product/curation.py."""
+    from .curation import run
+    return run(force=force, occasion_slug=occasion_slug)

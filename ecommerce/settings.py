@@ -418,6 +418,10 @@ RAVEN_SERVICE_CODE = config("RAVEN_SERVICE_CODE", default="STANDARD")
 RAVEN_TRACKING_URL = config("RAVEN_TRACKING_URL", default="")
 RAVEN_TIMEOUT_SECONDS = config("RAVEN_TIMEOUT_SECONDS", default=15, cast=int)
 
+# Country assumed for storefront requests that carry no X-Country / CDN geo
+# header (product/regions.py) — decides which country-targeted occasions show.
+STOREFRONT_DEFAULT_COUNTRY = config("STOREFRONT_DEFAULT_COUNTRY", default="GH")
+
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_TIMEZONE = "UTC"
@@ -549,6 +553,15 @@ CELERY_BEAT_SCHEDULE = {
     "seller-payouts": {
         "task": "payments.tasks.run_seller_payouts",
         "schedule": crontab(hour=3, minute=0, day_of_week="tue,fri"),
+    },
+    # Curate auto collections and occasion cards (product/curation.py). 04:00 UTC
+    # — dawn in Ghana, after the 02:30 recommender retrain and the 04:00 deal
+    # rescore have refreshed the signals it ranks by. Each card reshuffles every
+    # few days on its own staggered night; other nights only swap out dead products.
+    "curate-collections": {
+        "task": "product.tasks.curate_collections",
+        "schedule": crontab(hour=4, minute=5),
+        "options": {"expires": 3 * 3600},
     },
     # Delete review photos/videos uploaded but never attached to a review.
     "cleanup-orphan-review-media": {
@@ -713,6 +726,7 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
     "X-Visitor-ID",
     "X-Guest-Cart",
     "X-Currency",
+    "X-Country",
     "X-Device",
     "X-Search-History",
     "X-Recently-Viewed",

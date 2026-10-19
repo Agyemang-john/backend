@@ -1028,6 +1028,15 @@ class Collection(models.Model):
         ('sub_category', 'Sub-category – all products in a sub-category'),
         ('flash_sale',   'Flash Sale – all live flash-sale products'),
         ('todays_deals', "Today's Deals – opens the deals page (banner and title used there)"),
+        ('auto',         'Auto – picked and rotated by the curator (see product/curation.py)'),
+    ]
+
+    STRATEGY_CHOICES = [
+        ('balanced',  'Balanced – deals, popularity and rating together'),
+        ('deals',     'Deals – deepest genuine discounts first'),
+        ('trending',  'Trending – what shoppers are viewing and buying now'),
+        ('top_rated', 'Top rated – best reviewed'),
+        ('new',       'New arrivals – recently listed'),
     ]
 
     slug          = models.SlugField(unique=True)
@@ -1042,6 +1051,34 @@ class Collection(models.Model):
     sub_category  = models.ForeignKey('Sub_Category', null=True, blank=True, on_delete=models.SET_NULL, related_name='collections')
     products      = models.ManyToManyField('Product', blank=True, related_name='collections')
 
+    # ── Auto-curation recipe (filter_type='auto') ──
+    # Where to look: any of these narrow the pool; all blank = whole catalogue.
+    auto_categories     = models.ManyToManyField('Category', blank=True, related_name='auto_collections')
+    auto_sub_categories = models.ManyToManyField('Sub_Category', blank=True, related_name='auto_collections')
+    auto_keywords  = models.CharField(max_length=300, blank=True,
+                                      help_text="Comma-separated, e.g. 'dorm, towel, notebook'. Ranks by text match")
+    auto_strategy  = models.CharField(max_length=12, choices=STRATEGY_CHOICES, default='balanced')
+    auto_min_discount = models.PositiveSmallIntegerField(default=0, help_text="Only products at least this % off")
+    auto_min_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    auto_max_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    auto_size      = models.PositiveSmallIntegerField(default=24, help_text="How many products to pick")
+    max_per_vendor = models.PositiveSmallIntegerField(default=2)
+    rotation_days  = models.PositiveSmallIntegerField(default=3, help_text="Full reshuffle every N days")
+    pinned_products   = models.ManyToManyField('Product', blank=True, related_name='pinned_in_collections',
+                                               help_text="Always shown first")
+    excluded_products = models.ManyToManyField('Product', blank=True, related_name='excluded_from_collections',
+                                               help_text="Never picked")
+    is_locked      = models.BooleanField(default=False, help_text="Curator leaves this collection alone")
+    is_generated   = models.BooleanField(default=False, editable=False,
+                                         help_text="Created by an occasion's automatic sections")
+
+    # Curator output: ranked ids, plus the previous rotation's ids so the
+    # next one can favour products shoppers haven't just seen.
+    curated_product_ids = models.JSONField(default=list, blank=True, editable=False)
+    recent_product_ids  = models.JSONField(default=list, blank=True, editable=False)
+    last_curated_at     = models.DateTimeField(null=True, blank=True, editable=False)
+    next_rotation_at    = models.DateTimeField(null=True, blank=True)
+
     is_active     = models.BooleanField(default=True)
     created_at    = models.DateTimeField(auto_now_add=True)
     updated_at    = models.DateTimeField(auto_now=True)
@@ -1053,6 +1090,13 @@ class Collection(models.Model):
         return self.title
 
     def get_products_qs(self):
+        if self.filter_type == 'auto':
+            ids = self.curated_product_ids or []
+            if not ids:
+                return Product.published.none()
+            rank = models.Case(*[models.When(id=pid, then=pos) for pos, pid in enumerate(ids)],
+                               default=len(ids), output_field=models.IntegerField())
+            return Product.published.filter(id__in=ids).annotate(curated_rank=rank).order_by('curated_rank')
         if self.filter_type == 'sub_category' and self.sub_category:
             return Product.published.filter(sub_category=self.sub_category)
         if self.filter_type == 'flash_sale':
@@ -1092,6 +1136,34 @@ class Occasion(models.Model):
     end_date     = models.DateField(null=True, blank=True,
                                     help_text="Auto-hide after this date (leave blank = no expiry)")
     position     = models.PositiveIntegerField(default=0, help_text="Lower = shown first on homepage")
+
+    COLOR_MODE_CHOICES = [
+        ('fixed',  'Fixed – always use the accent colour above'),
+        ('rotate', 'Rotate – one new colour for the whole row each rotation'),
+        ('mixed',  'Mixed – every card gets its own colour'),
+    ]
+    color_mode   = models.CharField(max_length=8, choices=COLOR_MODE_CHOICES, default='fixed')
+
+    # ── Automatic sections: the curator picks the themes as well as the products ──
+    auto_sections      = models.BooleanField(default=False,
+                                             help_text="Let the curator create and rotate this occasion's sections")
+    auto_section_count = models.PositiveSmallIntegerField(default=6)
+    auto_categories    = models.ManyToManyField('Category', blank=True, related_name='auto_occasions',
+                                                help_text="Limit themes to these categories (blank = whole catalogue)")
+    auto_keywords      = models.CharField(max_length=300, blank=True,
+                                          help_text="Comma-separated, e.g. 'school, backpack, notebook'")
+    rotation_days      = models.PositiveSmallIntegerField(default=3,
+                                                          help_text="Themes and colours change every N days")
+    recent_theme_ids   = models.JSONField(default=list, blank=True, editable=False)
+    last_rotated_at    = models.DateTimeField(null=True, blank=True, editable=False)
+
+    # ── Where and why it runs ──
+    countries    = models.ManyToManyField('address.Country', blank=True, related_name='occasions',
+                                          help_text="Only shoppers in these countries see it, and only products "
+                                                    "that ship there are picked (blank = everywhere)")
+    event        = models.ForeignKey('SeasonalEvent', null=True, blank=True, on_delete=models.SET_NULL,
+                                     related_name='occasions', editable=False,
+                                     help_text="The holiday on the calendar that opened this occasion")
     created_at   = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -1106,6 +1178,112 @@ class Occasion(models.Model):
         if not self.slug:
             self.slug = slugify(self.title)
         super().save(*args, **kwargs)
+
+
+class SeasonalEvent(models.Model):
+    """
+    A recurring holiday or season on the calendar — Christmas, Mother's Day,
+    Back to School, Eid, a country's Independence Day. Every year the curator
+    opens an Occasion for it `lead_days` before the date and lets it expire
+    `days_after` it, with automatic sections themed by its keywords and
+    categories. Adding a holiday or a country is a row here, no code.
+    """
+    RULE_CHOICES = [
+        ('fixed',       'Same date every year (month + day)'),
+        ('nth_weekday', 'Nth weekday of a month (e.g. 2nd Sunday of May)'),
+        ('easter',      'Easter Sunday (use offset for Good Friday etc.)'),
+        ('dates',       'Listed dates — for moving holidays like Eid'),
+    ]
+    WEEKDAY_CHOICES = [(0, 'Monday'), (1, 'Tuesday'), (2, 'Wednesday'), (3, 'Thursday'),
+                       (4, 'Friday'), (5, 'Saturday'), (6, 'Sunday')]
+
+    title    = models.CharField(max_length=200, help_text="Shown as the occasion heading, e.g. 'Christmas gifts'")
+    slug     = models.SlugField(unique=True)
+    subtitle = models.CharField(max_length=300, blank=True)
+    icon     = models.CharField(max_length=10, blank=True, help_text="Optional emoji, e.g. 🎄")
+
+    rule     = models.CharField(max_length=12, choices=RULE_CHOICES, default='fixed')
+    month    = models.PositiveSmallIntegerField(null=True, blank=True, help_text="1–12 (fixed / nth weekday)")
+    day      = models.PositiveSmallIntegerField(null=True, blank=True, help_text="1–31 (fixed)")
+    weekday  = models.PositiveSmallIntegerField(choices=WEEKDAY_CHOICES, null=True, blank=True)
+    nth      = models.SmallIntegerField(null=True, blank=True, help_text="1–5, or -1 for the last one in the month")
+    offset_days = models.SmallIntegerField(default=0,
+                                           help_text="Shift from the rule's date, e.g. Black Friday = 4th Thursday of Nov +1")
+    dates    = models.JSONField(default=list, blank=True,
+                                help_text='For "listed dates": ["2027-03-10", "2028-02-27"]')
+
+    lead_days  = models.PositiveSmallIntegerField(default=21, help_text="Open the occasion this many days before")
+    days_after = models.PositiveSmallIntegerField(default=1, help_text="Keep it up this many days after")
+    countries  = models.ManyToManyField('address.Country', blank=True, related_name='seasonal_events',
+                                        help_text="Blank = celebrated everywhere")
+
+    keywords   = models.CharField(max_length=300, blank=True,
+                                  help_text="Comma-separated, e.g. 'christmas, gift, toy, decoration'")
+    categories = models.ManyToManyField('Category', blank=True, related_name='seasonal_events')
+    section_count = models.PositiveSmallIntegerField(default=6)
+    rotation_days = models.PositiveSmallIntegerField(default=3)
+    color_mode    = models.CharField(max_length=8, choices=Occasion.COLOR_MODE_CHOICES, default='rotate')
+    accent_color  = models.CharField(max_length=7, default='#0071CE')
+    position      = models.PositiveIntegerField(default=0, help_text="Lower = shown first on homepage")
+    is_enabled    = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['month', 'day', 'title']
+        verbose_name = 'Holiday / Season'
+        verbose_name_plural = 'Holiday calendar'
+
+    def __str__(self):
+        return self.title
+
+    def date_in_year(self, year):
+        """The holiday's date in `year`, or None when the rule can't place it."""
+        import calendar
+        from datetime import date
+
+        base = None
+        if self.rule == 'fixed' and self.month and self.day:
+            try:
+                base = date(year, self.month, self.day)
+            except ValueError:  # 29 Feb in a common year
+                return None
+        elif self.rule == 'nth_weekday' and self.month and self.weekday is not None and self.nth:
+            days = [d for d in range(1, calendar.monthrange(year, self.month)[1] + 1)
+                    if date(year, self.month, d).weekday() == self.weekday]
+            if self.nth == -1:
+                base = date(year, self.month, days[-1])
+            elif 1 <= self.nth <= len(days):
+                base = date(year, self.month, days[self.nth - 1])
+        elif self.rule == 'easter':
+            from dateutil.easter import easter
+            base = easter(year)
+        elif self.rule == 'dates':
+            for raw in self.dates or []:
+                try:
+                    listed = date.fromisoformat(str(raw))
+                except ValueError:
+                    continue
+                if listed.year == year:
+                    base = listed
+                    break
+        return base + timedelta(days=self.offset_days) if base else None
+
+    def window_for(self, today):
+        """(start, holiday, end) of the run that covers `today` or opens tomorrow, else None."""
+        for year in (today.year - 1, today.year, today.year + 1):
+            holiday = self.date_in_year(year)
+            if not holiday:
+                continue
+            start, end = holiday - timedelta(days=self.lead_days), holiday + timedelta(days=self.days_after)
+            if start <= today + timedelta(days=1) and today <= end:
+                return start, holiday, end
+        return None
+
+    def next_date(self, today):
+        for year in (today.year, today.year + 1):
+            holiday = self.date_in_year(year)
+            if holiday and holiday >= today:
+                return holiday
+        return None
 
 
 class OccasionSection(models.Model):
@@ -1123,6 +1301,9 @@ class OccasionSection(models.Model):
         help_text="Products shown in this card and destination of the 'View all' link"
     )
     position   = models.PositiveIntegerField(default=0)
+    accent_color = models.CharField(max_length=7, blank=True,
+                                    help_text="Card colour; blank = the occasion's colour. Set by the curator in rotate/mixed mode")
+    is_generated = models.BooleanField(default=False, editable=False)
 
     class Meta:
         ordering = ['position']
