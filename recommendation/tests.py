@@ -577,7 +577,7 @@ class ApiContractTests(CatalogMixin, RecommenderTestCase):
         'currency',
     }
     DEAL_FIELDS = CARD_FIELDS | {
-        'deal_price', 'savings_percent', 'deal_score',
+        'deal_price', 'savings_percent', 'deal_score', 'ends_at',
     }
 
     @classmethod

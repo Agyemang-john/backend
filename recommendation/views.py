@@ -79,6 +79,106 @@ class TodaysDealsAPIView(APIView):
         )
 
 
+class DealsPageAPIView(APIView):
+    """
+    GET /api/v1/recommendations/deals/
+
+    The full Today's Deals page: every live deal, with department and category
+    chips (with counts), discount-depth and flash-deal filters, the usual
+    price / brand / seller / rating filters, and seven sorts. The default sort
+    is the deal model's ranking, personalised and capped per seller.
+
+    Query: department, category, brand*, vendor*, rating*, discount, flash=1,
+    from, to (in the caller's currency), sort, page.
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from decimal import Decimal
+
+        from core.service import get_exchange_rates
+        from product.serializers import CollectionSerializer
+
+        from .deals_page import deals_page
+
+        currency = request.headers.get('X-Currency', 'GHS')
+        rate = Decimal(str(get_exchange_rates().get(currency, 1)))
+        data = deals_page(request, rate)
+
+        products = serving._ordered_by_ids(data['page_ids'])
+        deal_scores = {
+            deal.product_id: deal
+            for deal in ProductDealScore.objects.filter(product_id__in=data['page_ids'])
+        }
+        cards = DealCardSerializer(products, many=True, context={
+            'request': request, 'reasons': {}, 'deal_scores': deal_scores,
+            'flash_end': data['flash_end'], 'include_debug': False,
+        }).data
+
+        to_currency = float(rate)
+        collection = data['collection']
+        return Response({
+            'collection': CollectionSerializer(collection, context={'request': request}).data
+                          if collection else None,
+            'currency': currency,
+            'results': apply_currency(cards, currency),
+            'total': data['total'],
+            'page': data['page'],
+            'pages': data['pages'],
+            'sort': data['sort'],
+            'sorts': data['sorts'],
+            'departments': data['departments'],
+            'all_count': data['all_count'],
+            'categories': data['categories'],
+            'discount_buckets': data['discount_buckets'],
+            'flash_count': data['flash_count'],
+            'brands': data['brands'],
+            'vendors': data['vendors'],
+            'sizes': [],
+            'colors': [],
+            'min_price_unfiltered': round(data['min_price'] * to_currency, 2),
+            'max_price_unfiltered': round(data['max_price'] * to_currency, 2),
+        })
+
+
+class CategoryShelvesAPIView(APIView):
+    """
+    GET /api/v1/recommendations/category-shelves/?shelves=4&limit=12
+
+    "Best sellers in Phones", "Trending in Fashion" — one shelf for each of the
+    shopper's top categories (from views, cart and orders), topped up with the
+    marketplace's busiest categories for a first-time visitor.
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from .shelves import category_shelves
+
+        try:
+            count = max(1, min(int(request.query_params.get('shelves', 4)), 8))
+        except (TypeError, ValueError):
+            count = 4
+        per_shelf = _limit(request, 12, ceiling=24)
+        currency = request.headers.get('X-Currency', 'GHS')
+
+        shelves = category_shelves(request, shelves=count, per_shelf=per_shelf)
+        result = []
+        for shelf in shelves:
+            products = serving._ordered_by_ids(shelf['product_ids'])
+            cards = RecommendedProductSerializer(
+                products, many=True, context={'request': request, 'reasons': {}},
+            ).data
+            result.append({
+                'category': shelf['category'],
+                'kind': shelf['kind'],
+                'title': shelf['title'],
+                'results': apply_currency(cards, currency),
+            })
+        return Response({'currency': currency, 'shelves': result})
+
+
 class RecommendedForYouAPIView(APIView):
     """
     GET /api/v1/recommendations/for-you/
@@ -150,31 +250,9 @@ class CartAddonsAPIView(APIView):
 
     def get(self, request):
         limit = _limit(request, 10)
-        cart_product_ids = self._cart_product_ids(request)
+        cart_product_ids = serving._cart_product_ids(request)
         products = serving.cart_addons(cart_product_ids, limit)
         return _respond(request, products)
-
-    def _cart_product_ids(self, request) -> list[int]:
-        import json
-
-        if request.user.is_authenticated:
-            from order.models import Cart
-            cart = Cart.objects.filter(user=request.user).first()
-            if cart:
-                return list(
-                    cart.cart_items.filter(product__isnull=False)
-                    .values_list('product_id', flat=True)
-                )
-            return []
-
-        raw = request.headers.get('X-Guest-Cart')
-        if not raw:
-            return []
-        try:
-            items = json.loads(raw)
-            return [int(item['p']) for item in items if item.get('p')]
-        except (ValueError, TypeError, KeyError):
-            return []
 
 
 class KeepShoppingAPIView(APIView):

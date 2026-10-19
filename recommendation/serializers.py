@@ -89,11 +89,16 @@ class DealCardSerializer(RecommendedProductSerializer):
     deal_price = serializers.SerializerMethodField()
     savings_percent = serializers.SerializerMethodField()
     deal_score = serializers.SerializerMethodField()
+    ends_at = serializers.SerializerMethodField()
 
     class Meta(RecommendedProductSerializer.Meta):
         fields = RecommendedProductSerializer.Meta.fields + [
-            'deal_price', 'savings_percent', 'deal_score',
+            'deal_price', 'savings_percent', 'deal_score', 'ends_at',
         ]
+
+    def get_ends_at(self, obj):
+        """When a flash deal ends (ISO), or None for a standing markdown."""
+        return self.context.get('flash_end', {}).get(obj.id)
 
     def _deal(self, obj) -> ProductDealScore | None:
         return self.context.get('deal_scores', {}).get(obj.id)

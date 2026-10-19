@@ -38,7 +38,7 @@ from .serializers import CARD_ONLY_FIELDS
 logger = logging.getLogger(__name__)
 
 CACHE_TTL = 600           # 10 minutes
-DEAL_POOL = 120           # deals fetched before personalised re-ranking
+DEAL_POOL = 300           # deals fetched before personalised re-ranking
 
 
 def current_model_version() -> int:
@@ -317,155 +317,376 @@ def cart_addons(cart_product_ids: list[int], limit: int = 10):
 
 # ── "Recommended for you" ────────────────────────────────────────────────────
 
+#: Reciprocal-rank-fusion constant. Larger flattens the difference between
+#: ranks; 10 keeps the top of each list clearly ahead of its tail.
+RRF_K = 10
+
+#: How much the live session counts against the nightly list. The session wins
+#: once the shopper has done something the nightly run has not seen yet.
+LIVE_WEIGHT_FRESH = 1.3
+LIVE_WEIGHT_STALE = 0.6
+
+#: Live candidates scoring below this share of the best live candidate are
+#: dropped before fusion. Rank fusion rewards appearing in both lists, so a weak
+#: tail match would otherwise lift every nightly pick over the session's real
+#: interest.
+LIVE_MIN_SHARE = 0.35
+
+
+def _cart_product_ids(request) -> list[int]:
+    """Products in the shopper's cart — the DB cart, or the guest cart header."""
+    import json
+
+    user = getattr(request, 'user', None)
+    if user is not None and user.is_authenticated:
+        from order.models import Cart
+        cart = Cart.objects.filter(user=user).first()
+        if cart:
+            return list(
+                cart.cart_items.filter(product__isnull=False)
+                .values_list('product_id', flat=True)
+            )
+        return []
+
+    headers = getattr(request, 'headers', None)
+    raw = headers.get('X-Guest-Cart') if headers is not None else None
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw)
+        return [int(item['p']) for item in items if item.get('p')]
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return []
+
+
+def _session_candidates(recent: list[int], cart: list[int], exclude: set[int]):
+    """
+    Live candidates from what the shopper is doing right now.
+
+    Recent views expand through the substitute (hybrid) neighbours, newest view
+    weighted most; cart items expand through both substitutes and complements,
+    and count more — a cart add is a stronger statement than a glance.
+
+    Returns ({product_id: score}, {product_id: seed_product_id}).
+    """
+    seeds: dict[int, float] = {}
+    for position, product_id in enumerate(recent):
+        seeds[product_id] = max(seeds.get(product_id, 0.0), 1.0 / (1 + position))
+    for product_id in cart:
+        seeds[product_id] = max(seeds.get(product_id, 0.0), 1.5)
+    if not seeds:
+        return {}, {}
+
+    cart_set = set(cart)
+    scores: dict[int, float] = {}
+    seed_of: dict[int, int] = {}
+    best_contribution: dict[int, float] = {}
+
+    rows = (
+        ProductNeighbor.objects
+        .filter(product_id__in=list(seeds), kind__in=(KIND_HYBRID, KIND_CO_PURCHASE), rank__lt=20)
+        .values_list('product_id', 'neighbor_id', 'score', 'kind')
+    )
+    for seed_id, neighbor_id, score, kind in rows:
+        if neighbor_id in exclude:
+            continue
+        # Complements only make sense for what is in the basket.
+        if kind == KIND_CO_PURCHASE and seed_id not in cart_set:
+            continue
+        contribution = float(score) * seeds.get(seed_id, 0.5)
+        scores[neighbor_id] = scores.get(neighbor_id, 0.0) + contribution
+        if contribution > best_contribution.get(neighbor_id, 0.0):
+            best_contribution[neighbor_id] = contribution
+            seed_of[neighbor_id] = seed_id
+    return scores, seed_of
+
+
+def _fuse(lists: list[tuple[list[int], float]]) -> dict[int, float]:
+    """Weighted reciprocal-rank fusion: rank-based, so unrelated score scales mix safely."""
+    fused: dict[int, float] = {}
+    for ids, weight in lists:
+        for rank, product_id in enumerate(ids):
+            fused[product_id] = fused.get(product_id, 0.0) + weight / (RRF_K + rank + 1)
+    return fused
+
+
 def recommended_for_you(request, limit: int = 20):
     """
-    The personalised rail.
+    The personalised rail — nightly model output fused with the live session.
 
-    Signed-in shoppers read their precomputed list. Guests — most of the traffic
-    at this stage — get one built live from the session's recently viewed
-    products against the same neighbour table: a couple of indexed queries, and
-    genuinely personal after a single product view, which is the moment it
-    matters most.
+    The nightly run knows the shopper's long-term taste; it does not know they
+    spent this morning looking at rice cookers. So the precomputed list is
+    blended, by reciprocal-rank fusion, with candidates expanded from their
+    recent views and cart, and the session gets the larger say once it contains
+    activity newer than the nightly list. Guests have no nightly list and get
+    the session half alone.
+
+    Products the shopper keeps scrolling past are pushed down; ones they hid,
+    have just viewed, have in the cart, or bought since the last run are removed.
 
     Returns (products, reasons) where reasons maps product id → explanation
     string, so the UI can caption each card.
     """
-    user = getattr(request, 'user', None)
-    dismissed = _dismissed_ids(request)
+    from . import engagement
 
-    if user is not None and user.is_authenticated:
+    user = getattr(request, 'user', None)
+    signed_in = user is not None and user.is_authenticated
+    dismissed = _dismissed_ids(request)
+    recent = _recent_product_ids(request, limit=8)
+    cart = _cart_product_ids(request)
+    exclude = dismissed | set(recent) | set(cart)
+
+    precomputed: list[int] = []
+    reasons: dict[int, str] = {}
+    generated_at = None
+    if signed_in:
         rows = list(
             UserRecommendation.objects
             .filter(user=user, surface=SURFACE_FOR_YOU)
-            .exclude(product_id__in=dismissed)
             .order_by('rank')
-            .values_list('product_id', 'reason_detail')[:limit]
+            .values_list('product_id', 'reason_detail', 'generated_at')[:limit * 3]
         )
         if rows:
-            ids = [product_id for product_id, _ in rows]
-            reasons = {product_id: detail for product_id, detail in rows if detail}
-            return _ordered_by_ids(ids), reasons
+            generated_at = rows[0][2]
+            from order.models import OrderProduct
+            bought_since = set(
+                OrderProduct.objects
+                .filter(order__user=user, order__is_ordered=True, date_created__gte=generated_at)
+                .values_list('product_id', flat=True)
+            )
+            for product_id, detail, _ in rows:
+                if product_id in exclude or product_id in bought_since:
+                    continue
+                precomputed.append(product_id)
+                if detail:
+                    reasons[product_id] = detail
 
-    # Session-based: expand the shopper's recent views through the neighbour table.
-    recent = _recent_product_ids(request, limit=6)
-    if recent:
-        exclude = set(recent) | dismissed
-        scores: dict[int, float] = {}
+    live_scores, seed_of = _session_candidates(recent, cart, exclude)
+    top_live = max(live_scores.values(), default=0.0)
+    live = [
+        pid for pid, score in sorted(live_scores.items(), key=lambda kv: -kv[1])
+        if score >= LIVE_MIN_SHARE * top_live
+    ][:limit * 3]
 
-        rows = (
-            ProductNeighbor.objects
-            .filter(product_id__in=recent, kind=KIND_HYBRID)
-            .order_by('rank')
-            .values_list('product_id', 'neighbor_id', 'score')
-        )
-        for seed_id, neighbor_id, score in rows:
-            if neighbor_id in exclude:
+    if not precomputed and not live:
+        return _ordered_by_ids(_fill([], limit, exclude)), {}
+
+    fresh = bool(cart)
+    if signed_in and generated_at is not None and not fresh:
+        from product.models import RecentlyViewedProduct
+        fresh = RecentlyViewedProduct.objects.filter(user=user, viewed_at__gt=generated_at).exists()
+    live_weight = LIVE_WEIGHT_FRESH if (fresh or not precomputed) else LIVE_WEIGHT_STALE
+
+    fused = _fuse([(precomputed, 1.0), (live, live_weight)])
+    skipped = engagement.skipped_for_request(request)
+    for product_id in skipped:
+        if product_id in fused:
+            fused[product_id] *= engagement.SKIP_PENALTY
+
+    ranked = [pid for pid, _ in sorted(fused.items(), key=lambda kv: -kv[1])][:limit]
+
+    # Caption live picks with the product that triggered them.
+    seeds_needed = {seed_of[pid] for pid in ranked if pid in seed_of and pid not in reasons}
+    if seeds_needed:
+        from product.models import Product
+        titles = dict(Product.objects.filter(id__in=seeds_needed).values_list('id', 'title'))
+        cart_set = set(cart)
+        for product_id in ranked:
+            seed = seed_of.get(product_id)
+            if product_id in reasons or seed not in titles:
                 continue
-            # Weight by recency: the most recently viewed product says the most
-            # about what the shopper is looking for right now.
-            recency = 1.0 / (1 + recent.index(seed_id)) if seed_id in recent else 0.5
-            contribution = float(score) * recency
-            scores[neighbor_id] = scores.get(neighbor_id, 0.0) + contribution
+            if seed in cart_set:
+                reasons[product_id] = f"Goes with {titles[seed][:70]} in your cart"
+            else:
+                reasons[product_id] = f"Because you viewed {titles[seed][:70]}"
 
-        if scores:
-            ranked = [pid for pid, _ in sorted(scores.items(), key=lambda kv: -kv[1])][:limit]
-            return _ordered_by_ids(_fill(ranked, limit, exclude)), {}
-
-    # Nothing known about this visitor at all.
-    ids = _fill([], limit, dismissed)
-    return _ordered_by_ids(ids), {}
+    return _ordered_by_ids(_fill(ranked, limit, exclude)), reasons
 
 
 # ── "Today's Deals" ──────────────────────────────────────────────────────────
 
-def todays_deals(request=None, limit: int = 20):
-    """
-    Deals ranked by learned quality, then nudged toward the shopper's interests.
+#: Diversity caps for the deals rail: a rail of six phone cases from one seller
+#: is one deal shown six times.
+DEAL_RAIL_MAX_PER_VENDOR = 2
+DEAL_RAIL_MAX_PER_SUB_CATEGORY = 3
 
-    The base ordering is shared and cached — deal quality does not depend on who
-    is asking. Personalisation is a light re-rank of that pool: a deal in a
-    sub-category the shopper actually browses gets a boost, but a great deal
-    stays near the top regardless. Deliberately gentle. Over-personalising a
-    deals page hides the genuinely good offers from anyone whose history happens
-    to point elsewhere, and those offers are the reason people open the page.
-    """
+
+def deal_pool() -> list[tuple[int, float]]:
+    """Eligible deals as (product_id, score), best first. Shared and cached."""
     cache_key = f"rec:todays_deals:{deals_version()}:{DEAL_POOL}"
     pool = cache.get(cache_key)
+    if pool is not None:
+        return pool
 
-    if pool is None:
+    pool = list(
+        ProductDealScore.objects
+        .filter(is_eligible=True)
+        .order_by('-score')
+        .values_list('product_id', 'score')[:DEAL_POOL]
+    )
+    if not pool:
+        # No scoring run yet — fall back to the plain discount ordering so
+        # the page still works on a fresh deployment.
+        from django.db.models import ExpressionWrapper, F, FloatField
+
+        from product.models import Product
         pool = list(
-            ProductDealScore.objects
-            .filter(is_eligible=True)
-            .order_by('-score')
-            .values_list('product_id', 'score')[:DEAL_POOL]
+            Product.published
+            .filter(old_price__isnull=False, old_price__gt=F('price'))
+            .annotate(discount=ExpressionWrapper(
+                (F('old_price') - F('price')) * 100.0 / F('old_price'),
+                output_field=FloatField(),
+            ))
+            .order_by('-discount')
+            .values_list('id', 'discount')[:DEAL_POOL]
         )
-        if not pool:
-            # No scoring run yet — fall back to the plain discount ordering so
-            # the page still works on a fresh deployment.
-            from django.db.models import ExpressionWrapper, F, FloatField
+    cache.set(cache_key, pool, CACHE_TTL)
+    return pool
 
-            from product.models import Product
-            fallback = (
-                Product.published
-                .filter(old_price__isnull=False, old_price__gt=F('price'))
-                .annotate(discount=ExpressionWrapper(
-                    (F('old_price') - F('price')) * 100.0 / F('old_price'),
-                    output_field=FloatField(),
-                ))
-                .order_by('-discount')
-                .values_list('id', 'discount')[:DEAL_POOL]
-            )
-            pool = list(fallback)
-        cache.set(cache_key, pool, CACHE_TTL)
 
+def personalize_deals(request, pool: list[tuple[int, float]], facts: dict[int, tuple]) -> list[int]:
+    """
+    Re-rank deals for one shopper: base deal quality, nudged by their category
+    interests and by how well each deal has actually been clicked.
+
+    `facts` maps product id → (vendor_id, sub_category_id, category_id).
+    Deliberately gentle: over-personalising a deals page hides the genuinely
+    good offers from anyone whose history points elsewhere, and those offers
+    are the reason people open it.
+    """
+    from . import engagement
+
+    if not pool:
+        return []
+    max_score = max((score for _, score in pool), default=1.0) or 1.0
+    sub_affinity, cat_affinity = _category_affinity(request) if request is not None else ({}, {})
+    lift = engagement_lift()
+    skipped = engagement.skipped_for_request(request) if request is not None else set()
+
+    def score(row):
+        product_id, base = row
+        _, sub_category, category = facts.get(product_id, (None, None, None))
+        value = (
+            base / max_score
+            + 0.20 * sub_affinity.get(sub_category, 0.0)
+            + 0.10 * cat_affinity.get(category, 0.0)
+        )
+        value *= lift.get(product_id, 1.0) ** 0.5
+        if product_id in skipped:
+            value *= engagement.SKIP_PENALTY
+        return value
+
+    return [product_id for product_id, _ in sorted(pool, key=lambda row: -score(row))]
+
+
+def diversify(ids: list[int], facts: dict[int, tuple], limit: int,
+              max_per_vendor: int, max_per_sub_category: int) -> list[int]:
+    """Cap sellers and sub-categories in the visible slice; overflow goes after."""
+    picked, overflow = [], []
+    per_vendor: dict = {}
+    per_sub: dict = {}
+    for product_id in ids:
+        vendor, sub_category, _ = facts.get(product_id, (None, None, None))
+        if (per_vendor.get(vendor, 0) >= max_per_vendor
+                or (sub_category and per_sub.get(sub_category, 0) >= max_per_sub_category)):
+            overflow.append(product_id)
+            continue
+        per_vendor[vendor] = per_vendor.get(vendor, 0) + 1
+        if sub_category:
+            per_sub[sub_category] = per_sub.get(sub_category, 0) + 1
+        picked.append(product_id)
+        if len(picked) >= limit:
+            return picked
+    return (picked + overflow)[:limit]
+
+
+def _deal_facts(product_ids: list[int]) -> dict[int, tuple]:
+    from product.models import Product
+
+    return {
+        pid: (vendor, sub_category, category)
+        for pid, vendor, sub_category, category in (
+            Product.objects.filter(id__in=product_ids)
+            .values_list('id', 'vendor_id', 'sub_category_id', 'sub_category__category_id')
+        )
+    }
+
+
+def todays_deals(request=None, limit: int = 20):
+    """
+    The deals rail: learned deal quality, gently personalised, then capped so
+    no seller or sub-category takes over the rail.
+    """
+    pool = deal_pool()
     if not pool:
         return _ordered_by_ids(_trending_ids(limit))
 
     dismissed = _dismissed_ids(request) if request is not None else set()
     pool = [(pid, score) for pid, score in pool if pid not in dismissed]
 
-    affinity = _sub_category_affinity(request) if request is not None else {}
-    if affinity:
-        from product.models import Product
-
-        sub_categories = dict(
-            Product.objects.filter(id__in=[pid for pid, _ in pool])
-            .values_list('id', 'sub_category_id')
-        )
-        max_score = max((score for _, score in pool), default=1.0) or 1.0
-        pool = sorted(
-            pool,
-            key=lambda row: -(
-                row[1] / max_score + 0.25 * affinity.get(sub_categories.get(row[0]), 0.0)
-            ),
-        )
-
-    return _ordered_by_ids([pid for pid, _ in pool[:limit]])
+    facts = _deal_facts([pid for pid, _ in pool])
+    ranked = personalize_deals(request, pool, facts)
+    ranked = diversify(
+        ranked, facts, limit,
+        max_per_vendor=DEAL_RAIL_MAX_PER_VENDOR,
+        max_per_sub_category=DEAL_RAIL_MAX_PER_SUB_CATEGORY,
+    )
+    return _ordered_by_ids(ranked)
 
 
-def _sub_category_affinity(request) -> dict[int, float]:
+def engagement_lift() -> dict[int, float]:
+    """Product click lift (see engagement.py), cached for the life of a model run."""
+    cache_key = f"rec:lift:{current_model_version()}"
+    lift = cache.get(cache_key)
+    if lift is None:
+        from . import engagement
+        lift = engagement.product_lift()
+        cache.set(cache_key, lift, 3600)
+    return lift
+
+
+def _category_affinity(request) -> tuple[dict[int, float], dict[int, float]]:
     """
-    Normalised 0–1 interest per sub-category, from the visitor's recent views.
+    Normalised 0–1 interest per sub-category and per category, from the
+    visitor's recent views and cart.
 
-    Cheap on purpose: two queries, no model artifacts, works for guests. It only
-    has to be good enough to break ties on a deals page.
+    Cheap on purpose: two queries, no model artifacts, works for guests.
     """
     recent = _recent_product_ids(request, limit=15)
-    if not recent:
-        return {}
+    cart = _cart_product_ids(request)
+    if not recent and not cart:
+        return {}, {}
 
     from product.models import Product
 
-    counts: dict[int, float] = {}
-    rows = Product.objects.filter(id__in=recent).values_list('sub_category_id', flat=True)
-    for sub_category_id in rows:
-        if sub_category_id:
-            counts[sub_category_id] = counts.get(sub_category_id, 0.0) + 1.0
+    weight = {pid: 1.0 for pid in recent}
+    for pid in cart:
+        weight[pid] = weight.get(pid, 0.0) + 2.0
 
-    if not counts:
-        return {}
-    highest = max(counts.values())
-    return {sub_category_id: value / highest for sub_category_id, value in counts.items()}
+    subs: dict[int, float] = {}
+    cats: dict[int, float] = {}
+    rows = (
+        Product.objects.filter(id__in=list(weight))
+        .values_list('id', 'sub_category_id', 'sub_category__category_id')
+    )
+    for pid, sub_category, category in rows:
+        if sub_category:
+            subs[sub_category] = subs.get(sub_category, 0.0) + weight[pid]
+        if category:
+            cats[category] = cats.get(category, 0.0) + weight[pid]
+
+    def scaled(counts):
+        if not counts:
+            return {}
+        highest = max(counts.values())
+        return {key: value / highest for key, value in counts.items()}
+
+    return scaled(subs), scaled(cats)
+
+
+def _sub_category_affinity(request) -> dict[int, float]:
+    """Sub-category half of `_category_affinity`, kept for existing callers."""
+    return _category_affinity(request)[0]
 
 
 # ── "Keep shopping for" ──────────────────────────────────────────────────────

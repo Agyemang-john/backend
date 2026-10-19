@@ -271,10 +271,15 @@ def run_training(evaluate: bool = True) -> ModelRun:
         # ── 5. Blend collaborative and content similarity ────────────────────
         cf_aligned, item_users = _align_cf_vectors(product_ids, data, item_factors, cf_dim)
 
-        hybrid = similarity.blend_neighbors(
-            product_ids, cf_aligned, content_vectors, item_users, cf_trust,
+        # Each product searches for neighbours inside its own department.
+        department_of = dict(
+            Product.objects.filter(id__in=product_ids)
+            .values_list('id', 'sub_category__category__main_category_id')
         )
-        content_neighbors = similarity.content_only_neighbors(content_vectors)
+        groups = np.array([department_of.get(pid) or 0 for pid in product_ids], dtype=np.int64)
+        hybrid, content_neighbors = similarity.compute_neighbors(
+            product_ids, cf_aligned, content_vectors, item_users, cf_trust, groups=groups,
+        )
         co_purchase = similarity.build_co_purchase()
 
         similarity.persist_neighbors(

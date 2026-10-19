@@ -33,6 +33,9 @@ class TrackingUpdate:
     location: str = ''
     city: str = ''
     country: str = ''
+    #: The provider's id for this notification. Couriers retry webhooks, so
+    #: an update whose event_id was already applied is skipped.
+    event_id: str = ''
 
 
 class DeliveryProviderError(Exception):

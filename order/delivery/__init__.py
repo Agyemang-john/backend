@@ -12,6 +12,10 @@ Configure in settings (dotted paths; first-party default shown):
         # 'some_courier': 'order.delivery.some_courier.SomeCourierProvider',
     }
     DEFAULT_DELIVERY_PROVIDER = 'platform'
+    INTERNATIONAL_DELIVERY_PROVIDER = ''   # blank: same as the default
+
+New shipments pick their provider with provider_for(), so domestic and
+international parcels can go to different couriers.
 """
 
 from functools import lru_cache
@@ -40,11 +44,20 @@ def default_provider() -> DeliveryProvider:
     return get_provider(getattr(settings, 'DEFAULT_DELIVERY_PROVIDER', 'platform'))
 
 
+def provider_for(*, is_international=False) -> DeliveryProvider:
+    """The provider a new shipment should be booked with."""
+    if is_international in (True, 'true', 'True', '1', 1):
+        code = getattr(settings, 'INTERNATIONAL_DELIVERY_PROVIDER', '')
+        if code:
+            return get_provider(code)
+    return default_provider()
+
+
 def available_providers():
     return [get_provider(code) for code in _registry()]
 
 
 __all__ = [
     'DeliveryProvider', 'DeliveryProviderError', 'ShipmentBooking', 'TrackingUpdate',
-    'get_provider', 'default_provider', 'available_providers',
+    'get_provider', 'default_provider', 'provider_for', 'available_providers',
 ]

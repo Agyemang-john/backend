@@ -16,8 +16,11 @@ Endpoints:
 """
 
 import logging
-from .delivery import default_provider
-from .fulfilment import on_shipment_delivered, recompute_order_status, record_tracking_event
+from .delivery import DeliveryProviderError, get_provider, provider_for
+from .fulfilment import (
+    book_shipment, broadcast_tracking, cancel_open_shipments, cancel_shipment,
+    on_shipment_delivered, recompute_order_status, record_tracking_event,
+)
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.db.models import Count, Q
@@ -44,24 +47,7 @@ logger = logging.getLogger(__name__)
 
 def _broadcast(order_id):
     """Push the latest tracking snapshot to the customer WebSocket group."""
-    try:
-        from asgiref.sync import async_to_sync
-        from channels.layers import get_channel_layer
-        channel_layer = get_channel_layer()
-        if not channel_layer:
-            return
-        order_obj = Order.objects.prefetch_related(
-            'shipments__tracking_events',
-            'shipments__items__product',
-            'shipments__vendor',
-        ).get(id=order_id)
-        data = OrderTrackingSerializer(order_obj).data
-        async_to_sync(channel_layer.group_send)(
-            f'order_tracking_{order_id}',
-            {'type': 'tracking_update', 'data': data},
-        )
-    except Exception as e:
-        logger.warning(f'Admin broadcast failed for order {order_id}: {e}')
+    broadcast_tracking(order_id)
 
 
 class AdminPagination(PageNumberPagination):
@@ -242,6 +228,11 @@ class AdminOrderStatusView(APIView):
         if new_status not in dict(Order.STATUS_CHOICES).keys():
             return Response({'error': 'Invalid status.'}, status=status.HTTP_400_BAD_REQUEST)
 
+        if new_status == 'canceled' and order.status != 'canceled':
+            try:
+                cancel_open_shipments(order)
+            except DeliveryProviderError as exc:
+                return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
         order.status = new_status
         order.save(update_fields=['status'])
         _broadcast(order.id)
@@ -282,21 +273,23 @@ class AdminShipmentView(APIView):
         if not vendor_items:
             return Response({'error': 'No items for this vendor in this order.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        provider = default_provider()
-        shipment = Shipment.objects.create(
-            order=order,
-            vendor=vendor,
-            provider=request.data.get('provider') or provider.code,
-            fulfilled_by=request.data.get('fulfilled_by') or provider.fulfilled_by,
-            carrier=request.data.get('carrier', '') or provider.name,
-            carrier_code=request.data.get('carrier_code', ''),
-            tracking_number=request.data.get('tracking_number', ''),
-            tracking_url=request.data.get('tracking_url', ''),
-            status=request.data.get('status', 'label_created'),
-            estimated_delivery_date=request.data.get('estimated_delivery_date') or None,
-            is_international=request.data.get('is_international', False),
-        )
-        shipment.items.set(vendor_items)
+        is_international = request.data.get('is_international', False)
+        try:
+            provider = (get_provider(request.data['provider']) if request.data.get('provider')
+                        else provider_for(is_international=is_international))
+            shipment = book_shipment(
+                order, vendor, vendor_items, provider,
+                fulfilled_by=request.data.get('fulfilled_by') or provider.fulfilled_by,
+                carrier=request.data.get('carrier', '') or provider.name,
+                carrier_code=request.data.get('carrier_code', '') or provider.code,
+                tracking_number=request.data.get('tracking_number', ''),
+                tracking_url=request.data.get('tracking_url', ''),
+                status=request.data.get('status', 'label_created'),
+                estimated_delivery_date=request.data.get('estimated_delivery_date') or None,
+                is_international=is_international,
+            )
+        except DeliveryProviderError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
 
         if order.status not in ('delivered', 'canceled'):
             order.status = 'shipped'
@@ -308,6 +301,12 @@ class AdminShipmentView(APIView):
     def put(self, request, order_id, shipment_id):
         order = get_object_or_404(Order, id=order_id)
         shipment = get_object_or_404(Shipment, shipment_id=shipment_id, order=order)
+
+        if request.data.get('status') == 'canceled' and shipment.status != 'canceled':
+            try:
+                cancel_shipment(shipment)
+            except DeliveryProviderError as exc:
+                return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
 
         for field in ('carrier', 'carrier_code', 'tracking_number', 'tracking_url',
                       'status', 'estimated_delivery_date', 'shipped_at', 'delivered_at', 'is_international'):

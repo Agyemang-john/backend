@@ -136,3 +136,113 @@ def late_orders(vendor, now=None):
 
 def vendor_lines(order, vendor):
     return OrderProduct.objects.filter(order=order, product__vendor=vendor)
+
+
+# ── Booking, cancelling and live updates ──────────────────────────────────────
+# One path for every caller (seller dashboard, admin, webhooks), so a courier
+# integration is exercised the same way whoever triggers it. Before this the
+# admin "create shipment" never called the provider at all, and cancelling an
+# order left the parcel booked with the courier.
+
+TERMINAL_SHIPMENT_STATUSES = ('delivered', 'canceled', 'returned')
+
+
+def book_shipment(order, vendor, items, provider, **fields):
+    """
+    Create a shipment for `vendor`'s `items` and hand it to `provider`.
+    Raises DeliveryProviderError (with nothing saved) if the provider refuses.
+    """
+    from .delivery import DeliveryProviderError
+
+    fields.setdefault('fulfilled_by', provider.fulfilled_by)
+    shipment = Shipment.objects.create(order=order, vendor=vendor, provider=provider.code, **fields)
+    shipment.items.set(items)
+    try:
+        booking = provider.book(shipment)
+    except DeliveryProviderError:
+        shipment.delete()
+        raise
+    except Exception as exc:
+        # A provider bug or network library error must not leave a shipment
+        # that looks booked but that no courier knows about.
+        shipment.delete()
+        logger.exception("delivery: %s failed to book shipment for order %s", provider.code, order.pk)
+        raise DeliveryProviderError(f"{provider.name} could not book this delivery.") from exc
+
+    shipment.tracking_number = shipment.tracking_number or booking.tracking_number
+    shipment.tracking_url = shipment.tracking_url or booking.tracking_url
+    shipment.carrier = shipment.carrier or booking.carrier_name or provider.name
+    shipment.external_reference = booking.external_reference
+    shipment.label_url = booking.label_url
+    shipment.provider_data = booking.raw
+    shipment.save(update_fields=['tracking_number', 'tracking_url', 'carrier', 'external_reference',
+                                 'label_url', 'provider_data', 'updated_at'])
+    return shipment
+
+
+def cancel_shipment(shipment):
+    """
+    Cancel with the courier first, then locally. Raises DeliveryProviderError
+    if the courier refuses (e.g. already out for delivery) and changes nothing.
+    """
+    from .delivery import get_provider
+
+    if shipment.status in TERMINAL_SHIPMENT_STATUSES:
+        return shipment
+    get_provider(shipment.provider).cancel(shipment)
+    shipment.status = 'canceled'
+    shipment.save(update_fields=['status', 'updated_at'])
+    return shipment
+
+
+def cancel_open_shipments(order):
+    """Cancel every shipment of `order` that is still moving. Stops at the first refusal."""
+    for shipment in order.shipments.exclude(status__in=TERMINAL_SHIPMENT_STATUSES):
+        cancel_shipment(shipment)
+
+
+def broadcast_tracking(order_id):
+    """Push the latest tracking snapshot to the customer's WebSocket group."""
+    try:
+        from asgiref.sync import async_to_sync
+        from channels.layers import get_channel_layer
+
+        from .serializers import OrderTrackingSerializer
+
+        channel_layer = get_channel_layer()
+        if not channel_layer:
+            return
+        order = Order.objects.prefetch_related(
+            'vendors',
+            'shipments__tracking_events',
+            'shipments__items__product',
+            'shipments__vendor',
+        ).get(id=order_id)
+        async_to_sync(channel_layer.group_send)(
+            f'order_tracking_{order_id}',
+            {'type': 'tracking_update', 'data': OrderTrackingSerializer(order).data},
+        )
+    except Exception as exc:
+        logger.warning("Broadcast tracking failed for order %s: %s", order_id, exc)
+
+
+def notify_tracking_event(shipment, event):
+    """Tell the buyer about a tracking event, whoever reported it."""
+    order = shipment.order
+    if not order.user:
+        return
+    from notification.utils import send_notification
+    send_notification(
+        recipient=order.user,
+        verb="customer_order_delivered" if event.status == "delivered" else "customer_tracking_update",
+        target=order,
+        data={
+            "order_number": order.order_number,
+            "vendor_name": shipment.vendor.name if shipment.vendor else "",
+            "event_status": event.get_status_display(),
+            "description": event.description,
+            "location": ", ".join(filter(None, [event.city, event.country])),
+            "message": event.description,
+            "url": f"/dashboard/order-history/{order.id}/",
+        },
+    )

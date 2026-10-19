@@ -667,6 +667,25 @@ class TrackingEvent(models.Model):
         return f"{self.get_status_display()} - {self.event_date.strftime('%b %d, %Y %H:%M')}"
 
 
+class DeliveryWebhookEvent(models.Model):
+    """
+    A courier notification already applied. Couriers deliver webhooks at least
+    once and retry on timeouts, so without this a retried "delivered" would add
+    a second tracking event and notify the buyer twice.
+    """
+    provider = models.CharField(max_length=40)
+    event_id = models.CharField(max_length=120)
+    received_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['provider', 'event_id'], name='unique_delivery_webhook_event'),
+        ]
+
+    def __str__(self):
+        return f"{self.provider}:{self.event_id}"
+
+
 # class CityDeliveryRate(models.Model):
 #     from_city = models.CharField(max_length=100)
 #     to_city   = models.CharField(max_length=100)

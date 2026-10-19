@@ -68,6 +68,122 @@ def _alpha_per_item(item_users: np.ndarray, cf_trust: float) -> np.ndarray:
     return (per_item * cf_trust).astype(np.float32)
 
 
+#: A department smaller than this searches the whole catalog instead — a
+#: five-product department cannot fill a 30-neighbour list on its own.
+MIN_GROUP_SIZE = 2 * TOP_K
+
+
+def _top_k_rows(scores: np.ndarray, k: int) -> list[list[tuple[int, float]]]:
+    """Per-row top-k (column, score) pairs above MIN_SIMILARITY, best first."""
+    n_cols = scores.shape[1]
+    if n_cols == 0:
+        return [[] for _ in range(scores.shape[0])]
+    k = min(k, n_cols)
+    part = np.argpartition(-scores, k - 1, axis=1)[:, :k]
+    part_scores = np.take_along_axis(scores, part, axis=1)
+    order = np.argsort(-part_scores, axis=1)
+    part = np.take_along_axis(part, order, axis=1)
+    part_scores = np.take_along_axis(part_scores, order, axis=1)
+
+    result = []
+    for cols, values in zip(part, part_scores):
+        keep = np.isfinite(values) & (values >= MIN_SIMILARITY)
+        result.append([(int(c), float(v)) for c, v in zip(cols[keep], values[keep])])
+    return result
+
+
+def compute_neighbors(
+    product_ids: list[int],
+    cf_vectors: np.ndarray,
+    content_vectors: np.ndarray,
+    item_users: np.ndarray,
+    cf_trust: float,
+    groups: np.ndarray | None = None,
+    top_k: int = TOP_K,
+    block_size: int = 512,
+) -> tuple[dict[int, list[tuple[int, float]]], dict[int, list[tuple[int, float]]]]:
+    """
+    Blended and content-only top-K neighbours for every product, in one pass.
+
+    Returns (hybrid, content), both {row: [(neighbour_row, score), …]} and
+    row-aligned to `product_ids`.
+
+    **Scaling.** Comparing every product with every other is quadratic: double
+    the catalog and the work quadruples. Two things keep it in check:
+
+    * `groups` (one id per product — the top-level department) restricts each
+      product's search to its own department. A substitute for a phone is
+      another phone, never a sofa, so this costs nothing in quality and divides
+      the work by roughly the number of departments. Products with no
+      department (group 0), and departments too small to fill a list, search
+      the whole catalog.
+    * Both similarity matrices are computed from the same block, so the content
+      fallback list no longer needs a second all-pairs pass.
+
+    Memory stays at (block_size × group size) floats — the full matrix is never
+    materialised.
+    """
+    n_items = len(product_ids)
+    if n_items < 2:
+        return {}, {}
+
+    alpha = _alpha_per_item(item_users, cf_trust)
+    if alpha.shape[0] != n_items:
+        alpha = np.zeros(n_items, dtype=np.float32)
+    has_cf = np.linalg.norm(cf_vectors, axis=1) > 0 if cf_vectors.size else np.zeros(n_items, bool)
+    alpha = alpha * has_cf.astype(np.float32)
+    use_cf = bool(cf_vectors.size) and bool(alpha.any())
+
+    if groups is None or len(groups) != n_items:
+        groups = np.zeros(n_items, dtype=np.int64)
+    groups = np.asarray(groups, dtype=np.int64)
+
+    everything = np.arange(n_items)
+    hybrid: dict[int, list[tuple[int, float]]] = {}
+    content: dict[int, list[tuple[int, float]]] = {}
+
+    for group in np.unique(groups):
+        members = np.flatnonzero(groups == group)
+        pool = members if (group != 0 and members.size >= MIN_GROUP_SIZE) else everything
+        pool_content = content_vectors[pool]
+        pool_cf = cf_vectors[pool] if use_cf else None
+        pool_alpha = alpha[pool]
+
+        for start in range(0, members.size, block_size):
+            rows = members[start:start + block_size]
+            self_mask = rows[:, None] == pool[None, :]          # never its own neighbour
+
+            sim_content = content_vectors[rows] @ pool_content.T
+            sim_content[self_mask] = -np.inf
+
+            if use_cf:
+                sim_cf = cf_vectors[rows] @ pool_cf.T
+                # A pair is only as trustworthy as its less-established half.
+                pair_alpha = np.minimum(alpha[rows][:, None], pool_alpha[None, :])
+                blended = pair_alpha * sim_cf + (1.0 - pair_alpha) * sim_content
+                blended[self_mask] = -np.inf
+            else:
+                blended = sim_content
+
+            for row, picks in zip(rows, _top_k_rows(blended, top_k)):
+                if picks:
+                    hybrid[int(row)] = [(int(pool[c]), v) for c, v in picks]
+            if use_cf:
+                for row, picks in zip(rows, _top_k_rows(sim_content, top_k)):
+                    if picks:
+                        content[int(row)] = [(int(pool[c]), v) for c, v in picks]
+
+    if not use_cf:
+        # Without collaborative evidence the blend *is* content similarity.
+        content = dict(hybrid)
+
+    logger.info(
+        "similarity: neighbours for %d products across %d departments (cf_trust=%.2f)",
+        len(hybrid), len(np.unique(groups)), cf_trust,
+    )
+    return hybrid, content
+
+
 def blend_neighbors(
     product_ids: list[int],
     cf_vectors: np.ndarray,
@@ -77,61 +193,12 @@ def blend_neighbors(
     top_k: int = TOP_K,
     block_size: int = 256,
 ) -> dict[int, list[tuple[int, float]]]:
-    """
-    Blended top-K neighbours for every product.
-
-    All three inputs are row-aligned to `product_ids`. Products with no
-    collaborative vector must have a zero row in `cf_vectors` — their alpha is
-    then zero and they fall through to content similarity, which is exactly the
-    cold-start behaviour wanted.
-
-    Similarity is computed in row blocks: the full N×N matrix is never
-    materialised, so memory stays flat as the catalog grows.
-    """
-    n_items = len(product_ids)
-    if n_items < 2:
-        return {}
-
-    alpha = _alpha_per_item(item_users, cf_trust)
-    if alpha.shape[0] != n_items:
-        alpha = np.zeros(n_items, dtype=np.float32)
-
-    has_cf = np.linalg.norm(cf_vectors, axis=1) > 0 if cf_vectors.size else np.zeros(n_items, bool)
-    alpha = alpha * has_cf.astype(np.float32)
-
-    top_k = min(top_k, n_items - 1)
-    neighbors: dict[int, list[tuple[int, float]]] = {}
-
-    for start in range(0, n_items, block_size):
-        end = min(start + block_size, n_items)
-
-        sim_content = content_vectors[start:end] @ content_vectors.T
-        if cf_vectors.size:
-            sim_cf = cf_vectors[start:end] @ cf_vectors.T
-        else:
-            sim_cf = np.zeros_like(sim_content)
-
-        # A pair is only as trustworthy as its less-established half.
-        pair_alpha = np.minimum(alpha[start:end][:, None], alpha[None, :])
-        blended = pair_alpha * sim_cf + (1.0 - pair_alpha) * sim_content
-
-        for local, absolute in enumerate(range(start, end)):
-            blended[local, absolute] = -np.inf      # never its own neighbour
-
-        for local, absolute in enumerate(range(start, end)):
-            scores = blended[local]
-            picks = np.argpartition(-scores, top_k - 1)[:top_k]
-            picks = picks[np.argsort(-scores[picks])]
-            selected = [
-                (int(j), float(scores[j]))
-                for j in picks
-                if np.isfinite(scores[j]) and scores[j] >= MIN_SIMILARITY
-            ]
-            if selected:
-                neighbors[absolute] = selected
-
-    logger.info("similarity: blended neighbours for %d products (cf_trust=%.2f)", len(neighbors), cf_trust)
-    return neighbors
+    """Blended neighbours over the whole catalog — `compute_neighbors` without departments."""
+    hybrid, _ = compute_neighbors(
+        product_ids, cf_vectors, content_vectors, item_users, cf_trust,
+        top_k=top_k, block_size=block_size,
+    )
+    return hybrid
 
 
 def build_co_purchase(lookback_days: int = 365, top_k: int = TOP_K) -> dict[int, list[tuple[int, float, int]]]:

@@ -1373,6 +1373,13 @@ class UpdateOrderStatusAPIView(APIView):
             return Response({"error": "Invalid status choice."}, status=status.HTTP_400_BAD_REQUEST)
         try:
             order        = Order.objects.get(id=id, vendors__in=[vendor])
+            if new_status == 'canceled' and order.status != 'canceled':
+                # The courier is told first: an order cancelled here while its
+                # parcel is still booked would still be picked up and delivered.
+                try:
+                    cancel_open_shipments(order)
+                except DeliveryProviderError as exc:
+                    return Response({"error": str(exc)}, status=status.HTTP_409_CONFLICT)
             order.status = new_status
             order.save()
 
@@ -1461,15 +1468,16 @@ class ProductAnalyticsDetailView(APIView):
 # ─────────────────────────────────────────────────────────────────────────────
 
 from order.models import Shipment, TrackingEvent
-from order.serializers import ShipmentSerializer, TrackingEventSerializer, OrderTrackingSerializer
+from order.serializers import ShipmentSerializer, TrackingEventSerializer
 
 
 # Order status, delivery consequences and tracking events are shared with the
 # delivery team (admin) and courier webhooks; see order/fulfilment.py.
 from order.fulfilment import (  # noqa: E402
+    book_shipment, broadcast_tracking, cancel_open_shipments, notify_tracking_event,
     on_shipment_delivered, recompute_order_status as _recompute_order_status, record_tracking_event,
 )
-from order.delivery import DeliveryProviderError, default_provider  # noqa: E402
+from order.delivery import DeliveryProviderError, provider_for  # noqa: E402
 
 
 class ShipmentAPIView(APIView):
@@ -1486,25 +1494,7 @@ class ShipmentAPIView(APIView):
         return vendor, order
 
     def _broadcast_tracking(self, order):
-        try:
-            from asgiref.sync import async_to_sync
-            from channels.layers import get_channel_layer
-            channel_layer = get_channel_layer()
-            if not channel_layer:
-                return
-            order_refreshed = Order.objects.prefetch_related(
-                'vendors',
-                'shipments__tracking_events',
-                'shipments__items__product',
-                'shipments__vendor',
-            ).get(id=order.id)
-            data = OrderTrackingSerializer(order_refreshed).data
-            async_to_sync(channel_layer.group_send)(
-                f"order_tracking_{order.id}",
-                {"type": "tracking_update", "data": data},
-            )
-        except Exception as e:
-            logger.warning(f"Broadcast tracking failed for order {order.id}: {e}")
+        broadcast_tracking(order.id)
 
     def get(self, request, id):
         vendor, order = self._get_vendor_order(request, id)
@@ -1528,38 +1518,28 @@ class ShipmentAPIView(APIView):
         if not vendor_items:
             return Response({"error": "No items for your store in this order."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Negromart's delivery provider (settings.DEFAULT_DELIVERY_PROVIDER)
-        # books the delivery and supplies tracking; a seller-entered carrier or
-        # tracking number is kept when given.
-        provider = default_provider()
-        shipment = Shipment.objects.create(
-            order=order,
-            vendor=vendor,
-            provider=provider.code,
-            fulfilled_by=provider.fulfilled_by,
-            carrier=request.data.get('carrier', '') or provider.name,
-            carrier_code=request.data.get('carrier_code', '') or provider.code,
-            tracking_number=request.data.get('tracking_number', ''),
-            tracking_url=request.data.get('tracking_url', ''),
-            # A new shipment always starts at "label created"; only the party
-            # making the delivery moves it on (see put / TrackingEventAddAPIView).
-            status=(request.data.get('status') or 'label_created') if provider.fulfilled_by == 'seller' else 'label_created',
-            estimated_delivery_date=request.data.get('estimated_delivery_date') or None,
-            is_international=request.data.get('is_international', False),
-        )
-        shipment.items.set(vendor_items)
+        # The configured delivery provider (order/delivery/) books the delivery
+        # and supplies tracking. Carrier and tracking number typed by the seller
+        # only count when the seller is the one delivering; on a courier
+        # shipment they would overwrite the courier's own.
+        is_international = request.data.get('is_international', False)
+        provider = provider_for(is_international=is_international)
+        seller_delivers = provider.fulfilled_by == 'seller'
         try:
-            booking = provider.book(shipment)
+            shipment = book_shipment(
+                order, vendor, vendor_items, provider,
+                carrier=(request.data.get('carrier', '') if seller_delivers else '') or provider.name,
+                carrier_code=(request.data.get('carrier_code', '') if seller_delivers else '') or provider.code,
+                tracking_number=request.data.get('tracking_number', '') if seller_delivers else '',
+                tracking_url=request.data.get('tracking_url', '') if seller_delivers else '',
+                # A new shipment always starts at "label created"; only the party
+                # making the delivery moves it on (see put / TrackingEventAddAPIView).
+                status=(request.data.get('status') or 'label_created') if seller_delivers else 'label_created',
+                estimated_delivery_date=request.data.get('estimated_delivery_date') or None,
+                is_international=is_international,
+            )
         except DeliveryProviderError as exc:
-            shipment.delete()
             return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
-        shipment.tracking_number = shipment.tracking_number or booking.tracking_number
-        shipment.tracking_url = shipment.tracking_url or booking.tracking_url
-        shipment.external_reference = booking.external_reference
-        shipment.label_url = booking.label_url
-        shipment.provider_data = booking.raw
-        shipment.save(update_fields=['tracking_number', 'tracking_url', 'external_reference',
-                                     'label_url', 'provider_data', 'updated_at'])
 
         _recompute_order_status(order)
         self._broadcast_tracking(order)
@@ -1648,44 +1628,8 @@ class TrackingEventAddAPIView(APIView):
             event_date=request.data['event_date'],
         )
 
-        # Notify buyer of tracking update
-        if order.user:
-            from notification.utils import send_notification
-            event_verb = "customer_order_delivered" if event.status == "delivered" else "customer_tracking_update"
-            send_notification(
-                recipient=order.user,
-                verb=event_verb,
-                target=order,
-                data={
-                    "order_number": order.order_number,
-                    "vendor_name": vendor.name,
-                    "event_status": event.get_status_display(),
-                    "description": event.description,
-                    "location": ", ".join(filter(None, [event.city, event.country])),
-                    "message": event.description,
-                    "url": f"/dashboard/order-history/{order.id}/",
-                }
-            )
-
-        # Broadcast to customer tracking WebSocket
-        try:
-            from asgiref.sync import async_to_sync
-            from channels.layers import get_channel_layer
-            channel_layer = get_channel_layer()
-            if channel_layer:
-                order_refreshed = Order.objects.prefetch_related(
-                    'vendors',
-                    'shipments__tracking_events',
-                    'shipments__items__product',
-                    'shipments__vendor',
-                ).get(id=order.id)
-                data = OrderTrackingSerializer(order_refreshed).data
-                async_to_sync(channel_layer.group_send)(
-                    f"order_tracking_{order.id}",
-                    {"type": "tracking_update", "data": data},
-                )
-        except Exception as e:
-            logger.warning(f"Broadcast tracking event failed for order {order.id}: {e}")
+        notify_tracking_event(shipment, event)
+        broadcast_tracking(order.id)
 
         from order.serializers import TrackingEventSerializer
         return Response(TrackingEventSerializer(event).data, status=status.HTTP_201_CREATED)

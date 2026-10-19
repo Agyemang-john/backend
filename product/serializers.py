@@ -618,7 +618,7 @@ class CollectionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Collection
-        fields = ['slug', 'title', 'subtitle', 'description', 'banner_image', 'accent_color', 'icon']
+        fields = ['slug', 'title', 'subtitle', 'description', 'banner_image', 'accent_color', 'icon', 'filter_type']
 
     def get_banner_image(self, obj):
         request = self.context.get('request')

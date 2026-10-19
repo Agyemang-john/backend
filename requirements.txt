@@ -78,6 +78,9 @@ whitenoise==6.9.0
 gunicorn==23.0.0
 uvicorn[standard]==0.32.0
 numpy==2.2.6
+# Recommender (recommendation/): sparse matrices, TF-IDF and SVD.
+scipy==1.17.1
+scikit-learn==1.8.0
 forex-python
 pycountry==24.6.1
 pandas==2.2.2

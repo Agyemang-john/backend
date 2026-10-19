@@ -399,11 +399,24 @@ REVIEW_REMINDERS = {
 
 # ── Delivery providers (order/delivery/) ─────────────────────────────────────
 # Negromart delivers everything itself today. Add an external courier by
-# writing a provider class and listing it here.
+# writing a provider class and listing it here; switch new shipments to it
+# with DEFAULT_DELIVERY_PROVIDER (and INTERNATIONAL_DELIVERY_PROVIDER for
+# cross-border parcels). Existing shipments keep the provider they were booked with.
 DELIVERY_PROVIDERS = {
     'platform': 'order.delivery.platform.PlatformDeliveryProvider',
+    'raven': 'order.delivery.raven.RavenDeliveryProvider',
 }
 DEFAULT_DELIVERY_PROVIDER = config("DEFAULT_DELIVERY_PROVIDER", default="platform")
+INTERNATIONAL_DELIVERY_PROVIDER = config("INTERNATIONAL_DELIVERY_PROVIDER", default="")
+
+# Raven partner API. Base URL ends before /v1, e.g. https://api.raven.example/api
+RAVEN_API_URL = config("RAVEN_API_URL", default="")
+RAVEN_API_KEY = config("RAVEN_API_KEY", default="")
+RAVEN_WEBHOOK_SECRET = config("RAVEN_WEBHOOK_SECRET", default="")
+RAVEN_SERVICE_CODE = config("RAVEN_SERVICE_CODE", default="STANDARD")
+# Public tracking page, e.g. https://raven.example/track/{tracking_number}
+RAVEN_TRACKING_URL = config("RAVEN_TRACKING_URL", default="")
+RAVEN_TIMEOUT_SECONDS = config("RAVEN_TIMEOUT_SECONDS", default=15, cast=int)
 
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"

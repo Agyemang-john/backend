@@ -13,6 +13,7 @@ Rules are in order/returns.py; this module only translates HTTP.
 
 import logging
 
+from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -21,8 +22,8 @@ from rest_framework.views import APIView
 
 from . import returns as return_rules
 from .delivery import DeliveryProviderError, get_provider
-from .fulfilment import record_tracking_event
-from .models import OrderProduct, ReturnRequest, Shipment
+from .fulfilment import broadcast_tracking, notify_tracking_event, record_tracking_event
+from .models import DeliveryWebhookEvent, OrderProduct, ReturnRequest, Shipment
 
 logger = logging.getLogger(__name__)
 
@@ -119,21 +120,35 @@ class DeliveryWebhookView(APIView):
             return Response({'detail': 'Not accepted.'}, status=status.HTTP_404_NOT_FOUND)
 
         applied = 0
+        touched_orders = set()
         for update in updates:
             shipment = (
-                Shipment.objects.select_related('order')
+                Shipment.objects.select_related('order', 'vendor')
                 .filter(provider=code)
                 .filter(shipment_id=update.shipment_lookup).first()
-                or Shipment.objects.select_related('order')
+                or Shipment.objects.select_related('order', 'vendor')
                 .filter(provider=code, external_reference=update.shipment_lookup).first()
             )
             if shipment is None:
                 logger.warning("delivery webhook: unknown shipment %s from %s", update.shipment_lookup, code)
                 continue
-            record_tracking_event(
-                shipment, status=update.status, description=update.description,
-                event_date=update.event_date, location=update.location, city=update.city,
-                country=update.country,
-            )
+            with transaction.atomic():
+                # Claimed in the same transaction as the event it guards, so a
+                # failure part-way leaves the notification unclaimed for the retry.
+                if update.event_id:
+                    _, first_time = DeliveryWebhookEvent.objects.get_or_create(
+                        provider=code, event_id=update.event_id,
+                    )
+                    if not first_time:
+                        continue
+                event = record_tracking_event(
+                    shipment, status=update.status, description=update.description,
+                    event_date=update.event_date, location=update.location, city=update.city,
+                    country=update.country,
+                )
+            notify_tracking_event(shipment, event)
+            touched_orders.add(shipment.order_id)
             applied += 1
+        for order_id in touched_orders:
+            broadcast_tracking(order_id)
         return Response({'applied': applied})

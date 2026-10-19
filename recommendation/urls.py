@@ -6,12 +6,15 @@ Storefront recommendation API, mounted at /api/v1/recommendations/.
 from django.urls import path
 
 from .views import (
-    CartAddonsAPIView, KeepShoppingAPIView, ModelHealthAPIView, NotInterestedAPIView,
-    RecommendedForYouAPIView, TodaysDealsAPIView, TrackEventAPIView, YouMightAlsoLikeAPIView,
+    CartAddonsAPIView, CategoryShelvesAPIView, DealsPageAPIView, KeepShoppingAPIView,
+    ModelHealthAPIView, NotInterestedAPIView, RecommendedForYouAPIView, TodaysDealsAPIView,
+    TrackEventAPIView, YouMightAlsoLikeAPIView,
 )
 
 urlpatterns = [
     path('todays-deals/', TodaysDealsAPIView.as_view(), name='rec-todays-deals'),
+    path('deals/', DealsPageAPIView.as_view(), name='rec-deals'),
+    path('category-shelves/', CategoryShelvesAPIView.as_view(), name='rec-category-shelves'),
     path('for-you/', RecommendedForYouAPIView.as_view(), name='rec-for-you'),
     path('similar/<sku>/<slug>/', YouMightAlsoLikeAPIView.as_view(), name='rec-similar'),
     path('cart-addons/', CartAddonsAPIView.as_view(), name='rec-cart-addons'),

@@ -56,6 +56,9 @@ W_DEAL       = 0.12
 W_QUALITY    = 0.10
 W_TREND      = 0.08
 W_PRICE_FIT  = 0.05
+#: Click lift from the rails (engagement.py) — a multiplier, not an addend, so
+#: it reorders close calls without lifting an irrelevant product into view.
+ENGAGEMENT_EXPONENT = 0.5
 
 #: Recent interactions used as explanation seeds.
 MAX_SEEDS = 8
@@ -69,7 +72,11 @@ TOP_N = 40
 
 #: Diversity caps within the final rail.
 MAX_PER_SUB_CATEGORY = 3
+MAX_PER_CATEGORY = 8
 MAX_PER_VENDOR = 4
+
+#: Products kept per sub-category / brand in the affinity index.
+AFFINITY_LIST_SIZE = 40
 
 
 def _normalize(values: dict[int, float]) -> dict[int, float]:
@@ -102,6 +109,7 @@ class ProductCatalog:
         size = len(product_ids)
 
         self.sub_category = np.zeros(size, dtype=np.int64)
+        self.category = np.zeros(size, dtype=np.int64)
         self.vendor = np.zeros(size, dtype=np.int64)
         self.brand = np.zeros(size, dtype=np.int64)
         self.price = np.zeros(size, dtype=np.float64)
@@ -114,17 +122,18 @@ class ProductCatalog:
             Product.published
             .filter(id__in=product_ids)
             .values_list(
-                'id', 'sub_category_id', 'vendor_id', 'brand_id',
+                'id', 'sub_category_id', 'sub_category__category_id', 'vendor_id', 'brand_id',
                 'price', 'avg_rating', 'review_count', 'trending_score', 'title',
             )
         )
         self.sellable: set[int] = set()
-        for pid, sub_cat, vendor, brand, price, rating, reviews, trending, title in rows:
+        for pid, sub_cat, category, vendor, brand, price, rating, reviews, trending, title in rows:
             index = self.position.get(pid)
             if index is None:
                 continue
             self.sellable.add(index)
             self.sub_category[index] = sub_cat or 0
+            self.category[index] = category or 0
             self.vendor[index] = vendor or 0
             self.brand[index] = brand or 0
             self.price[index] = float(price or 0)
@@ -136,6 +145,40 @@ class ProductCatalog:
         self.deal_score = np.zeros(size, dtype=np.float64)
         self.in_stock = np.ones(size, dtype=bool)
         self._load_deal_state()
+
+        self.lift = np.ones(size, dtype=np.float64)
+        self._build_affinity_index()
+
+    def load_lift(self, lift: dict[int, float]):
+        for pid, value in lift.items():
+            index = self.position.get(pid)
+            if index is not None:
+                self.lift[index] = value
+
+    def _build_affinity_index(self):
+        """
+        Best products per sub-category and per brand, built once per run.
+
+        Candidate generation used to walk the whole catalog for every shopper to
+        find products in their favourite categories — fine at a few thousand
+        products, hours at a hundred thousand. Ranking each group once and
+        reading the top of the list per shopper makes that step independent of
+        catalog size.
+        """
+        self.quality = 0.5 * (self.rating / 5.0) + 0.5 * np.minimum(self.trending / 100.0, 1.0)
+        self.by_sub_category: dict[int, list[int]] = defaultdict(list)
+        self.by_brand: dict[int, list[int]] = defaultdict(list)
+
+        for index in np.argsort(-self.quality, kind='stable'):
+            index = int(index)
+            if not self.is_recommendable(index):
+                continue
+            sub_cat = int(self.sub_category[index])
+            brand = int(self.brand[index])
+            if sub_cat and len(self.by_sub_category[sub_cat]) < AFFINITY_LIST_SIZE:
+                self.by_sub_category[sub_cat].append(index)
+            if brand and len(self.by_brand[brand]) < AFFINITY_LIST_SIZE:
+                self.by_brand[brand].append(index)
 
     def _load_deal_state(self):
         from .models import ProductDealScore
@@ -270,19 +313,15 @@ def _generate_candidates(
         }
         top_brands = {brand for brand, _ in sorted(brands.items(), key=lambda kv: -kv[1])[:5]}
 
-        for index in range(len(catalog.product_ids)):
-            if index in seen or not catalog.is_recommendable(index):
-                continue
-            in_category = int(catalog.sub_category[index]) in top_sub_categories
-            in_brand = int(catalog.brand[index]) in top_brands
-            if not (in_category or in_brand):
-                continue
-            # Rank within the affinity group by quality, not arbitrarily.
-            base = 0.5 * (catalog.rating[index] / 5.0) + 0.5 * min(catalog.trending[index] / 100.0, 1.0)
-            if in_category:
-                candidates[index]['category'] = base
-            if in_brand:
-                candidates[index]['brand'] = base
+        # Read the precomputed best-of lists instead of scanning the catalog.
+        for sub_cat in top_sub_categories:
+            for index in catalog.by_sub_category.get(sub_cat, ()):
+                if index not in seen:
+                    candidates[index]['category'] = float(catalog.quality[index])
+        for brand in top_brands:
+            for index in catalog.by_brand.get(brand, ()):
+                if index not in seen:
+                    candidates[index]['brand'] = float(catalog.quality[index])
 
     # 4. Deals and trending — the floor that guarantees a full, useful rail.
     for index in np.argsort(-catalog.deal_score)[:60]:
@@ -349,19 +388,24 @@ def _apply_diversity(ranked: list[tuple[int, float, str, str]], catalog: Product
     selected: list[tuple[int, float, str, str]] = []
     overflow: list[tuple[int, float, str, str]] = []
     per_sub_category: dict[int, int] = defaultdict(int)
+    per_category: dict[int, int] = defaultdict(int)
     per_vendor: dict[int, int] = defaultdict(int)
 
     for entry in ranked:
         index = entry[0]
         sub_category = int(catalog.sub_category[index])
+        category = int(catalog.category[index])
         vendor = int(catalog.vendor[index])
 
         if (per_sub_category[sub_category] >= MAX_PER_SUB_CATEGORY
+                or (category and per_category[category] >= MAX_PER_CATEGORY)
                 or per_vendor[vendor] >= MAX_PER_VENDOR):
             overflow.append(entry)
             continue
 
         per_sub_category[sub_category] += 1
+        if category:
+            per_category[category] += 1
         per_vendor[vendor] += 1
         selected.append(entry)
         if len(selected) >= limit:
@@ -390,11 +434,15 @@ def build_user_recommendations(
     """
     from django.db import transaction
 
+    from . import engagement
+
     if not dataset.auth_user_ids:
         logger.info("ranker: no authenticated shoppers in the dataset")
         return 0
 
     catalog = ProductCatalog(product_ids)
+    catalog.load_lift(engagement.product_lift())
+    skipped_products = engagement.skipped_by_user()
 
     # Dataset column → catalog position. The dataset is built from the pruned set
     # of products with enough interactions to model; everything else in the
@@ -417,6 +465,10 @@ def build_user_recommendations(
     rows: list[UserRecommendation] = []
 
     for row, user_id in dataset.auth_user_ids.items():
+        skipped = {
+            catalog.position[pid] for pid in skipped_products.get(user_id, ())
+            if pid in catalog.position
+        }
         history = _history(dataset, row, to_catalog)
         seen = {index for index, _ in history} | dismissed.get(user_id, set())
 
@@ -465,6 +517,9 @@ def build_user_recommendations(
                 )
                 + W_PRICE_FIT * _price_fit(float(catalog.price[index]), typical_price)
             )
+            score *= float(catalog.lift[index]) ** ENGAGEMENT_EXPONENT
+            if index in skipped:
+                score *= engagement.SKIP_PENALTY
             reason, detail = _pick_reason(sources, normalized, index, catalog)
             ranked.append((index, score, reason, detail))
 

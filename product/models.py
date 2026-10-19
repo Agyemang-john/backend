@@ -1027,6 +1027,7 @@ class Collection(models.Model):
         ('manual',       'Manual – hand-picked products'),
         ('sub_category', 'Sub-category – all products in a sub-category'),
         ('flash_sale',   'Flash Sale – all live flash-sale products'),
+        ('todays_deals', "Today's Deals – opens the deals page (banner and title used there)"),
     ]
 
     slug          = models.SlugField(unique=True)
@@ -1059,6 +1060,10 @@ class Collection(models.Model):
             ids = FlashSale.objects.filter(
                 is_active=True, start_time__lte=now, end_time__gte=now
             ).values_list('product_id', flat=True)
+            return Product.published.filter(id__in=ids)
+        if self.filter_type == 'todays_deals':
+            from recommendation.models import ProductDealScore
+            ids = ProductDealScore.objects.filter(is_eligible=True).values_list('product_id', flat=True)
             return Product.published.filter(id__in=ids)
         return self.products.filter(status='published', vendor__shop_paused=False, vendor__is_suspended=False)
 
