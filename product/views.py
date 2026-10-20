@@ -23,6 +23,7 @@ from .utils import (
     track_view, _get_redis,
 )
 from .shipping import can_product_ship_to_user
+from .listing import listing_page_size
 
 from .review_serializers import PublicReviewSerializer  # noqa: E402
 from .review_views import visible_reviews  # noqa: E402
@@ -599,7 +600,7 @@ class CategoryProductListView(APIView):
         )
 
         # ── Pagination ─────────────────────────────────────────────────────────
-        PAGE_SIZE = 12
+        PAGE_SIZE = listing_page_size(request.GET)
         total_items = price_range['total']
         total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
         page = min(page, total_pages)
@@ -659,6 +660,7 @@ class CategoryProductListView(APIView):
             "total": total_items,
             "current_page": page,
             "total_pages": total_pages,
+            "page_size": PAGE_SIZE,
         })
 
 class BrandProductListView(APIView):
@@ -761,7 +763,7 @@ class BrandProductListView(APIView):
         )
 
         # ── Pagination ─────────────────────────────────────────────────────────
-        PAGE_SIZE = 12
+        PAGE_SIZE = listing_page_size(request.GET)
         total_items = filtered_bounds['total']
         total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
         page = min(page, total_pages)
@@ -820,6 +822,7 @@ class BrandProductListView(APIView):
             "total": total_items,
             "total_pages": total_pages,
             "current_page": page,
+            "page_size": PAGE_SIZE,
         })
 
 # from elasticsearch8 import Elasticsearch
@@ -950,7 +953,7 @@ class ProductSearchAPIView(APIView):
         )
 
         # ── Pagination ─────────────────────────────────────────────────────────
-        PAGE_SIZE = 12
+        PAGE_SIZE = listing_page_size(request.GET)
         total_items = price_range['total']
         total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
         page = min(page, total_pages)
@@ -1000,6 +1003,7 @@ class ProductSearchAPIView(APIView):
             "total": total_items,
             "total_pages": total_pages,
             "current_page": page,
+            "page_size": PAGE_SIZE,
         })
          
 
@@ -1215,7 +1219,7 @@ class CollectionAPIView(APIView):
         if not (sort == 'featured' and collection.filter_type == 'auto'):  # keep the curator's ranking
             filtered = filtered.order_by(_sort_map.get(sort, '-date'))
 
-        PAGE_SIZE = 12
+        PAGE_SIZE = listing_page_size(request.GET)
         total_items = filtered.count()
         total_pages = max(1, (total_items + PAGE_SIZE - 1) // PAGE_SIZE)
         page = max(1, min(page, total_pages))
@@ -1254,12 +1258,13 @@ class CollectionAPIView(APIView):
 
         price_agg = base_qs.aggregate(min_price=Min('price'), max_price=Max('price'))
 
-        next_url = request.build_absolute_uri(
-            f"/api/v1/product/collection/{slug}/?page={page + 1}"
-        ) if page < total_pages else None
-        prev_url = request.build_absolute_uri(
-            f"/api/v1/product/collection/{slug}/?page={page - 1}"
-        ) if page > 1 else None
+        def build_url(page_num):
+            params = request.GET.copy()
+            params['page'] = page_num
+            return request.build_absolute_uri(f"/api/v1/product/collection/{slug}/?{params.urlencode()}")
+
+        next_url = build_url(page + 1) if page < total_pages else None
+        prev_url = build_url(page - 1) if page > 1 else None
 
         return Response({
             'collection': CollectionSerializer(collection, context={'request': request}).data,
@@ -1267,6 +1272,9 @@ class CollectionAPIView(APIView):
             'next': next_url,
             'previous': prev_url,
             'total': total_items,
+            'current_page': page,
+            'total_pages': total_pages,
+            'page_size': PAGE_SIZE,
             'min_price_unfiltered': float(price_agg['min_price'] or 0) * float(exchange_rate),
             'max_price_unfiltered': float(price_agg['max_price'] or 0) * float(exchange_rate),
             'default_max_price':    float(price_agg['max_price'] or 10000) * float(exchange_rate),

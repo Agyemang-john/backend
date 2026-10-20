@@ -10,6 +10,7 @@ from .models import *
 from userauths.models import *
 from order.models import *
 from product.models import Product, Variants
+from product.listing import listing_page_size
 
 from rest_framework import status, generics, permissions
 from rest_framework.response import Response
@@ -919,11 +920,12 @@ class VendorProductsView(APIView):
     """
     GET /api/v1/vendor/seller-detail/<slug>/products/
 
-    The seller storefront grid: 16 lightweight cards per page, filtered and
+    The seller storefront grid: 30, 60 or 90 lightweight cards per page, filtered and
     sorted in the database.
 
     Query params (all optional):
         page        1-based page number
+        page_size   30 (default) | 60 | 90
         sort        newest (default) | price_asc | price_desc | rating | popular
         category    sub-category slug
         min_price   in the shopper's currency (X-Currency), converted to GHS here
@@ -931,7 +933,7 @@ class VendorProductsView(APIView):
         rating      minimum average rating (1-5)
         on_sale     1 → only products whose old_price is above price
 
-    Speed: one COUNT + one 16-row SELECT of card columns only, no per-product
+    Speed: one COUNT + one page-sized SELECT of card columns only, no per-product
     queries. Pages are cached in GHS for a minute and converted per request, so
     the cache is shared across currencies. The category facet list is cached
     separately for ten minutes.
@@ -939,7 +941,6 @@ class VendorProductsView(APIView):
 
     permission_classes = [AllowAny]
 
-    PAGE_SIZE = 16
     PAGE_TTL = 60
     FACET_TTL = 60 * 10
     CARD_FIELDS = ('id', 'title', 'slug', 'sku', 'image', 'price', 'old_price', 'avg_rating', 'review_count')
@@ -970,6 +971,7 @@ class VendorProductsView(APIView):
             page = max(1, int(params.get('page', 1)))
         except (TypeError, ValueError):
             page = 1
+        page_size = listing_page_size(params)
         sort = params.get('sort') if params.get('sort') in self.SORTS else 'newest'
         category = (params.get('category') or '').strip()[:150]
         min_price = self._decimal(params.get('min_price'))
@@ -982,7 +984,7 @@ class VendorProductsView(APIView):
         ghs_max = (max_price / rate).quantize(Decimal('0.01')) if max_price is not None else None
 
         cache_key = 'vendor_products:{}:{}'.format(slug, '|'.join(map(str, (
-            page, sort, category, ghs_min, ghs_max, min_rating, on_sale,
+            page, page_size, sort, category, ghs_min, ghs_max, min_rating, on_sale,
         ))))
         payload = cache.get(cache_key)
 
@@ -1004,16 +1006,16 @@ class VendorProductsView(APIView):
                 products = products.filter(old_price__gt=F('price'))
 
             total = products.count()
-            total_pages = max(1, -(-total // self.PAGE_SIZE))
+            total_pages = max(1, -(-total // page_size))
             page = min(page, total_pages)
-            offset = (page - 1) * self.PAGE_SIZE
-            rows = products.order_by(*self.SORTS[sort]).only(*self.CARD_FIELDS)[offset:offset + self.PAGE_SIZE]
+            offset = (page - 1) * page_size
+            rows = products.order_by(*self.SORTS[sort]).only(*self.CARD_FIELDS)[offset:offset + page_size]
 
             payload = {
                 'total': total,
                 'page': page,
                 'total_pages': total_pages,
-                'page_size': self.PAGE_SIZE,
+                'page_size': page_size,
                 'results': [
                     {
                         'id': p.id,

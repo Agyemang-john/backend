@@ -24,9 +24,9 @@ from decimal import Decimal
 from django.core.cache import cache
 from django.utils import timezone
 
-from .models import ProductDealScore
+from product.listing import listing_page_size
 
-PAGE_SIZE = 24
+from .models import ProductDealScore
 
 #: Discount-depth filter options, in percent.
 DISCOUNT_STEPS = (10, 25, 50)
@@ -34,7 +34,7 @@ DISCOUNT_STEPS = (10, 25, 50)
 #: Collection filter type whose collection supplies the page banner.
 DEALS_COLLECTION_TYPE = 'todays_deals'
 
-#: Diversity caps on each page of the default sort.
+#: Diversity caps per 24 cards of the default sort; scaled to the page size.
 PAGE_MAX_PER_VENDOR = 4
 PAGE_MAX_PER_SUB_CATEGORY = 6
 
@@ -62,6 +62,7 @@ class DealFilters:
     price_to: float | None = None        # GHS
     sort: str = 'best'
     page: int = 1
+    page_size: int = 30
 
     @classmethod
     def from_query(cls, params, rate: Decimal) -> 'DealFilters':
@@ -92,6 +93,7 @@ class DealFilters:
             price_to=price('to'),
             sort=sort if sort in SORTS else 'best',
             page=max(1, one_int('page') or 1),
+            page_size=listing_page_size(params),
         )
 
 
@@ -178,7 +180,7 @@ def _matches(row: dict, f: DealFilters, skip: str = '') -> bool:
     return True
 
 
-def _sorted_ids(request, rows: list[dict], sort: str) -> list[int]:
+def _sorted_ids(request, rows: list[dict], sort: str, page_size: int) -> list[int]:
     if sort == 'discount':
         rows = sorted(rows, key=lambda r: (-r['discount'], -r['score']))
     elif sort == 'ending_soon':
@@ -202,9 +204,9 @@ def _sorted_ids(request, rows: list[dict], sort: str) -> list[int]:
         remaining = ranked
         while remaining:
             page = diversify(
-                remaining, facts, PAGE_SIZE,
-                max_per_vendor=PAGE_MAX_PER_VENDOR,
-                max_per_sub_category=PAGE_MAX_PER_SUB_CATEGORY,
+                remaining, facts, page_size,
+                max_per_vendor=math.ceil(PAGE_MAX_PER_VENDOR * page_size / 24),
+                max_per_sub_category=math.ceil(PAGE_MAX_PER_SUB_CATEGORY * page_size / 24),
             )
             ordered.extend(page)
             taken = set(page)
@@ -234,12 +236,13 @@ def deals_page(request, rate: Decimal) -> dict:
     rows = [row for row in _deal_rows() if row['id'] not in hidden]
 
     matched = [row for row in rows if _matches(row, f)]
-    ids = _sorted_ids(request, matched, f.sort)
+    ids = _sorted_ids(request, matched, f.sort, f.page_size)
 
     total = len(ids)
-    pages = max(1, math.ceil(total / PAGE_SIZE))
+    size = f.page_size
+    pages = max(1, math.ceil(total / size))
     page = min(f.page, pages)
-    page_ids = ids[(page - 1) * PAGE_SIZE: page * PAGE_SIZE]
+    page_ids = ids[(page - 1) * size: page * size]
 
     # ── Facets ───────────────────────────────────────────────────────────────
     department_counts: dict[int, int] = {}
@@ -284,6 +287,7 @@ def deals_page(request, rate: Decimal) -> dict:
         'total': total,
         'page': page,
         'pages': pages,
+        'page_size': size,
         'sort': f.sort,
         'sorts': [{'value': key, 'label': label} for key, label in SORTS.items()],
         'departments': departments,

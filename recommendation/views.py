@@ -126,6 +126,7 @@ class DealsPageAPIView(APIView):
             'total': data['total'],
             'page': data['page'],
             'pages': data['pages'],
+            'page_size': data['page_size'],
             'sort': data['sort'],
             'sorts': data['sorts'],
             'departments': data['departments'],

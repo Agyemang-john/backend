@@ -73,15 +73,20 @@ class SellerStoreProductsTests(TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         return response.data
 
-    def test_sixteen_per_page(self):
+    def test_thirty_per_page_by_default(self):
         first = self.get()
         self.assertEqual(first['total'], 25)  # the draft is excluded
-        self.assertEqual(first['total_pages'], 2)
-        self.assertEqual(len(first['results']), 16)
-        self.assertEqual(len(self.get(page=2)['results']), 9)
+        self.assertEqual(first['page_size'], 30)
+        self.assertEqual(first['total_pages'], 1)
+        self.assertEqual(len(first['results']), 25)
+
+    def test_page_size_only_accepts_the_offered_sizes(self):
+        self.assertEqual(self.get(page_size=60)['page_size'], 60)
+        self.assertEqual(self.get(page_size=16)['page_size'], 30)
+        self.assertEqual(self.get(page_size='lots')['page_size'], 30)
 
     def test_page_out_of_range_clamps_to_last_page(self):
-        self.assertEqual(self.get(page=99)['page'], 2)
+        self.assertEqual(self.get(page=99)['page'], 1)
 
     def test_query_count_does_not_grow_with_products(self):
         with CaptureQueriesContext(connection) as queries:
