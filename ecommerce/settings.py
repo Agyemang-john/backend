@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     'customer',
     'payments',
     'newsletter',
+    'chat',
     'django_ckeditor_5',
     'django_celery_beat',
     'notification',
@@ -426,6 +427,9 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_TIMEZONE = "UTC"
 CELERY_ENABLE_UTC = True
+# Shopper ↔ seller chat (chat/): messages are deleted after this many days.
+CHAT_RETENTION_DAYS = config("CHAT_RETENTION_DAYS", default=30, cast=int)
+
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 
 CELERY_BEAT_SCHEDULE = {
@@ -561,6 +565,12 @@ CELERY_BEAT_SCHEDULE = {
     "curate-collections": {
         "task": "product.tasks.curate_collections",
         "schedule": crontab(hour=4, minute=5),
+        "options": {"expires": 3 * 3600},
+    },
+    # Delete shopper ↔ seller chats older than CHAT_RETENTION_DAYS (chat/tasks.py).
+    "purge-old-chats": {
+        "task": "chat.tasks.purge_old_chats",
+        "schedule": crontab(hour=3, minute=40),
         "options": {"expires": 3 * 3600},
     },
     # Delete review photos/videos uploaded but never attached to a review.

@@ -352,3 +352,31 @@ class ConcurrencyTests(ReviewFixtures, TransactionTestCase):
         self.assertEqual(ProductReview.objects.filter(user=self.buyer, product=self.product).count(), 1)
         self.assertEqual(results.count(201), 1)
         self.assertTrue(all(code in (201, 409) for code in results), results)
+
+
+@override_settings(**TEST_SETTINGS)
+class SellerPageReviewsTests(ReviewFixtures, TestCase):
+    """vendor/views.py VendorReviewsView: the seller page "Reviews" tab."""
+
+    def setUp(self):
+        self.make_world()
+
+    def test_summary_pagination_and_filter(self):
+        for n, rating in enumerate([5, 5, 5, 4, 1] + [5] * 8, start=10):
+            self.approved_review(make_user(n), rating)
+        ProductReview.objects.create(user=make_user(40), product=self.product, rating=1, review=GOOD_TEXT,
+                                     moderation_status=ProductReview.PENDING)
+        url = f'/api/v1/vendor/seller-detail/{self.vendor.slug}/reviews/'
+
+        data = client_for().get(url).json()
+        self.assertEqual(data['count'], 13)
+        self.assertEqual(len(data['results']), 10)
+        self.assertEqual(data['summary']['distribution'], {'1': 1, '2': 0, '3': 0, '4': 1, '5': 11})
+        self.assertEqual(data['summary']['percentages']['5'], 85)
+        self.assertEqual(data['results'][0]['product']['slug'], self.product.slug)
+        self.assertNotIn('moderation_status', data['results'][0])
+
+        self.assertEqual(len(client_for().get(url, {'page': 2}).json()['results']), 3)
+        filtered = client_for().get(url, {'rating': 1}).json()
+        self.assertEqual(filtered['count'], 1)
+        self.assertEqual(filtered['summary']['count'], 13)  # summary ignores the filter

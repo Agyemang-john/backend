@@ -44,7 +44,7 @@ from .payment_serializers import VendorPaymentMethodSerializer, PayoutSerializer
 from .product_serializers import ProductSerializer, ProductReviewSerializer, VendorProductListSerializer, VendorProductCardSerializer
 from .order_serializers import VendorOrderSerializer, OrderSerializer
 
-from core.serializers import VendorSerializer as VendorDetail, ProductReviewSerializer as ReviewDetail
+from core.serializers import VendorSerializer as VendorDetail
 from vendor.permissions import IsVerifiedVendor
 # Team access: "my store" is resolved through VendorMember, and sensitive
 # endpoints ask for a capability rather than a role (see vendor/access.py).
@@ -1065,20 +1065,54 @@ class VendorProductsView(APIView):
 
 
 class VendorReviewsView(APIView):
+    """
+    Seller page "Reviews" tab: approved reviews across the seller's published
+    products, newest first, paginated (?page=, ?rating=1..5).
+    The star summary is cached; vendor/signals.py clears it when a review changes.
+    """
+    permission_classes = [AllowAny]
+
     def get(self, request, slug):
-        vendor    = get_object_or_404(Vendor, slug=slug)
+        from product.review_views import ReviewPagination, _with_media
+        from product.review_serializers import PublicReviewSerializer
+
+        vendor  = get_object_or_404(Vendor, slug=slug)
+        reviews = ProductReview.objects.filter(product__vendor=vendor, product__status='published',
+                                               moderation_status=ProductReview.APPROVED)
+
         cache_key = f"vendor_reviews:{slug}"
-        cached    = cache.get(cache_key)
-        if not cached:
-            product_ids = Product.objects.filter(vendor=vendor, status='published').values_list('id', flat=True)
-            reviews     = ProductReview.objects.filter(product__id__in=product_ids, status=True).order_by('-date')
-            cached = {
-                'reviews':        ReviewDetail(reviews, many=True, context={'request': request}).data,
-                'average_rating': round(reviews.aggregate(Avg('rating'))['rating__avg'] or 0, 2),
-                'review_count':   reviews.count(),
+        summary   = cache.get(cache_key)
+        if summary is None:
+            agg   = reviews.aggregate(count=Count('id'), **{f'r{n}': Count('id', filter=Q(rating=n)) for n in range(1, 6)})
+            total = agg['count'] or 0
+            summary = {
+                'count':        total,
+                'average':      round(sum(n * agg[f'r{n}'] for n in range(1, 6)) / total, 2) if total else 0,
+                'distribution': {str(n): agg[f'r{n}'] for n in range(1, 6)},
+                'percentages':  {str(n): (round(agg[f'r{n}'] * 100 / total) if total else 0) for n in range(1, 6)},
             }
-            cache.set(cache_key, cached, timeout=60 * 15)
-        return Response(cached)
+            cache.set(cache_key, summary, timeout=60 * 15)
+
+        rating = request.query_params.get('rating')
+        if rating in {'1', '2', '3', '4', '5'}:
+            reviews = reviews.filter(rating=int(rating))
+
+        paginator = ReviewPagination()
+        page = paginator.paginate_queryset(_with_media(reviews).order_by('-date'), request, view=self)
+        results = []
+        for review, data in zip(page, PublicReviewSerializer(page, many=True, context={'request': request}).data):
+            product = review.product
+            try:
+                image = request.build_absolute_uri(product.image.url) if product.image else None
+            except ValueError:
+                image = None
+            data['product'] = {'id': product.pk, 'title': product.title, 'sku': product.sku,
+                               'slug': product.slug, 'image': image}
+            results.append(data)
+
+        response = paginator.get_paginated_response(results)
+        response.data['summary'] = summary
+        return response
 
 
 class ProductRelatedDataAPIView(APIView):

@@ -35,10 +35,11 @@ class Capability:
     MANAGE_FINANCE = 'manage_finance'   # payout methods, subscription, cards (write)
     MANAGE_TEAM = 'manage_team'         # invite / remove members
     CLOSE_STORE = 'close_store'         # account deletion request
+    MANAGE_MESSAGES = 'manage_messages' # read and answer shopper chats (chat/)
 
     ALL = frozenset({
         MANAGE_CATALOG, MANAGE_ORDERS, VIEW_ANALYTICS, MANAGE_STORE,
-        VIEW_FINANCE, MANAGE_FINANCE, MANAGE_TEAM, CLOSE_STORE,
+        VIEW_FINANCE, MANAGE_FINANCE, MANAGE_TEAM, CLOSE_STORE, MANAGE_MESSAGES,
     })
 
 
@@ -51,11 +52,13 @@ ROLE_CAPABILITIES = {
         Capability.MANAGE_STORE,
         Capability.VIEW_FINANCE,
         Capability.MANAGE_TEAM,      # admins may invite/remove *staff* only (see team_views)
+        Capability.MANAGE_MESSAGES,
     }),
     VendorMember.ROLE_STAFF: frozenset({
         Capability.MANAGE_CATALOG,
         Capability.MANAGE_ORDERS,
         Capability.VIEW_ANALYTICS,
+        Capability.MANAGE_MESSAGES,
     }),
 }
 
