@@ -62,6 +62,9 @@ class Conversation(models.Model):
     vendor_unread = models.PositiveIntegerField(default=0)
     customer_last_read_id = models.BigIntegerField(default=0)
     vendor_last_read_id = models.BigIntegerField(default=0)
+    # The last message a "still waiting for your reply" reminder was sent for
+    # (chat/tasks.py send_chat_reminders): one reminder per unanswered message.
+    reminded_message_id = models.BigIntegerField(default=0)
 
     class Meta:
         ordering = ['-last_message_at']

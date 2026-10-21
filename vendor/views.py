@@ -45,6 +45,7 @@ from .product_serializers import ProductSerializer, ProductReviewSerializer, Ven
 from .order_serializers import VendorOrderSerializer, OrderSerializer
 
 from core.serializers import VendorSerializer as VendorDetail
+from chat.services import store_accepts_messages
 from vendor.permissions import IsVerifiedVendor
 # Team access: "my store" is resolved through VendorMember, and sensitive
 # endpoints ask for a capability rather than a role (see vendor/access.py).
@@ -876,6 +877,8 @@ class VendorDetailView(APIView):
             'followers_count': vendor.followers.count(),
             'is_following': vendor.followers.filter(id=request.user.id).exists() if request.user.is_authenticated else False,
             'views': vendor.views,
+            # Storefront shows "Message" / "Contact business" only for stores on a plan with chat.
+            'accepts_messages': store_accepts_messages(vendor),
         }, status=status.HTTP_200_OK)
 
     def post(self, request, slug):

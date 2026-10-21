@@ -429,6 +429,10 @@ CELERY_TIMEZONE = "UTC"
 CELERY_ENABLE_UTC = True
 # Shopper ↔ seller chat (chat/): messages are deleted after this many days.
 CHAT_RETENTION_DAYS = config("CHAT_RETENTION_DAYS", default=30, cast=int)
+# Unanswered for this long → in-app + SMS reminder to the side that hasn't replied.
+CHAT_REMINDER_AFTER_HOURS = config("CHAT_REMINDER_AFTER_HOURS", default=24, cast=int)
+# Links in chat reminder SMS to sellers.
+SELLER_SITE_URL = config("SELLER_SITE_URL", default="https://seller.negromart.com")
 
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 
@@ -568,6 +572,12 @@ CELERY_BEAT_SCHEDULE = {
         "options": {"expires": 3 * 3600},
     },
     # Delete shopper ↔ seller chats older than CHAT_RETENTION_DAYS (chat/tasks.py).
+    # "Waiting for your reply" reminders, in-app + SMS (chat/tasks.py).
+    "chat-reply-reminders": {
+        "task": "chat.tasks.send_chat_reminders",
+        "schedule": 1800,  # every 30 minutes
+        "options": {"expires": 1500},
+    },
     "purge-old-chats": {
         "task": "chat.tasks.purge_old_chats",
         "schedule": crontab(hour=3, minute=40),

@@ -3,7 +3,7 @@ chat/services.py
 The rules of shopper ↔ seller chat. Views and the websocket consumer call these;
 nothing else writes Conversation / Message rows.
 
-    resolve_vendor_side(user)          → the store this user answers chats for
+    resolve_vendor_side(user)          → the store this user answers chats for (Basic plan and up)
     start_conversation(...)            → shopper opens (or reopens) a chat with a store
     send_message(...)                  → either side posts; moderation, counters, push
     mark_read(conversation, side)      → read receipts + unread counters
@@ -18,6 +18,7 @@ from django.db.models import F
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied
 
+from payments.entitlements import MESSAGING_MIN_TIER, can_use_messaging, plan_for_vendor
 from vendor.access import Capability, get_membership, has_capability
 
 from . import moderation, realtime
@@ -48,7 +49,24 @@ def retention_days():
 
 
 def store_accepts_messages(vendor):
-    return bool(vendor.is_approved and not vendor.is_suspended)
+    """Approved, not suspended, and on a plan that includes chat (Basic and up)."""
+    return bool(vendor.is_approved and not vendor.is_suspended and can_use_messaging(vendor))
+
+
+class MessagingPlanRequired(PermissionDenied):
+    """403 with the same body as payments/subscription_permissions.py upgrade errors."""
+
+    def __init__(self, vendor):
+        plan = plan_for_vendor(vendor)
+        super().__init__({
+            'error': 'plan_upgrade_required',
+            'code': 'plan_upgrade_required',
+            'detail': f"Customer messaging is included from the {MESSAGING_MIN_TIER.title()} plan upwards.",
+            'current_tier': plan.tier if plan else 'free',
+            'required_tier': MESSAGING_MIN_TIER,
+            'action': 'upgrade',
+            'upgrade_url': '/subscribe',
+        })
 
 
 # ── Who is talking ────────────────────────────────────────────────────────────
@@ -60,6 +78,8 @@ def resolve_vendor_side(user):
         raise PermissionDenied("You must be a member of an approved store to answer customer messages.")
     if not has_capability(user, Capability.MANAGE_MESSAGES):
         raise PermissionDenied("Your team role does not include customer messages. Ask the store owner for access.")
+    if not can_use_messaging(membership.vendor):
+        raise MessagingPlanRequired(membership.vendor)
     return membership.vendor
 
 

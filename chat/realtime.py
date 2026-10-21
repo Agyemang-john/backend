@@ -131,8 +131,6 @@ def typing(conversation_id, to_side, to_party_id):
 
 def notify_offline(conversation, message, recipient_side):
     from notification.utils import send_notification
-    from vendor.access import Capability, capabilities_for_role
-    from vendor.models import VendorMember
 
     from .models import Side
     from .serializers import customer_display
@@ -150,15 +148,21 @@ def notify_offline(conversation, message, recipient_side):
             })
             return
         name, _ = customer_display(conversation.customer)
-        members = (VendorMember.objects.filter(vendor_id=conversation.vendor_id, is_active=True)
-                   .select_related('user')[:20])
-        for member in members:
-            if Capability.MANAGE_MESSAGES in capabilities_for_role(member.role):
-                send_notification(member.user, 'message', target=conversation, data={
-                    'message': f"{name}: {preview}",
-                    'url': f"/messages?c={conversation.pk}",
-                    'conversation_id': conversation.pk,
-                    'audience': 'vendor',
-                })
+        for user in vendor_recipients(conversation.vendor_id):
+            send_notification(user, 'message', target=conversation, data={
+                'message': f"{name}: {preview}",
+                'url': f"/messages?c={conversation.pk}",
+                'conversation_id': conversation.pk,
+                'audience': 'vendor',
+            })
     except Exception:
         logger.exception("chat offline notification failed for conversation %s", conversation.pk)
+
+
+def vendor_recipients(vendor_id):
+    """Team members whose role includes customer messages."""
+    from vendor.access import Capability, capabilities_for_role
+    from vendor.models import VendorMember
+
+    members = VendorMember.objects.filter(vendor_id=vendor_id, is_active=True).select_related('user')[:20]
+    return [m.user for m in members if Capability.MANAGE_MESSAGES in capabilities_for_role(m.role)]

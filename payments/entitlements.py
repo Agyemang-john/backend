@@ -61,6 +61,17 @@ def payout_delay_days(vendor):
     return plan.payout_delay_days if plan else DEFAULT_PAYOUT_DELAY_DAYS
 
 
+# Shopper ↔ seller chat (chat/) is a paid feature: Basic and above.
+MESSAGING_MIN_TIER = 'basic'
+_TIER_RANK = {'free': 0, 'basic': 1, 'pro': 2, 'enterprise': 3}
+
+
+def can_use_messaging(vendor):
+    plan = plan_for_vendor(vendor)
+    tier = plan.tier if plan else 'free'
+    return _TIER_RANK.get(tier, 0) >= _TIER_RANK[MESSAGING_MIN_TIER]
+
+
 def team_member_limit(vendor):
     plan = plan_for_vendor(vendor)
     return plan.max_team_members if plan else 1
@@ -74,6 +85,8 @@ def plan_summary(vendor):
         'tier': plan.tier if plan else 'free',
         'can_export_reports': bool(plan and plan.can_export_reports),
         'can_offer_discounts': bool(plan and plan.can_offer_discounts),
+        'can_use_messaging': can_use_messaging(vendor),
+        'messaging_min_tier': MESSAGING_MIN_TIER,
         'max_team_members': team_member_limit(vendor),
         'commission_rate': str(commission_rate(vendor)),
         'payout_delay_days': payout_delay_days(vendor),

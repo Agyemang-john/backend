@@ -8,6 +8,7 @@ Run with:  DB_HOST=localhost python manage.py test chat.tests --keepdb
 
 import json
 from datetime import timedelta
+from unittest import mock
 from decimal import Decimal
 
 from asgiref.sync import async_to_sync
@@ -19,13 +20,14 @@ from rest_framework.test import APIClient
 
 from ecommerce.celery import app as celery_app
 from notification.models import Notification
+from payments.models import SubscriptionPlan, VendorSubscription
 from product.models import Category, Main_Category, Product, Sub_Category
 from userauths.models import User
 from vendor.models import Vendor, VendorMember
 
 from . import moderation, realtime
 from .models import ChatViolation, Conversation, Message
-from .tasks import purge_old_chats
+from .tasks import purge_old_chats, send_chat_reminders
 
 celery_app.conf.task_always_eager = True
 
@@ -128,6 +130,10 @@ class ChatFixtures:
         self.vendor = Vendor.objects.create(name='Chat Shop', user=self.owner, email='cshop@example.com',
                                             contact='+233550004444', is_approved=True)
         VendorMember.objects.get_or_create(vendor=self.vendor, user=self.owner, defaults={'role': 'owner'})
+        # Chat is a Basic-and-up feature.
+        self.plan = SubscriptionPlan.objects.create(name='Basic Chat', tier='basic', price=Decimal('50.00'))
+        self.subscription = VendorSubscription.objects.create(vendor=self.vendor, plan=self.plan, status='active',
+                                                              end_date=timezone.now() + timedelta(days=30))
         self.staff = make_user(2)
         VendorMember.objects.create(vendor=self.vendor, user=self.staff, role='staff')
         main = Main_Category.objects.create(title='C Main')
@@ -320,3 +326,80 @@ class ChatSocketTests(ChatFixtures, TransactionTestCase):
             outsider = self._connect(self.shopper, 'vendor')
             self.assertFalse((await outsider.connect())[0])
         async_to_sync(scenario)()
+
+
+@override_settings(**TEST_SETTINGS)
+class ChatPlanTests(ChatFixtures, TestCase):
+    """Free stores don't get chat; Basic and above do."""
+
+    def setUp(self):
+        self.make_world()
+        self.subscription.delete()
+        SubscriptionPlan.objects.create(name='Free', tier='free', price=Decimal('0.00'))
+
+    def test_free_store_cannot_be_contacted_or_use_inbox(self):
+        self.assertFalse(client_for(self.shopper).get(f'/api/v1/vendor/seller-detail/{self.vendor.slug}/').data['accepts_messages'])
+        self.assertFalse(client_for(self.shopper).get(f'/api/v1/chat/store/{self.vendor.slug}/').data['accepting_messages'])
+        self.assertEqual(self.start().status_code, 409)
+        res = client_for(self.owner).get('/api/v1/chat/conversations/?as=vendor')
+        self.assertEqual((res.status_code, res.data['code'], res.data['required_tier']), (403, 'plan_upgrade_required', 'basic'))
+        self.assertFalse(client_for(self.owner).get('/api/v1/vendor/plan/').data['can_use_messaging'])
+
+    def test_upgrading_turns_chat_on(self):
+        VendorSubscription.objects.create(vendor=self.vendor, plan=SubscriptionPlan.objects.create(
+            name='Pro', tier='pro', price=Decimal('99.00')), status='active', end_date=timezone.now() + timedelta(days=30))
+        self.assertEqual(self.start().status_code, 201)
+        self.assertTrue(client_for(self.owner).get('/api/v1/vendor/plan/').data['can_use_messaging'])
+
+
+@override_settings(**TEST_SETTINGS)
+class ChatReminderTests(ChatFixtures, TestCase):
+
+    def setUp(self):
+        self.make_world()
+        self.conv_id = self.start().data['conversation']['id']
+        Vendor.objects.filter(pk=self.vendor.pk).update(contact='+233550004444')
+
+    def age(self, hours):
+        Conversation.objects.filter(pk=self.conv_id).update(last_message_at=timezone.now() - timedelta(hours=hours))
+
+    @mock.patch('chat.tasks.send_chat_sms.delay')
+    def test_store_reminded_once_after_24h_without_reply(self, sms):
+        self.age(5)
+        self.assertEqual(send_chat_reminders()['vendor'], 0)  # too early
+        self.age(25)
+        self.assertEqual(send_chat_reminders()['vendor'], 1)
+        reminders = Notification.objects.filter(verb='message', data__reminder=True)
+        self.assertEqual(sorted(reminders.values_list('recipient_id', flat=True)), sorted([self.owner.pk, self.staff.pk]))
+        sms.assert_called_once()
+        phone, text = sms.call_args.args
+        self.assertEqual(phone, '+233550004444')
+        self.assertIn('waiting for your reply', text)
+        self.assertNotIn('still available', text)  # SMS never quotes the message
+        self.assertLessEqual(len(text), 160)
+        self.assertEqual(send_chat_reminders()['vendor'], 0)  # once per unanswered message
+
+    @mock.patch('chat.tasks.send_chat_sms.delay')
+    def test_shopper_reminded_when_reply_unread(self, sms):
+        self.reply(self.conv_id, 'Yes, we have it in black and white.')
+        self.age(25)
+        self.assertEqual(send_chat_reminders(), {'vendor': 0, 'customer': 1})
+        self.assertEqual(sms.call_args.args[0], self.shopper.phone)
+        self.assertTrue(Notification.objects.filter(recipient=self.shopper, data__reminder=True).exists())
+
+    @mock.patch('chat.tasks.send_chat_sms.delay')
+    def test_no_reminder_when_handled_or_stale(self, sms):
+        self.reply(self.conv_id, 'Yes, we have it.')
+        client_for(self.shopper).post(f'/api/v1/chat/conversations/{self.conv_id}/read/')
+        self.age(25)
+        self.assertEqual(send_chat_reminders(), {'vendor': 0, 'customer': 0})  # replied, and the reply was read
+        self.start('Hello again?')
+        self.age(24 * 5)
+        self.assertEqual(send_chat_reminders()['vendor'], 0)  # too old: no backlog floods
+        sms.assert_not_called()
+
+    @mock.patch('chat.tasks.send_chat_sms.delay')
+    def test_store_that_lost_its_plan_is_not_reminded(self, sms):
+        self.subscription.delete()
+        self.age(25)
+        self.assertEqual(send_chat_reminders()['vendor'], 0)
