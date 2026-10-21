@@ -100,6 +100,8 @@ class VendorHeartbeatAPIView(APIView):
             from django_redis import get_redis_connection
             conn = get_redis_connection("default")
             conn.set(f"vendor:last_seen:{vendor.pk}", int(time.time()), ex=86400)
+            from .middleware import MEMBER_SEEN_PREFIX, MEMBER_SEEN_TTL
+            conn.set(f"{MEMBER_SEEN_PREFIX}{request.user.pk}", int(time.time()), ex=MEMBER_SEEN_TTL)
 
             # Rate-limit heartbeat log writes to once per hour per vendor
             hb_key = f"vendor:hb_logged:{vendor.pk}"

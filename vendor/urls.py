@@ -71,6 +71,7 @@ from vendor.team_views import (
     TeamInvitationLookupView,
     TeamInvitationAcceptView,
     TeamMemberDetailView,
+    TeamMemberActivityView,
 )
 
 
@@ -90,6 +91,7 @@ urlpatterns = [
     path('team/invitations/<int:invitation_id>/', TeamInvitationDetailView.as_view(), name='vendor-team-invite-detail'),
     path('team/invitations/<int:invitation_id>/resend/', TeamInvitationDetailView.as_view(), name='vendor-team-invite-resend'),
     path('team/members/<int:member_id>/', TeamMemberDetailView.as_view(), name='vendor-team-member'),
+    path('team/members/<int:member_id>/activity/', TeamMemberActivityView.as_view(), name='vendor-team-member-activity'),
 
     # Day-to-day operations (vendor/operations_views.py)
     path('action-center/', ActionCenterView.as_view(), name='vendor-action-center'),

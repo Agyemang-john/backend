@@ -3,6 +3,8 @@ from django.utils.deprecation import MiddlewareMixin
 from .models import Vendor
 import time
 
+MEMBER_SEEN_PREFIX = "vendor:member_seen:"
+MEMBER_SEEN_TTL = 30 * 86400
 
 # @user_passes_test(is_vendor)
 
@@ -64,7 +66,14 @@ class VendorActivityMiddleware(MiddlewareMixin):
             if not vendor_id:
                 return None
 
-            conn.set(f"vendor:last_seen:{vendor_id}", int(time.time()), ex=86400)
+            now = int(time.time())
+            pipe = conn.pipeline()
+            pipe.set(f"vendor:last_seen:{vendor_id}", now, ex=86400)
+            # Per-person "last active" for the Team page. Read directly (never
+            # flushed to the DB); after it expires the page falls back to the
+            # person's session activity.
+            pipe.set(f"{MEMBER_SEEN_PREFIX}{request.user.id}", now, ex=MEMBER_SEEN_TTL)
+            pipe.execute()
         except Exception:
             pass  # never block a request due to Redis unavailability
         return None

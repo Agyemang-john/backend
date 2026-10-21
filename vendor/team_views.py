@@ -10,6 +10,7 @@ Dashboard (vendor cookie, X-User-Type: vendor):
     POST   /api/v1/vendor/team/invitations/<id>/resend/
     DELETE /api/v1/vendor/team/invitations/<id>/             revoke
     PATCH  /api/v1/vendor/team/members/<id>/                 {role}  (owner only)
+    GET    /api/v1/vendor/team/members/<id>/activity/        sign-in history
     DELETE /api/v1/vendor/team/members/<id>/                 remove, or leave (self)
 
 Invitee (public link, then customer cookie, X-User-Type: customer):
@@ -20,6 +21,9 @@ Who may do what:
     owner → invite/remove admins and staff, change roles
     admin → invite/remove staff only (cannot grant or remove admin rights)
     staff → no team management; anyone except the owner may leave
+
+Sign-in times and last-active are visible to the people who manage that member
+(owner → everyone, admin → staff) and to each person for themselves.
 """
 
 import logging
@@ -28,6 +32,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
+from django.db.models import Count, Max, OuterRef, Subquery
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status
@@ -113,6 +118,75 @@ def _invalidate_member_access(user):
     clear_membership_cache(user)
 
 
+# Shown as "Active now" when the person made a dashboard request this recently.
+# The dashboard heartbeat pings every 10 minutes while a tab is visible.
+ONLINE_WINDOW = timedelta(minutes=15)
+
+
+def _can_view_activity(actor, target):
+    return (
+        target.pk == actor.pk
+        or actor.role == VendorMember.ROLE_OWNER
+        or _can_manage_role(actor.role, target.role)
+    )
+
+
+def _with_activity(members):
+    """Annotate sign-in / sign-out / session info onto a VendorMember queryset."""
+    from userauths.models import SecurityEvent, UserSession
+
+    def latest(event, field):
+        # Only events since they joined this store.
+        return Subquery(
+            SecurityEvent.objects.filter(
+                user=OuterRef('user'), is_vendor=True, event=event,
+                created_at__gte=OuterRef('created_at'),
+            ).order_by('-created_at').values(field)[:1]
+        )
+
+    sessions = UserSession.objects.filter(user=OuterRef('user'), is_vendor_session=True).values('user')
+    return members.annotate(
+        last_sign_in_at=latest(SecurityEvent.SIGN_IN, 'created_at'),
+        last_sign_in_device=latest(SecurityEvent.SIGN_IN, 'device_name'),
+        last_sign_out_at=latest(SecurityEvent.SIGN_OUT, 'created_at'),
+        session_last_activity=Subquery(sessions.annotate(m=Max('last_activity')).values('m')[:1]),
+        active_sessions=Subquery(sessions.annotate(c=Count('pk')).values('c')[:1]),
+    )
+
+
+def _member_last_seen(user_ids):
+    """user_id → aware datetime of their last dashboard request (Redis), where known."""
+    if not user_ids:
+        return {}
+    try:
+        from datetime import datetime, timezone as dt_timezone
+        from django_redis import get_redis_connection
+        from .middleware import MEMBER_SEEN_PREFIX
+        values = get_redis_connection("default").mget([f"{MEMBER_SEEN_PREFIX}{uid}" for uid in user_ids])
+        return {
+            uid: datetime.fromtimestamp(int(raw), tz=dt_timezone.utc)
+            for uid, raw in zip(user_ids, values) if raw
+        }
+    except Exception:
+        return {}
+
+
+def _activity_summary(member, seen):
+    candidates = [t for t in (seen, member.session_last_activity, member.last_sign_in_at) if t]
+    last_active = max(candidates) if candidates else None
+    return {
+        'last_sign_in_at': member.last_sign_in_at,
+        'last_sign_in_device': member.last_sign_in_device or '',
+        'last_sign_out_at': member.last_sign_out_at,
+        'last_active_at': last_active,
+        'is_online': bool(
+            last_active and member.active_sessions
+            and timezone.now() - last_active <= ONLINE_WINDOW
+        ),
+        'active_sessions': member.active_sessions or 0,
+    }
+
+
 # ── Dashboard: team management ────────────────────────────────────────────────
 
 class TeamListView(APIView):
@@ -122,10 +196,13 @@ class TeamListView(APIView):
     def get(self, request):
         membership = get_membership(request.user)
         vendor = membership.vendor
-        members = (
+        members = list(_with_activity(
             VendorMember.objects.filter(vendor=vendor, is_active=True)
             .select_related('user').order_by('created_at')
-        )
+        ))
+        visible = [m for m in members if _can_view_activity(membership, m)]
+        seen = _member_last_seen([m.user_id for m in visible])
+        activity = {m.pk: _activity_summary(m, seen.get(m.user_id)) for m in visible}
         can_manage = Capability.MANAGE_TEAM in capabilities_for_role(membership.role)
         invitations = (
             _pending_invites(vendor).select_related('invited_by') if can_manage
@@ -142,11 +219,13 @@ class TeamListView(APIView):
                     if _can_manage_role(membership.role, r)
                 ],
             },
-            'members': VendorMemberSerializer(members, many=True, context={'request': request}).data,
+            'members': VendorMemberSerializer(
+                members, many=True, context={'request': request, 'activity': activity},
+            ).data,
             'invitations': VendorInvitationSerializer(invitations, many=True).data,
             'limits': {
                 'max_members': _max_team_members(vendor),
-                'used': members.count() + _pending_invites(vendor).count(),
+                'used': len(members) + _pending_invites(vendor).count(),
             },
         })
 
@@ -283,6 +362,55 @@ class TeamMemberDetailView(APIView):
         _invalidate_member_access(target.user)
         logger.info("team: member=%s %s by user=%s", target.pk, 'left' if leaving else 'removed', request.user.pk)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class TeamMemberActivityView(APIView):
+    """
+    GET /api/v1/vendor/team/members/<id>/activity/?limit=50
+
+    The member's seller-dashboard security timeline (sign-ins, sign-outs,
+    devices signed out, password changes) since they joined this store.
+    """
+    permission_classes = [IsAuthenticated, IsVendorMember]
+
+    def get(self, request, member_id):
+        from userauths.models import SecurityEvent
+
+        membership = get_membership(request.user)
+        target = get_object_or_404(
+            _with_activity(VendorMember.objects.select_related('user')),
+            pk=member_id, vendor=membership.vendor, is_active=True,
+        )
+        if not _can_view_activity(membership, target):
+            return _forbidden("You can only see sign-in activity for people you manage.")
+
+        try:
+            limit = max(1, min(int(request.query_params.get('limit', 50)), 100))
+        except ValueError:
+            limit = 50
+        events = SecurityEvent.objects.filter(
+            user_id=target.user_id, is_vendor=True, created_at__gte=target.created_at,
+        ).order_by('-created_at')[:limit]
+
+        labels = dict(SecurityEvent.EVENT_CHOICES)
+        seen = _member_last_seen([target.user_id]).get(target.user_id)
+        return Response({
+            'member': VendorMemberSerializer(target, context={'request': request}).data,
+            'summary': _activity_summary(target, seen),
+            'events': [
+                {
+                    'id': e.pk,
+                    'event': e.event,
+                    'label': labels.get(e.event, e.event),
+                    'created_at': e.created_at,
+                    'device_name': e.device_name,
+                    'device_type': e.device_type,
+                    'ip_address': e.ip_address,
+                    'new_device': e.new_device,
+                }
+                for e in events
+            ],
+        })
 
 
 # ── Invitee side ──────────────────────────────────────────────────────────────

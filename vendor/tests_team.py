@@ -231,3 +231,65 @@ class TeamAccessTests(TestCase):
                 'email': outsider.email, 'password': PASSWORD, 'cf_turnstile_response': 'x',
             }, format='json')
             self.assertEqual(res.status_code, 400)
+
+
+@override_settings(**TEST_SETTINGS)
+class TeamActivityTests(TestCase):
+    """Sign-in times on the Team page and the per-member activity timeline."""
+
+    def setUp(self):
+        TeamAccessTests.setUp(self)
+        from userauths.models import SecurityEvent, UserSession
+        self.admin = make_user(2)
+        self.staff = make_user(3)
+        self.owner_m = VendorMember.objects.get(vendor=self.vendor, user=self.owner)
+        self.admin_m = TeamAccessTests.add_member(self, self.admin, VendorMember.ROLE_ADMIN)
+        self.staff_m = TeamAccessTests.add_member(self, self.staff, VendorMember.ROLE_STAFF)
+        for user in (self.owner, self.admin, self.staff):
+            SecurityEvent.objects.create(user=user, event=SecurityEvent.SIGN_IN, device_name='Chrome on Windows')
+        UserSession.objects.create(user=self.staff, session_key='staff-jti', is_vendor_session=True)
+        SecurityEvent.objects.create(user=self.staff, event=SecurityEvent.SIGN_OUT)
+
+    def members_by_id(self, client):
+        res = client.get('/api/v1/vendor/team/')
+        self.assertEqual(res.status_code, 200)
+        return {m['id']: m for m in res.data['members']}
+
+    def test_owner_sees_everyones_sign_in(self):
+        members = self.members_by_id(vendor_client(self.owner))
+        for m in (self.owner_m, self.admin_m, self.staff_m):
+            self.assertIsNotNone(members[m.pk]['activity']['last_sign_in_at'])
+        staff = members[self.staff_m.pk]['activity']
+        self.assertEqual(staff['last_sign_in_device'], 'Chrome on Windows')
+        self.assertIsNotNone(staff['last_sign_out_at'])
+        self.assertEqual(staff['active_sessions'], 1)
+        self.assertTrue(staff['is_online'])
+
+    def test_admin_sees_staff_and_self_only(self):
+        members = self.members_by_id(vendor_client(self.admin))
+        self.assertIsNone(members[self.owner_m.pk]['activity'])
+        self.assertIsNotNone(members[self.admin_m.pk]['activity'])
+        self.assertIsNotNone(members[self.staff_m.pk]['activity'])
+
+    def test_staff_sees_only_self(self):
+        members = self.members_by_id(vendor_client(self.staff))
+        self.assertIsNone(members[self.owner_m.pk]['activity'])
+        self.assertIsNone(members[self.admin_m.pk]['activity'])
+        self.assertIsNotNone(members[self.staff_m.pk]['activity'])
+
+    def test_activity_timeline_permissions(self):
+        url = lambda m: f'/api/v1/vendor/team/members/{m.pk}/activity/'
+        res = vendor_client(self.owner).get(url(self.staff_m))
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual([e['event'] for e in res.data['events']], ['sign_out', 'sign_in'])
+        self.assertEqual(vendor_client(self.admin).get(url(self.owner_m)).status_code, 403)
+        self.assertEqual(vendor_client(self.staff).get(url(self.admin_m)).status_code, 403)
+        self.assertEqual(vendor_client(self.staff).get(url(self.staff_m)).status_code, 200)
+
+    def test_events_before_joining_are_hidden(self):
+        from datetime import timedelta
+        from userauths.models import SecurityEvent
+        old = SecurityEvent.objects.create(user=self.staff, event=SecurityEvent.SIGN_IN)
+        SecurityEvent.objects.filter(pk=old.pk).update(created_at=self.staff_m.created_at - timedelta(days=1))
+        res = vendor_client(self.owner).get(f'/api/v1/vendor/team/members/{self.staff_m.pk}/activity/')
+        self.assertNotIn(old.pk, [e['id'] for e in res.data['events']])

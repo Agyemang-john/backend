@@ -15,12 +15,13 @@ class VendorMemberSerializer(serializers.ModelSerializer):
     email = serializers.EmailField(source='user.email', read_only=True)
     capabilities = serializers.SerializerMethodField()
     is_you = serializers.SerializerMethodField()
+    activity = serializers.SerializerMethodField()
 
     class Meta:
         model = VendorMember
         fields = [
             'id', 'first_name', 'last_name', 'email', 'role', 'capabilities',
-            'is_you', 'created_at',
+            'is_you', 'created_at', 'activity',
         ]
 
     def get_capabilities(self, obj):
@@ -29,6 +30,10 @@ class VendorMemberSerializer(serializers.ModelSerializer):
     def get_is_you(self, obj):
         request = self.context.get('request')
         return bool(request and obj.user_id == request.user.pk)
+
+    def get_activity(self, obj):
+        # Filled by TeamListView only for members the viewer may see; None otherwise.
+        return (self.context.get('activity') or {}).get(obj.pk)
 
 
 class VendorInvitationSerializer(serializers.ModelSerializer):
