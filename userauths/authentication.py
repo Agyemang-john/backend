@@ -14,10 +14,15 @@ token_version check: if the JWT payload carries a token_version claim that no lo
 matches the user's DB value, the token is treated as unauthenticated.  Incrementing
 user.token_version (e.g. on "logout all devices") immediately invalidates every
 existing access token without a blacklist table.
+
+sid check: seller tokens name their device session; signing that device out
+(session_utils.revoke_sessions) rejects its access token on the next request.
 """
 
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from django.conf import settings
+
+from .session_utils import is_session_revoked
 
 
 class CustomJWTAuthentication(JWTAuthentication):
@@ -55,6 +60,11 @@ class CustomJWTAuthentication(JWTAuthentication):
             token_version = validated_token.get('token_version')
             if token_version is not None and token_version != user.token_version:
                 return None  # treat as unauthenticated
+
+            # sid: catches "sign out this device" before the access token expires
+            sid = validated_token.get('sid')
+            if sid and is_session_revoked(sid):
+                return None
 
             # Vendor cookie ⇒ the user must still belong to an approved store.
             # Checked on every request (one memoised query), so removing a team

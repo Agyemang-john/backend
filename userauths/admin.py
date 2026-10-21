@@ -1,5 +1,5 @@
 from django.contrib import admin
-from userauths.models import MailMessage, User, ContactUs, Profile, SubscribedUsers
+from userauths.models import MailMessage, User, ContactUs, Profile, SubscribedUsers, SecurityEvent
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
 
@@ -61,3 +61,12 @@ admin.site.register(User, UserAdmin)
 admin.site.site_header = "Negromart Inc."
 admin.site.site_title = "Admin Dashboard"
 admin.site.index_title = "Welcome to the Admin Dashboard"
+
+
+@admin.register(SecurityEvent)
+class SecurityEventAdmin(admin.ModelAdmin):
+    list_display = ('user', 'event', 'is_vendor', 'device_name', 'ip_address', 'new_device', 'created_at')
+    list_filter = ('event', 'is_vendor', 'new_device')
+    search_fields = ('user__email', 'ip_address', 'device_name')
+    raw_id_fields = ('user',)
+    readonly_fields = [f.name for f in SecurityEvent._meta.fields]

@@ -366,11 +366,27 @@ class VendorOTPVerifyView(APIView):
 
         _otp_logger.info("OTP verify: success for user=%s", user.pk)
 
-        # Register device session
+        # Register device session, and tell the seller when it's a device
+        # they have never signed in from before.
         try:
             jti = refresh.payload.get('jti')
             if jti:
+                from .models import SecurityEvent
+                from .session_utils import parse_device_info, record_security_event
+                device_name = parse_device_info(request.META.get('HTTP_USER_AGENT', '')[:500])['device_name']
+                past_sign_ins = SecurityEvent.objects.filter(
+                    user=user, is_vendor=True, event=SecurityEvent.SIGN_IN,
+                )
+                # Nothing to compare against on the first sign-in we record.
+                new_device = (
+                    past_sign_ins.exists()
+                    and not past_sign_ins.filter(device_name=device_name).exists()
+                )
                 register_session(user, jti, request, is_vendor=True)
+                event = record_security_event(user, SecurityEvent.SIGN_IN, request, new_device=new_device)
+                if new_device and event:
+                    from .tasks import send_new_sign_in_alert
+                    send_new_sign_in_alert.delay(event.pk)
         except Exception:
             pass
 
@@ -489,7 +505,19 @@ class VendorTokenVerifyView(TokenVerifyView):
         if access_token:
             request.data['token'] = access_token
 
-        return super().post(request, *args, **kwargs)
+        response = super().post(request, *args, **kwargs)
+        # A signed-out device's access token is still well-formed; say so, so
+        # the dashboard sends it to the login page instead of looking signed in.
+        if response.status_code == 200:
+            from rest_framework_simplejwt.tokens import UntypedToken
+            from .session_utils import is_session_revoked
+            sid = UntypedToken(request.data.get('token')).get('sid')
+            if sid and is_session_revoked(sid):
+                return Response(
+                    {'detail': 'This device was signed out.', 'code': 'session_revoked'},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+        return response
 
 class VendorLogoutView(APIView):
     def post(self, request, *args, **kwargs):
@@ -513,16 +541,16 @@ class VendorLogoutView(APIView):
             except Exception:
                 pass
 
-        # Delete current device session
-        refresh_cookie = request.COOKIES.get(settings.VENDOR_REFRESH_AUTH_COOKIE)
-        if refresh_cookie:
+        # End this device's session for good: a copied refresh cookie must not
+        # be able to sign back in after the seller pressed "Log out".
+        jti = _get_current_jti(request, settings.VENDOR_REFRESH_AUTH_COOKIE)
+        if jti:
             try:
-                from rest_framework_simplejwt.tokens import RefreshToken as _RT
-                rt = _RT(refresh_cookie)
-                jti = rt.payload.get('jti')
-                if jti:
-                    from .models import UserSession
-                    UserSession.objects.filter(session_key=jti).delete()
+                from .models import SecurityEvent, UserSession
+                from .session_utils import record_security_event, revoke_sessions
+                revoke_sessions(UserSession.objects.filter(session_key=jti, is_vendor_session=True))
+                if request.user.is_authenticated:
+                    record_security_event(request.user, SecurityEvent.SIGN_OUT, request)
             except Exception:
                 pass
 
@@ -560,6 +588,7 @@ def _get_current_jti(request, cookie_name: str):
 def _session_to_dict(session, current_jti) -> dict:
     return {
         'id': str(session.id),
+        'kind': 'seller' if session.is_vendor_session else 'shopper',
         'device_type': session.device_type,
         'device_name': session.device_name,
         'browser': session.browser,
@@ -571,87 +600,225 @@ def _session_to_dict(session, current_jti) -> dict:
     }
 
 
+def _current_jtis(request) -> dict:
+    """The session keys this browser holds: {'seller': jti, 'shopper': jti}."""
+    return {
+        'seller': _get_current_jti(request, settings.VENDOR_REFRESH_AUTH_COOKIE),
+        'shopper': _get_current_jti(request, 'refresh'),
+    }
+
+
+def _session_current_jti(session, current: dict):
+    return current['seller'] if session.is_vendor_session else current['shopper']
+
+
+def _delete_vendor_cookies(response):
+    for name in (settings.VENDOR_ACCESS_AUTH_COOKIE, settings.VENDOR_REFRESH_AUTH_COOKIE):
+        response.delete_cookie(
+            name,
+            path=settings.VENDOR_AUTH_COOKIE_PATH,
+            domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
+            samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
+        )
+
+
+def _sign_out_other_devices(request, user) -> int:
+    """
+    Sign out every session of this account except the ones this browser is
+    using, on the seller dashboard and the shop alike: it is one account, so a
+    stranger signed in on either side has to go.
+    """
+    from .models import UserSession
+    from .session_utils import revoke_sessions
+    current = _current_jtis(request)
+    keep = [jti for jti in current.values() if jti]
+    return revoke_sessions(UserSession.objects.filter(user=user).exclude(session_key__in=keep))
+
+
 class VendorSessionListView(APIView):
-    """GET /api/v1/auth/vendor/sessions/"""
+    """
+    GET /api/vendor/sessions/
+    Every device signed in to this account: seller dashboard sessions first,
+    then shopping sessions on negromart.com.
+    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         from .models import UserSession
-        current_jti = _get_current_jti(request, settings.VENDOR_REFRESH_AUTH_COOKIE)
-        sessions = UserSession.objects.filter(
-            user=request.user, is_vendor_session=True
-        ).order_by('-last_activity')
-        return Response([_session_to_dict(s, current_jti) for s in sessions])
+        current = _current_jtis(request)
+        sessions = UserSession.objects.filter(user=request.user).order_by(
+            '-is_vendor_session', '-last_activity'
+        )
+        return Response([_session_to_dict(s, _session_current_jti(s, current)) for s in sessions])
 
 
 class VendorSessionRevokeView(APIView):
-    """DELETE /api/v1/auth/vendor/sessions/<uuid>/"""
+    """DELETE /api/vendor/sessions/<uuid>/ — sign out one device."""
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, session_id):
-        from .models import UserSession
-        current_jti = _get_current_jti(request, settings.VENDOR_REFRESH_AUTH_COOKIE)
+        from .models import SecurityEvent, UserSession
+        from .session_utils import record_security_event, revoke_sessions
         try:
-            session = UserSession.objects.get(
-                id=session_id, user=request.user, is_vendor_session=True
-            )
+            session = UserSession.objects.get(id=session_id, user=request.user)
         except UserSession.DoesNotExist:
             return Response({'detail': 'Session not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        if current_jti and session.session_key == current_jti:
+        if session.session_key == _session_current_jti(session, _current_jtis(request)):
             return Response(
-                {'detail': 'Cannot revoke your current session. Use "Log out" instead.'},
+                {'detail': 'This is the device you are using. Use "Log out" instead.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        session.delete()
+        revoke_sessions([session])
+        record_security_event(
+            request.user, SecurityEvent.DEVICE_SIGNED_OUT, request,
+            target=session.device_name, target_ip=session.ip_address,
+            target_kind='seller' if session.is_vendor_session else 'shopper',
+        )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class VendorLogoutAllView(APIView):
-    """POST /api/v1/auth/vendor/logout-all/"""
+    """
+    POST /api/vendor/logout-all/
+    The "someone else is in my account" button: every token this account holds
+    stops working, on every device and on the shop too, this browser included.
+    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        from .models import UserSession
-        # Incrementing token_version immediately invalidates every existing JWT
+        from .models import SecurityEvent, UserSession
+        from .session_utils import record_security_event, revoke_sessions
+        # Incrementing token_version immediately invalidates every existing JWT,
+        # including ones issued before session tracking existed.
         User.objects.filter(pk=request.user.pk).update(
             token_version=F('token_version') + 1
         )
-        UserSession.objects.filter(user=request.user, is_vendor_session=True).delete()
+        count = revoke_sessions(UserSession.objects.filter(user=request.user))
+        record_security_event(request.user, SecurityEvent.SIGNED_OUT_EVERYWHERE, request, count=count)
 
         response = Response({'detail': 'Logged out from all devices.'}, status=status.HTTP_200_OK)
-        response.delete_cookie(
-            settings.VENDOR_ACCESS_AUTH_COOKIE,
-            path=settings.VENDOR_AUTH_COOKIE_PATH,
-            domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
-            samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
-        )
-        response.delete_cookie(
-            settings.VENDOR_REFRESH_AUTH_COOKIE,
-            path=settings.VENDOR_AUTH_COOKIE_PATH,
-            domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
-            samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
-        )
+        _delete_vendor_cookies(response)
+        # This browser's shopping session is dead too; drop its cookies.
+        response.delete_cookie('access', path=settings.AUTH_COOKIE_PATH, domain=settings.AUTH_COOKIE_DOMAIN)
+        response.delete_cookie('refresh', path=settings.AUTH_COOKIE_PATH, domain=settings.AUTH_COOKIE_DOMAIN)
         return response
 
 
 class VendorLogoutOtherSessionsView(APIView):
-    """POST /api/v1/auth/vendor/logout-other-sessions/"""
+    """POST /api/vendor/logout-other-sessions/ — keep only this browser signed in."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        from .models import UserSession
-        current_jti = _get_current_jti(request, settings.VENDOR_REFRESH_AUTH_COOKIE)
-        qs = UserSession.objects.filter(user=request.user, is_vendor_session=True)
-        if current_jti:
-            qs = qs.exclude(session_key=current_jti)
-        count = qs.count()
-        qs.delete()
+        from .models import SecurityEvent
+        from .session_utils import record_security_event
+        count = _sign_out_other_devices(request, request.user)
+        if count:
+            record_security_event(request.user, SecurityEvent.OTHERS_SIGNED_OUT, request, count=count)
         return Response(
-            {'detail': f'Logged out from {count} other device(s).'},
+            {
+                'detail': f'Signed out {count} other device{"" if count == 1 else "s"}.',
+                'count': count,
+            },
             status=status.HTTP_200_OK,
         )
+
+
+class VendorChangePasswordView(APIView):
+    """
+    POST /api/vendor/security/password/
+    {current_password, new_password, sign_out_other_devices=true}
+    """
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [LoginThrottle]
+
+    def post(self, request):
+        from django.contrib.auth.password_validation import validate_password
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from .models import SecurityEvent
+        from .session_utils import record_security_event
+
+        user = request.user
+        current = request.data.get('current_password') or ''
+        new = request.data.get('new_password') or ''
+        sign_out = request.data.get('sign_out_other_devices', True) not in (False, 'false', '0', 0)
+
+        if not user.check_password(current):
+            return Response(
+                {'current_password': ['Your current password is incorrect.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if current == new:
+            return Response(
+                {'new_password': ['Your new password must be different from the current one.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            validate_password(new, user)
+        except DjangoValidationError as exc:
+            return Response({'new_password': list(exc.messages)}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.set_password(new)
+        user.save(update_fields=['password'])
+
+        count = _sign_out_other_devices(request, user) if sign_out else 0
+        record_security_event(user, SecurityEvent.PASSWORD_CHANGED, request, signed_out_devices=count)
+        return Response({
+            'detail': 'Password changed.',
+            'signed_out_devices': count,
+            'password_changed_at': user.password_changed_at,
+        })
+
+
+def _mask_phone(phone: str) -> str:
+    phone = phone or ''
+    return f"{'*' * max(len(phone) - 3, 0)}{phone[-3:]}" if phone else ''
+
+
+class VendorSecurityOverviewView(APIView):
+    """
+    GET /api/vendor/security/
+    What the Security page needs to show a seller how protected their account
+    is: verified contacts, two-step sign-in, password age, signed-in devices
+    and recent security activity.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .models import SecurityEvent, UserSession
+        user = request.user
+        sessions = UserSession.objects.filter(user=user)
+        membership = user.vendor_membership
+        return Response({
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'email': user.email,
+            'email_verified': user.is_email_verified,
+            'phone': _mask_phone(user.phone),
+            'phone_verified': user.is_phone_verified,
+            # Every seller sign-in needs a one-time code after the password.
+            'two_step_sign_in': True,
+            'password_changed_at': user.password_changed_at,
+            'store_role': membership.role if membership else None,
+            'store_name': membership.vendor.name if membership else None,
+            'seller_devices': sessions.filter(is_vendor_session=True).count(),
+            'shopper_devices': sessions.filter(is_vendor_session=False).count(),
+            'events': [
+                {
+                    'id': e.pk,
+                    'event': e.event,
+                    'label': e.get_event_display(),
+                    'device_name': e.device_name,
+                    'device_type': e.device_type,
+                    'ip_address': e.ip_address,
+                    'new_device': e.new_device,
+                    'metadata': e.metadata,
+                    'created_at': e.created_at,
+                }
+                for e in SecurityEvent.objects.filter(user=user)[:20]
+            ],
+        })
 
 
 # Customer session management (mirrors vendor pattern for buyer accounts)

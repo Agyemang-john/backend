@@ -122,29 +122,32 @@ class CustomTokenRefreshSerializer(TokenRefreshSerializer):
                 "Your session was revoked. Please log in again."
             )
 
-        # Session existence check (graceful migration: skip if user has no sessions yet)
+        # The device must still have a session: signing it out deletes the
+        # row (and blacklists this token, which RefreshToken() above checks).
         if jti:
             from .models import UserSession
+            from .session_utils import is_session_revoked, register_session, touch_session
+            if is_session_revoked(jti):
+                raise serializers.ValidationError("Session revoked. Please log in again.")
             session_exists = UserSession.objects.filter(
                 session_key=jti, is_vendor_session=True
             ).exists()
-            if not session_exists:
-                has_any = UserSession.objects.filter(
-                    user_id=user_id, is_vendor_session=True
-                ).exists()
-                if has_any:
-                    raise serializers.ValidationError(
-                        "Session revoked. Please log in again."
-                    )
-                # Migration path: first refresh after feature deploy — create session
-                from .session_utils import register_session
-                register_session(user, jti, self.context["request"], is_vendor=True)
-            else:
-                from .session_utils import touch_session
+            if session_exists:
                 touch_session(jti)
+            elif old_refresh.get("sid") or UserSession.objects.filter(
+                user_id=user_id, is_vendor_session=True
+            ).exists():
+                # Tokens with a `sid` were always issued with a session row,
+                # so a missing row means the device was signed out.
+                raise serializers.ValidationError(
+                    "Session revoked. Please log in again."
+                )
+            else:
+                # Token from before session tracking: adopt it once.
+                register_session(user, jti, self.context["request"], is_vendor=True)
 
-        # Generate new access token with updated custom claims
-        new_token = CustomVendorRefreshToken.for_user(user)
-        access_token = str(new_token.access_token)
+        # Fresh access token with current claims, tied to this device session.
+        from .tokens import vendor_access_token
+        access_token = str(vendor_access_token(user, jti))
 
         return {"access": access_token}

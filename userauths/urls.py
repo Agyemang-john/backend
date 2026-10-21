@@ -18,6 +18,8 @@ from .views import (
     VendorSessionRevokeView,
     VendorLogoutAllView,
     VendorLogoutOtherSessionsView,
+    VendorChangePasswordView,
+    VendorSecurityOverviewView,
     # Session management — customer
     CustomerSessionListView,
     CustomerSessionRevokeView,
@@ -75,4 +77,6 @@ urlpatterns = [
     path('vendor/sessions/<uuid:session_id>/', VendorSessionRevokeView.as_view(), name='vendor-session-revoke'),
     path('vendor/logout-all/', VendorLogoutAllView.as_view(), name='vendor-logout-all'),
     path('vendor/logout-other-sessions/', VendorLogoutOtherSessionsView.as_view(), name='vendor-logout-other'),
+    path('vendor/security/', VendorSecurityOverviewView.as_view(), name='vendor-security'),
+    path('vendor/security/password/', VendorChangePasswordView.as_view(), name='vendor-change-password'),
 ]

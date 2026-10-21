@@ -101,6 +101,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     # Opening a store requires both, mirroring Amazon's seller onboarding.
     email_verified_at = models.DateTimeField(null=True, blank=True)
     phone_verified_at = models.DateTimeField(null=True, blank=True)
+    # Stamped by set_password(); shown on the seller security page. Null for
+    # accounts whose password predates the field.
+    password_changed_at = models.DateTimeField(null=True, blank=True)
 
     auth_provider = models.CharField(max_length=50, default=AUTH_PROVIDER.get('email'))
 
@@ -153,6 +156,10 @@ class User(AbstractBaseUser, PermissionsMixin):
             self.email_verified_at = timezone.now()
             changed.add('email_verified_at')
 
+        if getattr(self, '_password_changed', False):
+            changed.add('password_changed_at')
+            self._password_changed = False
+
         update_fields = kwargs.get('update_fields')
         if update_fields is not None and changed:
             kwargs['update_fields'] = set(update_fields) | changed
@@ -160,6 +167,11 @@ class User(AbstractBaseUser, PermissionsMixin):
         self._loaded_phone = self.phone
         self._loaded_phone_verified_at = self.phone_verified_at
         self._loaded_is_active = self.is_active
+
+    def set_password(self, raw_password):
+        super().set_password(raw_password)
+        self.password_changed_at = timezone.now()
+        self._password_changed = True
 
     @property
     def is_email_verified(self):
@@ -414,6 +426,40 @@ class UserSession(models.Model):
         return f"{self.user.email} — {self.device_name} ({self.ip_address})"
 
 
+class SecurityEvent(models.Model):
+    """
+    Per-person security timeline shown on the seller Security page: sign-ins,
+    sign-outs, revoked devices, password changes. Append-only.
+    """
+    SIGN_IN = 'sign_in'
+    SIGN_OUT = 'sign_out'
+    DEVICE_SIGNED_OUT = 'device_signed_out'
+    OTHERS_SIGNED_OUT = 'others_signed_out'
+    SIGNED_OUT_EVERYWHERE = 'signed_out_everywhere'
+    PASSWORD_CHANGED = 'password_changed'
+    EVENT_CHOICES = [
+        (SIGN_IN, 'Signed in'),
+        (SIGN_OUT, 'Signed out'),
+        (DEVICE_SIGNED_OUT, 'Signed out a device'),
+        (OTHERS_SIGNED_OUT, 'Signed out other devices'),
+        (SIGNED_OUT_EVERYWHERE, 'Signed out everywhere'),
+        (PASSWORD_CHANGED, 'Password changed'),
+    ]
 
+    user = models.ForeignKey(User, related_name='security_events', on_delete=models.CASCADE)
+    event = models.CharField(max_length=32, choices=EVENT_CHOICES)
+    is_vendor = models.BooleanField(default=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    device_name = models.CharField(max_length=200, blank=True)
+    device_type = models.CharField(max_length=10, blank=True)
+    # A sign-in from a device this person had no open session on.
+    new_device = models.BooleanField(default=False)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['user', 'is_vendor', '-created_at'])]
 
+    def __str__(self):
+        return f"{self.user_id} {self.event} @ {self.created_at:%Y-%m-%d %H:%M}"

@@ -149,3 +149,39 @@ def send_activation_email_task(self, user_data, activation_link):
         return self.retry(exc=exc)
 
 
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def send_new_sign_in_alert(self, event_id):
+    """Email a seller when their account signs in from a device it never used before."""
+    from django.utils import timezone
+    from .models import SecurityEvent
+    try:
+        event = SecurityEvent.objects.select_related('user').get(pk=event_id)
+    except SecurityEvent.DoesNotExist:
+        return
+    user = event.user
+    seller_url = getattr(settings, 'SELLER_SITE_URL', 'https://seller.negromart.com').rstrip('/')
+    context = {
+        'first_name': user.first_name,
+        'device_name': event.device_name or 'Unknown device',
+        'ip_address': event.ip_address or 'Unknown',
+        'signed_in_at': timezone.localtime(event.created_at).strftime('%d %b %Y, %H:%M %Z'),
+        'security_url': f'{seller_url}/settings?tab=security',
+    }
+    html = render_to_string('email/new-sign-in-alert.html', context)
+    text = (
+        f"Hello {user.first_name},\n\n"
+        f"Your Negromart seller account was just signed in to from a new device.\n\n"
+        f"Device: {context['device_name']}\nIP address: {context['ip_address']}\n"
+        f"Time: {context['signed_in_at']}\n\n"
+        f"If this was you, there's nothing to do.\n"
+        f"If it wasn't, open {context['security_url']}, sign out everywhere and change your password."
+    )
+    try:
+        msg = EmailMultiAlternatives(
+            'New sign-in to your Negromart seller account', text,
+            settings.DEFAULT_FROM_EMAIL, [user.email],
+        )
+        msg.attach_alternative(html, 'text/html')
+        msg.send(fail_silently=False)
+    except Exception as exc:
+        return self.retry(exc=exc)

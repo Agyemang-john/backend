@@ -99,3 +99,82 @@ def touch_session(jti: str) -> None:
         UserSession.objects.filter(session_key=jti).update(last_activity=timezone.now())
     except Exception:
         pass
+
+
+# ── Revocation ────────────────────────────────────────────────────────────────
+# Deleting a UserSession row alone does not sign a device out: its refresh
+# token still verifies and its access token lives until expiry. Revoking a
+# session therefore also
+#   1. blacklists the refresh token, so it can never be renewed, and
+#   2. marks the session id in the cache for the access-token lifetime, so
+#      CustomJWTAuthentication rejects the device's next request.
+# Seller tokens carry the session id in a `sid` claim (the refresh token's jti,
+# copied onto every access token minted from it).
+
+REVOKED_SID_PREFIX = 'revoked_sid:'
+
+
+def _access_lifetime_seconds() -> int:
+    from django.conf import settings
+    lifetime = settings.SIMPLE_JWT.get('ACCESS_TOKEN_LIFETIME')
+    seconds = int(lifetime.total_seconds()) if lifetime else 3600
+    vendor = int(getattr(settings, 'VENDOR_AUTH_ACCESS_MAX_AGE', 0) or 0)
+    return max(seconds, vendor) + 60
+
+
+def is_session_revoked(sid: str) -> bool:
+    from django.core.cache import cache
+    if not sid:
+        return False
+    try:
+        return bool(cache.get(REVOKED_SID_PREFIX + sid))
+    except Exception:
+        return False
+
+
+def revoke_sessions(sessions) -> int:
+    """Sign out every session in the queryset (or iterable). Returns the count."""
+    from django.core.cache import cache
+    from rest_framework_simplejwt.token_blacklist.models import (
+        BlacklistedToken, OutstandingToken,
+    )
+    sessions = list(sessions)
+    if not sessions:
+        return 0
+    jtis = [s.session_key for s in sessions]
+
+    for outstanding in OutstandingToken.objects.filter(jti__in=jtis):
+        BlacklistedToken.objects.get_or_create(token=outstanding)
+    try:
+        cache.set_many({REVOKED_SID_PREFIX + j: 1 for j in jtis}, _access_lifetime_seconds())
+    except Exception as exc:
+        logger.warning("revoke_sessions: cache mark failed: %s", exc)
+
+    from .models import UserSession
+    UserSession.objects.filter(pk__in=[s.pk for s in sessions]).delete()
+    return len(sessions)
+
+
+def record_security_event(user, event: str, request=None, *, is_vendor=True,
+                          new_device=False, **metadata):
+    """Append to the person's security timeline. Returns the event, or None; never raises."""
+    from .models import SecurityEvent
+    try:
+        info = {}
+        ip = None
+        if request is not None:
+            ip = get_client_ip(request) or None
+            info = parse_device_info(request.META.get('HTTP_USER_AGENT', '')[:500])
+        return SecurityEvent.objects.create(
+            user=user,
+            event=event,
+            is_vendor=is_vendor,
+            ip_address=ip,
+            device_name=info.get('device_name', ''),
+            device_type=info.get('device_type', ''),
+            new_device=new_device,
+            metadata=metadata,
+        )
+    except Exception as exc:
+        logger.error("record_security_event: %s for user %s failed: %s", event, getattr(user, 'pk', None), exc)
+        return None
