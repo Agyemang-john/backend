@@ -615,7 +615,7 @@ class ProductDetailView(SubscriptionGateMixin, generics.RetrieveUpdateDestroyAPI
         vendor = self.request.user.current_vendor
         if not vendor:
             raise serializers.ValidationError("Vendor profile is required.")
-        return Product.objects.filter(vendor=vendor)
+        return Product.objects.filter(vendor=vendor).prefetch_related('variants__variantimage_set')
 
 
 # ─────────────────────────────────────────────────────────────────────────────

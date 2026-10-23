@@ -478,8 +478,12 @@ class Variants(models.Model):
         return mark_safe('<img src="%s" width="50" height="50" />' % (self.image.url))
 
 class VariantImage(models.Model):
+    """Extra gallery photos of one variant (the main photo is Variants.image).
+    How many a store may keep per variant is plan.max_images_per_variant."""
     variant = models.ForeignKey(Variants, on_delete=models.CASCADE, null=True)
     images = models.ImageField(upload_to="product_images/", default="product.jpg")
+    # Display order chosen by the seller; 0 for photos added before ordering existed.
+    position = models.PositiveSmallIntegerField(default=0)
     date = models.DateTimeField(auto_now_add=True)
     updated = models.DateTimeField(auto_now=True)
     
@@ -487,7 +491,7 @@ class VariantImage(models.Model):
         return self.variant.title
     
     class Meta:
-        ordering = ('-id',)
+        ordering = ('position', 'id')
     
     def image(self):
         return mark_safe('<img src="%s" width="50" height="50" />' % (self.images.url))

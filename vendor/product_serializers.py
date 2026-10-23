@@ -1,7 +1,7 @@
 import re
 from rest_framework import serializers
 from django.utils.text import slugify
-from product.models import Product, ProductImages, Variants, ProductDeliveryOption, DeliveryOption, Sub_Category, Brand, Color, Size
+from product.models import Product, ProductImages, Variants, VariantImage, ProductDeliveryOption, DeliveryOption, Sub_Category, Brand, Color, Size
 from address.models import Country
 from decimal import Decimal
 import json
@@ -37,10 +37,19 @@ class ProductImagesSerializer(serializers.ModelSerializer):
         model = ProductImages
         fields = ['id', 'images']
 
+class VariantImageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VariantImage
+        fields = ['id', 'images', 'position']
+
+
 class VariantsSerializer(serializers.ModelSerializer):
     color = serializers.PrimaryKeyRelatedField(queryset=Color.objects.all(), allow_null=True, required=False)
     size = serializers.PrimaryKeyRelatedField(queryset=Size.objects.all(), allow_null=True, required=False)
     image = serializers.ImageField(required=False, allow_null=True)
+    # Extra photos are uploaded one by one to vendor/variants/<id>/images/
+    # (vendor/variant_gallery.py); a product save only removes or reorders them.
+    gallery = VariantImageSerializer(many=True, read_only=True, source='variantimage_set')
 
     def to_internal_value(self, data):
         # Remove 'image' from data to prevent validation errors
@@ -50,7 +59,7 @@ class VariantsSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Variants
-        fields = ['id', 'title', 'size', 'color', 'image', 'quantity', 'price', 'seller_sku']
+        fields = ['id', 'title', 'size', 'color', 'image', 'quantity', 'price', 'seller_sku', 'gallery']
 
     def create(self, validated_data):
         variant = Variants.objects.create(**validated_data)
@@ -151,8 +160,40 @@ class ProductSerializer(serializers.ModelSerializer):
         if taken.exists():
             raise serializers.ValidationError({'variants': f"SKU {taken.first().seller_sku} is already used by another product."})
 
+    def _remember_variant(self, var_data, variant):
+        # The client tags each variant with a client_key so that, after saving,
+        # it knows which new variant id to upload that variant's gallery to.
+        key = var_data.get('client_key')
+        if key:
+            self._variant_keys[str(key)] = variant.id
+
+    @staticmethod
+    def _sync_gallery(variant, var_data):
+        """
+        Apply removals and the new order from var_data['keep_gallery']: the
+        variant's photos in display order, existing ones by id and photos still
+        to be uploaded as null (they are uploaded with their position).
+        """
+        order = var_data.get('keep_gallery')
+        if not isinstance(order, list):
+            return
+        positions = {int(i): pos for pos, i in enumerate(order) if str(i).isdigit()}
+        # Queryset delete still fires post_delete, which removes the files from storage.
+        variant.variantimage_set.exclude(id__in=positions).delete()
+        kept = list(variant.variantimage_set.all())
+        for img in kept:
+            img.position = positions[img.id]
+        VariantImage.objects.bulk_update(kept, ['position'])
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if getattr(self, '_variant_keys', None):
+            data['variant_keys'] = self._variant_keys
+        return data
+
     def create(self, validated_data):
         request = self.context['request']
+        self._variant_keys = {}
         delivery_options_raw = request.data.get("delivery_options")
         variants_raw = request.data.get("variants")
 
@@ -183,6 +224,7 @@ class ProductSerializer(serializers.ModelSerializer):
                 var_serializer = VariantsSerializer(data=var_data)
                 if var_serializer.is_valid(raise_exception=True):
                     variant = var_serializer.save(product=product)
+                    self._remember_variant(var_data, variant)
                     image_key = f"variant_image_{i}"
                     if image_key in request.FILES:
                         variant.image = request.FILES[image_key]
@@ -209,6 +251,7 @@ class ProductSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         request = self.context['request']
+        self._variant_keys = {}
         delivery_options_raw = request.data.get("delivery_options")
         variants_raw = request.data.get("variants")
         validated_data.pop('delivery_options', None)
@@ -265,6 +308,8 @@ class ProductSerializer(serializers.ModelSerializer):
                         var_serializer = VariantsSerializer(variant_instance, data=var_data, partial=True)
                         if var_serializer.is_valid(raise_exception=True):
                             var_serializer.save()
+                            self._sync_gallery(variant_instance, var_data)
+                            self._remember_variant(var_data, variant_instance)
                             image_key = f"variant_image_{i}"
                             if image_key in request.FILES:
                                 variant_instance.image = request.FILES[image_key]
@@ -275,6 +320,7 @@ class ProductSerializer(serializers.ModelSerializer):
                     var_serializer = VariantsSerializer(data=var_data)
                     if var_serializer.is_valid(raise_exception=True):
                         variant = var_serializer.save(product=instance)
+                        self._remember_variant(var_data, variant)
                         image_key = f"variant_image_{i}"
                         if image_key in request.FILES:
                             variant.image = request.FILES[image_key]

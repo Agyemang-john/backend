@@ -44,6 +44,7 @@ class SubscriptionPlanSerializer(serializers.ModelSerializer):
             # Limits
             'max_products',
             'max_images_per_product',
+            'max_images_per_variant',
             'max_categories',
             # Feature flags
             'can_feature_products',

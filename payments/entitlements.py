@@ -77,6 +77,12 @@ def team_member_limit(vendor):
     return plan.max_team_members if plan else 1
 
 
+def variant_image_limit(vendor):
+    """Extra gallery photos allowed per variant (0 = feature not in the plan)."""
+    plan = plan_for_vendor(vendor)
+    return plan.max_images_per_variant if plan else 0
+
+
 def plan_summary(vendor):
     """Small dict for the frontend to grey out features with an upgrade hint."""
     plan = plan_for_vendor(vendor)
@@ -88,6 +94,7 @@ def plan_summary(vendor):
         'can_use_messaging': can_use_messaging(vendor),
         'messaging_min_tier': MESSAGING_MIN_TIER,
         'max_team_members': team_member_limit(vendor),
+        'max_images_per_variant': variant_image_limit(vendor),
         'commission_rate': str(commission_rate(vendor)),
         'payout_delay_days': payout_delay_days(vendor),
     }

@@ -22,7 +22,7 @@ class BillingPlanSerializer(serializers.ModelSerializer):
             'id', 'name', 'tier', 'tier_display',
             'billing_cycle', 'billing_cycle_display',
             'price', 'price_formatted',
-            'max_products', 'max_images_per_product', 'max_categories',
+            'max_products', 'max_images_per_product', 'max_images_per_variant', 'max_categories',
             'can_feature_products', 'can_use_analytics', 'can_offer_discounts',
             'can_access_bulk_upload', 'can_use_storefront_customization',
             'priority_support', 'is_featured_vendor',

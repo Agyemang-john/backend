@@ -87,6 +87,11 @@ class SubscriptionPlan(models.Model):
         default=3,
         help_text="Maximum number of images per product listing."
     )
+    max_images_per_variant = models.PositiveIntegerField(
+        default=0,
+        help_text="Extra gallery photos per variant, on top of its main photo "
+                  "(0 = not included in this plan). Stored on Spaces, so it is a paid feature."
+    )
     max_categories = models.PositiveIntegerField(
         default=2,
         help_text="Maximum number of product categories a vendor can list in."

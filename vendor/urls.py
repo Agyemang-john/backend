@@ -1,4 +1,5 @@
 from django.urls import path
+from .variant_gallery import VariantGalleryUploadView
 from .views import (
     VendorAccountAPIView,
     VendorDeletionRequestView,
@@ -96,6 +97,7 @@ urlpatterns = [
     # Day-to-day operations (vendor/operations_views.py)
     path('action-center/', ActionCenterView.as_view(), name='vendor-action-center'),
     path('plan/', PlanSummaryView.as_view(), name='vendor-plan'),
+    path('variants/<int:variant_id>/images/', VariantGalleryUploadView.as_view(), name='vendor-variant-images'),
     path('operations-settings/', OperationsSettingsView.as_view(), name='vendor-operations-settings'),
     path('finance/balance/', BalanceView.as_view(), name='vendor-finance-balance'),
     path('finance/ledger/', LedgerView.as_view(), name='vendor-finance-ledger'),

@@ -67,7 +67,7 @@ class SubscriptionPlanAdmin(admin.ModelAdmin):
             "fields": ("name", "tier", "billing_cycle", "price", "description"),
         }),
         ("Product & listing limits", {
-            "fields": ("max_products", "max_images_per_product", "max_categories"),
+            "fields": ("max_products", "max_images_per_product", "max_images_per_variant", "max_categories"),
         }),
         ("Feature flags", {
             "fields": (
