@@ -10,10 +10,8 @@ logger = logging.getLogger(__name__)
 
 
 def get_client_ip(request) -> str:
-    xff = request.META.get('HTTP_X_FORWARDED_FOR', '')
-    if xff:
-        return xff.split(',')[0].strip()
-    return request.META.get('REMOTE_ADDR', '') or ''
+    from core.client_ip import client_ip
+    return client_ip(request)
 
 
 def parse_device_info(ua_string: str) -> dict:

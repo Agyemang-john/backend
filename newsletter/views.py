@@ -1,3 +1,4 @@
+from rest_framework.permissions import AllowAny
 # apps/newsletters/views.py
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -11,6 +12,7 @@ class SubscribeAPIView(APIView):
     """
     Step 1: User enters email → backend saves inactive subscriber and emails confirm link.
     """
+    permission_classes = [AllowAny]   # public
     def post(self, request):
         serializer = SubscriberSerializer(data=request.data)
         if serializer.is_valid():
@@ -63,6 +65,7 @@ class ConfirmAPIView(APIView):
     """
     Step 2: User clicks confirm link → backend marks them active.
     """
+    permission_classes = [AllowAny]   # public
     def post(self, request, token):
         try:
             subscriber = Subscriber.objects.get(confirm_token=token)
@@ -76,6 +79,7 @@ class UnsubscribeAPIView(APIView):
     """
     Step 3: User clicks unsubscribe link → backend marks them inactive.
     """
+    permission_classes = [AllowAny]   # public
     def post(self, request, token):
         try:
             subscriber = Subscriber.objects.get(unsubscribe_token=token)

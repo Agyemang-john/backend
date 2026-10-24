@@ -29,11 +29,21 @@ class UserSerializer(serializers.ModelSerializer):
         fields = ['id', 'first_name', 'last_name', 'email', 'phone']
 
 
+EMAIL_CHANGE_ATTEMPTS = 5          # wrong current passwords per window
+EMAIL_CHANGE_WINDOW = 15 * 60
+
+
 class ProfileSerializer(serializers.ModelSerializer):
     first_name = serializers.CharField(source='user.first_name', required=False)
     last_name = serializers.CharField(source='user.last_name', required=False)
-    email = serializers.CharField(source='user.email', required=False)
-    user = UserSerializer()
+    email = serializers.EmailField(source='user.email', required=False)
+    # Required only to change the email address: whoever controls the email
+    # can reset the password, so a stolen session must not be able to move it.
+    current_password = serializers.CharField(write_only=True, required=False, allow_blank=True,
+                                             trim_whitespace=False)
+    # Read-only: the phone number changes through the texted-code flow
+    # (userauths/seller_signup_views.PhoneVerification*), never here.
+    user = UserSerializer(read_only=True)
     profile_image = serializers.ImageField(required=False)
 
     class Meta:
@@ -42,6 +52,7 @@ class ProfileSerializer(serializers.ModelSerializer):
             'first_name',
             'last_name',
             'email',
+            'current_password',
             'user',
             'profile_image',
             'mobile',
@@ -54,16 +65,55 @@ class ProfileSerializer(serializers.ModelSerializer):
             'longitude',
         ]
 
+    def validate(self, attrs):
+        from django.core.cache import cache
+        user = self.instance.user if self.instance else None
+        new_email = (attrs.get('user') or {}).get('email')
+        password = attrs.pop('current_password', '')
+        if user is None or new_email is None or new_email.strip().lower() == (user.email or '').lower():
+            if new_email is not None:
+                attrs['user'].pop('email')
+            return attrs
+
+        key = f'email_change_attempts:{user.pk}'
+        if (cache.get(key) or 0) >= EMAIL_CHANGE_ATTEMPTS:
+            raise serializers.ValidationError(
+                {'current_password': "Too many attempts. Try again in 15 minutes."})
+        if not password or not user.check_password(password):
+            cache.add(key, 0, EMAIL_CHANGE_WINDOW)
+            try:
+                cache.incr(key)
+            except ValueError:
+                cache.set(key, 1, EMAIL_CHANGE_WINDOW)
+            raise serializers.ValidationError(
+                {'current_password': "Enter your current password to change your email address."})
+        new_email = new_email.strip().lower()
+        if User.objects.filter(email__iexact=new_email).exclude(pk=user.pk).exists():
+            raise serializers.ValidationError({'email': "An account with this email already exists."})
+        attrs['user']['email'] = new_email
+        return attrs
+
     def update(self, instance, validated_data):
         # Extract user-related data
         user_data = validated_data.pop('user', {})
 
         # Update User model fields
         user = instance.user
-        for field, value in user_data.items():
+        email_changed = 'email' in user_data and user_data['email'] != user.email
+        for field in ('first_name', 'last_name', 'email'):
+            value = user_data.get(field)
             if value is not None:
                 setattr(user, field, value)
+        if email_changed:
+            # The new address is unproven until its code is entered.
+            user.email_verified_at = None
         user.save()
+        if email_changed:
+            try:
+                from userauths.verification import send_email_code
+                send_email_code(user, enforce_cooldown=False)
+            except Exception:
+                logger.exception("Could not send email verification code for user=%s", user.pk)
 
         # Update Profile fields
         for field, value in validated_data.items():

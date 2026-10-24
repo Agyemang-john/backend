@@ -6,7 +6,6 @@ from .momo_views import (
       InitiateMomoView, PollMomoStatusView, ManualMomoPaymentView, SubmitMomoOtpView
   )
 from . import views
-from .flutterwave_view import FlutterwaveCallbackAPIView
 
 from .billing_views import (
     BillingOverviewView, BillingHistoryView, BillingCardsView,
@@ -20,7 +19,8 @@ urlpatterns = [
 
     path('verify-payment/<str:reference>/', views.VerifyPaymentAPIView.as_view(), name='verify_payment'),
     path('place-order-cod/', views.PlaceOrderCODAPIView.as_view(), name='place_order_cod'),
-    path('flutterwave-callback/', FlutterwaveCallbackAPIView.as_view(), name='flutterwave-callback'),
+    # Flutterwave isn't used at checkout. Its callback trusted the amount it was
+    # sent and has no secret configured, so it stays unrouted until it's needed.
     
     # ── Public ──────────────────────────────────────────────────────────────
     path(

@@ -18,6 +18,7 @@ through Django today; if video volume grows, switch to presigned uploads
 straight to Spaces and run these checks when the client registers the upload.
 """
 
+import uuid
 from io import BytesIO
 
 from django.core.files.base import ContentFile
@@ -90,10 +91,20 @@ def process_image(upload):
     return full, thumb, (width, height)
 
 
-def check_video(upload):
-    if upload.size > VIDEO_MAX_BYTES:
-        raise MediaError("Videos can be up to 40 MB. Try a shorter clip.")
+_VIDEO_EXTENSIONS = {'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/webm': 'webm'}
+
+
+def check_video(upload, max_bytes=VIDEO_MAX_BYTES):
+    """
+    Return a safe file name for the video. The name the shopper sent is never
+    used: Spaces serves files with the type their extension implies, so
+    "clip.html" with an MP4 header would be served, and run, as a web page.
+    """
+    if upload.size > max_bytes:
+        raise MediaError(f"Videos can be up to {max_bytes // (1024 * 1024)} MB. Try a shorter clip.")
     head = upload.read(16)
     upload.seek(0)
-    if not _video_kind(head):
+    kind = _video_kind(head)
+    if not kind:
         raise MediaError("Upload a video as MP4, WebM or MOV.")
+    return f"{uuid.uuid4().hex}.{_VIDEO_EXTENSIONS[kind]}"

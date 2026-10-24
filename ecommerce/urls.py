@@ -9,6 +9,13 @@ def home(request):
     return render(request, "home.html")
 
 
+from rest_framework.routers import DefaultRouter
+from userauths.djoser_views import RestrictedUserViewSet
+
+_djoser_router = DefaultRouter()
+_djoser_router.include_root_view = False
+_djoser_router.register("users", RestrictedUserViewSet, basename="user")
+
 urlpatterns = [
     # path('admin/', include('admin_honeypot.urls', namespace='admin_honeypot')),
     path('', home, name='home'),  
@@ -16,7 +23,7 @@ urlpatterns = [
     path("api/v1/auth/user/", include("customer.urls")),
     path("api/v1/vendor/", include("vendor.urls")),
     
-    path("api/", include("djoser.urls")),
+    path("api/", include(_djoser_router.urls)),   # restricted djoser, see userauths/djoser_views.py
     path("api/", include("userauths.urls")),
     
     path("api/", include("core.urls")),

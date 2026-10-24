@@ -14,6 +14,7 @@ from .otp import OTPTokenGenerator
 otp_token_generator = OTPTokenGenerator()
 
 
+INVALID_CREDENTIALS = "Incorrect email/phone or password."
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_TIME = timedelta(minutes=15)
 
@@ -45,10 +46,11 @@ class VendorLoginSerializer(serializers.Serializer):
                 user = User.objects.get(phone=identifier)
         except User.DoesNotExist:
             user = None
-        if user is None or not user.is_vendor:
-            raise serializers.ValidationError(
-                "Vendor not registered with this email/phone."
-            )
+        # Same answer for "no such account" and "wrong password", so the form
+        # can't be used to find out who has an account. Store membership and
+        # account state are only revealed once the password is right.
+        if user is None:
+            raise serializers.ValidationError(INVALID_CREDENTIALS)
 
         # account lockout check
         if user.failed_login_attempts >= MAX_FAILED_ATTEMPTS:
@@ -61,13 +63,9 @@ class VendorLoginSerializer(serializers.Serializer):
                 user.lockout_until = None
                 user.save(update_fields=["failed_login_attempts", "lockout_until"])
 
-        if not user.is_active:
-            raise serializers.ValidationError("Your account is not activated yet.")
-        
-        if getattr(user, "is_suspended", False):
-            raise serializers.ValidationError("Your account has been suspended. Contact support.")
-
-        authenticated_user = authenticate(email_or_phone=identifier, password=password)
+        # check_password on the account found above: authenticate() would
+        # also refuse inactive accounts, hiding the "not activated" message.
+        authenticated_user = user if user.check_password(password) else None
         if authenticated_user is None:
             User.objects.filter(pk=user.pk).update(
                 failed_login_attempts=F("failed_login_attempts") + 1
@@ -79,7 +77,16 @@ class VendorLoginSerializer(serializers.Serializer):
                 raise serializers.ValidationError(
                     f"Too many failed attempts. Please try again after {LOCKOUT_TIME.seconds // 60} minutes."
                 )
-            raise serializers.ValidationError("Incorrect password.")
+            raise serializers.ValidationError(INVALID_CREDENTIALS)
+
+        if not user.is_active:
+            raise serializers.ValidationError("Your account is not activated yet.")
+        if getattr(user, "is_suspended", False):
+            raise serializers.ValidationError("Your account has been suspended. Contact support.")
+        if not user.is_vendor:
+            raise serializers.ValidationError(
+                "This account isn't part of an approved store. Apply to sell, or ask the store owner for an invite."
+            )
 
         # reset attempts
         user.failed_login_attempts = 0
@@ -94,13 +101,20 @@ class VendorLoginSerializer(serializers.Serializer):
         recipient = user.email if is_email else user.phone
         send_otp.delay(recipient, otp, is_email)
 
-        return {"detail": "OTP sent. Please verify to complete login."}
+        # The view signs the login state with the user's id; the identifier
+        # typed in never travels back to the client as something we trust.
+        return {"user": user, "channel": "email" if is_email else "sms"}
 
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from .tokens import CustomVendorRefreshToken
 class CustomTokenRefreshSerializer(TokenRefreshSerializer):
     def validate(self, attrs):
+        from .tokens import is_seller_token
         old_refresh = RefreshToken(attrs["refresh"])
+        # A shopper refresh token (password only) must never turn into a
+        # dashboard session; that would skip the sign-in code.
+        if not is_seller_token(old_refresh):
+            raise serializers.ValidationError("Please sign in to the seller dashboard.")
         user_id = old_refresh.get("user_id")
         jti = old_refresh.payload.get("jti")
 

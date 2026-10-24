@@ -290,9 +290,13 @@ class ChatSocketTests(ChatFixtures, TransactionTestCase):
         self.make_world()
 
     def _connect(self, user, side):
+        # The way GET /notification/ws-token/ issues a ticket, signed in on
+        # the seller dashboard for the vendor side and the shop otherwise.
+        from types import SimpleNamespace
         from ecommerce.asgi import application
-        from rest_framework_simplejwt.tokens import AccessToken
-        token = str(AccessToken.for_user(user))
+        from notification.middleware import issue_ticket
+        user.__dict__['_auth_scope'] = 'seller' if side == 'vendor' else 'shopper'
+        token = issue_ticket(SimpleNamespace(user=user, auth={}))
         return WebsocketCommunicator(application, f'/ws/chat/?token={token}&as={side}')
 
     def test_live_message_and_typing(self):

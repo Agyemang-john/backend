@@ -110,6 +110,20 @@ class ProductSerializer(serializers.ModelSerializer):
         # review_note is written by Negromart reviewers (e.g. why it was rejected).
         read_only_fields = ['vendor', 'sku', 'review_note', 'date', 'updated', 'views']
 
+    PRODUCT_VIDEO_MAX_BYTES = 50 * 1024 * 1024    # what the seller help page promises
+
+    def validate_video(self, value):
+        # MP4, WebM or MOV by content, stored under a generated name: Spaces
+        # serves a file with the type its name implies (see review_media).
+        if not value:
+            return value
+        from product.review_media import MediaError, check_video
+        try:
+            value.name = check_video(value, max_bytes=self.PRODUCT_VIDEO_MAX_BYTES)
+        except MediaError as exc:
+            raise serializers.ValidationError(str(exc))
+        return value
+
     def validate_price(self, value):
         if value <= 0:
             raise serializers.ValidationError("Price must be a positive value.")
@@ -447,4 +461,4 @@ class VendorProductListSerializer(serializers.ModelSerializer):
         if not obj.old_price:
             return None
         currency = self._get_currency(obj)
-        return round(obj.old_price * self._get_rate(currency), 2)
+        return round(obj.old_price * self._get_rate(currency), 2)

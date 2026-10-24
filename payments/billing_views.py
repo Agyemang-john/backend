@@ -231,7 +231,8 @@ class ManualPaymentView(APIView):
             })
         except Exception as e:
             logger.error(f"ManualPayment error vendor={vendor.id}: {e}")
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "The payment didn't go through. Try again or use another card."},
+                            status=status.HTTP_400_BAD_REQUEST)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -257,7 +258,8 @@ class AddCardView(APIView):
             return Response(result)
         except Exception as e:
             logger.error(f"AddCard error: {e}")
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"error": "We couldn't start adding the card. Please try again."},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class VerifyCardAddView(APIView):
     """
@@ -285,12 +287,17 @@ class VerifyCardAddView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
  
+        vendor = _get_vendor(request)
+        if not vendor:
+            return Response({"error": "No vendor account."}, status=status.HTTP_403_FORBIDDEN)
         try:
-            result = services.verify_card_add(reference)
+            result = services.verify_card_add(reference, vendor=vendor)
             return Response(result)
+        except services.SubscriptionVerifyError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as exc:
             logger.error(f"VerifyCardAdd error ref={reference}: {exc}")
             return Response(
-                {"error": str(exc)},
+                {"error": "We couldn't save this card. Please try again."},
                 status=status.HTTP_400_BAD_REQUEST,
             )    

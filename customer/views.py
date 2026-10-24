@@ -35,11 +35,12 @@ class ProfileAPIView(APIView):
 
     def post(self, request, *args, **kwargs):
         """Create a new profile for the authenticated user."""
-        data = request.data.copy()
-        data['user'] = request.user.id  # Associate the profile with the authenticated user
-        serializer = ProfileSerializer(data=data, context={'request': request})
+        if Profile.objects.filter(user=request.user).exists():
+            return Response({"detail": "Profile already exists."}, status=status.HTTP_400_BAD_REQUEST)
+        serializer = ProfileSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
-            serializer.save()
+            serializer.validated_data.pop('user', None)
+            serializer.save(user=request.user)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         # Log validation errors instead of printing to stdout
         logger.warning("Profile creation validation errors: %s", serializer.errors)
@@ -49,7 +50,7 @@ class ProfileAPIView(APIView):
         """Update the authenticated user's profile."""
         try:
             profile = Profile.objects.get(user=request.user)
-            serializer = ProfileSerializer(profile, data=request.data, partial=True)
+            serializer = ProfileSerializer(profile, data=request.data, partial=True, context={'request': request})
             if serializer.is_valid():
                 serializer.save()
                 return Response(serializer.data, status=status.HTTP_200_OK)

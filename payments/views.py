@@ -10,7 +10,11 @@ API views for payment processing and subscription management:
 """
 
 import logging
+import re
+from decimal import Decimal, ROUND_HALF_UP
+from django.db import connection, transaction
 from django.shortcuts import redirect
+from core.client_ip import client_ip
 from .models import Payment
 from django.conf import settings
 import requests
@@ -172,6 +176,15 @@ class PlaceOrderCODAPIView(APIView):
             )
 
 
+ORDER_CURRENCY = 'GHS'           # carts are priced in cedis; the checkout charges GHS
+AMOUNT_TOLERANCE_PESEWAS = 1     # the browser multiplies cedis by 100 in floating point
+_REFERENCE_RE = re.compile(r'^[A-Za-z0-9._=-]{1,100}$')
+
+
+def _pesewas(amount):
+    return int((Decimal(str(amount)) * 100).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+
+
 class VerifyPaymentAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -193,8 +206,12 @@ class VerifyPaymentAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        reference = str(reference).strip()
+        if not _REFERENCE_RE.match(reference):
+            return Response({"status": "failed", "message": "Invalid payment reference"},
+                            status=status.HTTP_400_BAD_REQUEST)
+
         # Verify payment with Paystack
-        print(settings.PAYSTACK_SECRET_KEY, 'paystack secret key')
         url = f"https://api.paystack.co/transaction/verify/{reference}"
         headers = {"Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}"}
 
@@ -202,61 +219,76 @@ class VerifyPaymentAPIView(APIView):
             response = requests.get(url, headers=headers, timeout=10)
             response.raise_for_status()
             data = response.json()
-        except requests.RequestException as e:
+        except (requests.RequestException, ValueError) as e:
             logger.error(f"Paystack verification failed for ref {reference}: {e}")
             return Response(
                 {"status": "failed", "message": "Payment verification failed"},
                 status=status.HTTP_502_BAD_GATEWAY
             )
 
-        if not data.get("status") or data["data"]["status"] != "success":
+        payment_data = data.get("data") or {}
+        if not data.get("status") or payment_data.get("status") != "success":
             return Response(
                 {"status": "failed", "message": "Payment not successful"},
                 status=status.HTTP_400_BAD_REQUEST
             )
+        # Paystack echoes the reference it verified; it must be the one we asked about.
+        if payment_data.get("reference") != reference:
+            return Response({"status": "failed", "message": "Payment verification failed"},
+                            status=status.HTTP_400_BAD_REQUEST)
 
-        payment_data = data["data"]
+        with transaction.atomic():
+            # One reference, one order, whoever asks and however many times at
+            # once: concurrent verifies of the same reference queue up here.
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", [f"paystack:{reference}"])
 
-        # Prevent duplicate processing (idempotency)
-        if Payment.objects.filter(ref=payment_data["reference"]).exists():
-            # Already processed — find existing order
-            payment = Payment.objects.get(ref=payment_data["reference"])
-            try:
-                order = Order.objects.get(payment_id=payment.id, user=user)
+            existing = Payment.objects.filter(ref=reference).first()
+            if existing is not None and existing.user_id != user.id:
+                logger.warning("Payment ref %s replayed by user=%s (owner user=%s)",
+                               reference, user.id, existing.user_id)
+                return Response({"status": "failed", "message": "This payment has already been used"},
+                                status=status.HTTP_409_CONFLICT)
+            # A subscription payment is not a payment for goods.
+            if PaymentTransaction.objects.filter(paystack_reference=reference).exists():
+                return Response({"status": "failed", "message": "This payment has already been used"},
+                                status=status.HTTP_409_CONFLICT)
+
+            if existing is not None:
+                order = Order.objects.filter(payment_id=existing.id, user=user).first()
                 return Response({
                     "status": "success",
-                    "message": "Payment already processed",
-                    "order_id": order.id,
-                    "order_number": order.order_number,
+                    "message": "Payment already processed" if order else
+                               "Payment verified. Your order is being processed...",
+                    "order_id": order.id if order else None,
+                    "order_number": order.order_number if order else None,
+                    "reference": reference,
                 })
-            except Order.DoesNotExist:
-                pass  # Continue to recreate if needed
 
-        # Create or get Payment object (safe to do sync)
-        payment, created = Payment.objects.get_or_create(
-            user=user,
-            ref=payment_data["reference"],
-            defaults={
-                "verified": True,
-                "amount": payment_data["amount"] / 100,
-                "email": payment_data["customer"]["email"],
-            }
-        )
+            # The amount was chosen in the browser, so check it against what
+            # the cart costs now, in the currency the cart is priced in.
+            expected = _pesewas(cart.calculate_grand_total())
+            paid = int(payment_data.get("amount") or 0)
+            currency = (payment_data.get("currency") or "").upper()
+            if currency != ORDER_CURRENCY or expected <= 0 or paid + AMOUNT_TOLERANCE_PESEWAS < expected:
+                logger.warning(
+                    "Order payment mismatch ref=%s user=%s paid=%s %s expected=%s %s",
+                    reference, user.id, paid, currency, expected, ORDER_CURRENCY,
+                )
+                return Response(
+                    {"status": "failed",
+                     "message": "The amount paid does not match your cart. Contact support with your "
+                                "payment reference if you were charged."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-        if not created:
-            payment.verified = True
-            payment.amount = payment_data["amount"] / 100
-            payment.save()
-
-        # The order is created by a Celery task. If this payment was already
-        # verified, a task is already on its way; dispatching again would create a
-        # duplicate order and count flash-sale units twice.
-        if not created:
-            return Response({
-                "status": "success",
-                "message": "Payment verified. Your order is being processed...",
-                "reference": reference,
-            }, status=status.HTTP_200_OK)
+            payment = Payment.objects.create(
+                user=user,
+                ref=reference,
+                verified=True,
+                amount=paid // 100,
+                email=(payment_data.get("customer") or {}).get("email") or user.email,
+            )
 
         # Serialize cart items for Celery (avoid passing queryset). Prices are
         # fixed here, at payment time, so the order matches what was charged
@@ -281,7 +313,7 @@ class VerifyPaymentAPIView(APIView):
             payment_id=payment.id,
             cart_items_data=cart_items_data,
             address_id=address.id,
-            ip=request.META.get('REMOTE_ADDR'),
+            ip=client_ip(request),
             reference=reference,
         )
 
@@ -401,7 +433,7 @@ class InitiateSubscriptionView(APIView):
         except Exception as e:
             logger.error(f"InitiateSubscription error: {e}")
             return Response(
-                {"error": str(e)},
+                {"error": "We couldn't start the payment. Please try again."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
@@ -426,13 +458,20 @@ class VerifySubscriptionView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        vendor = get_finance_vendor(request)
+        if vendor is None:
+            return Response({"error": "No vendor account found."}, status=status.HTTP_403_FORBIDDEN)
+
         try:
-            result = services.verify_and_activate(reference)
+            result = services.verify_and_activate(reference, vendor=vendor)
             return Response(result, status=status.HTTP_200_OK)
+        except services.SubscriptionVerifyError as e:
+            logger.warning(f"VerifySubscription refused ref={reference} vendor={vendor.id}: {e}")
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             logger.error(f"VerifySubscription error ref={reference}: {e}")
             return Response(
-                {"error": str(e)},
+                {"error": "We couldn't confirm this payment. If you were charged, contact support."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -503,8 +542,12 @@ class CancelSubscriptionView(APIView):
                 },
                 status=status.HTTP_200_OK,
             )
-        except Exception as e:
+        except (ValueError, services.SubscriptionChangeError) as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"CancelSubscription error: {e}")
+            return Response({"error": "We couldn't cancel the plan. Please try again."},
+                            status=status.HTTP_400_BAD_REQUEST)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

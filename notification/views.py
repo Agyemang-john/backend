@@ -8,8 +8,10 @@ from order.models import Order
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_websocket_token(request):
-    # request.auth is the AccessToken OBJECT → convert to string!
-    return Response({"token": str(request.auth)})
+    # A one-use, 60-second ticket for the socket URL, not the access token
+    # itself (see notification/middleware.py).
+    from .middleware import issue_ticket
+    return Response({"token": issue_ticket(request)})
 
 
 from rest_framework import generics, status
@@ -100,6 +102,7 @@ from .serializers import ContactInquirySerializer, ReportSerializer
 
 
 class ContactInquiryCreateView(APIView):
+    permission_classes = [AllowAny]   # public
     def post(self, request):
         serializer = ContactInquirySerializer(data=request.data, context={'request': request})
         if serializer.is_valid():

@@ -62,6 +62,7 @@ django-timezone-field==7.1
 # EDITORS
 django-ckeditor==6.7.2
 django-ckeditor-5==0.2.18
+nh3==0.2.18
 django-tinymce==4.1.0
 
 # MEDIA

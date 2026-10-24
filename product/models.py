@@ -326,7 +326,13 @@ class Product(models.Model):
     objects  = models.Manager() # Default Manager
     published = PublishedManager() # Custom Manager
     
+    # Seller-written HTML the storefront renders as-is (see core/html_sanitize.py).
+    RICH_TEXT_FIELDS = ('features', 'description', 'specifications', 'delivery_returns')
+
     def save(self, *args, **kwargs):
+        from core.html_sanitize import clean_html
+        for field in self.RICH_TEXT_FIELDS:
+            setattr(self, field, clean_html(getattr(self, field)))
         self.slug = slugify(self.title, allow_unicode=True)
         super(Product, self).save(*args, **kwargs)
 
@@ -414,7 +420,8 @@ class Color(models.Model):
         return self.name
     def color_tag(self):
         if self.code is not None:
-            return mark_safe('<p style="background-color:{}">Color </p>'.format(self.code))
+            from django.utils.html import format_html
+            return format_html('<p style="background-color:{}">Color </p>', self.code)
         else:
             return ""
 

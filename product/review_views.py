@@ -112,6 +112,7 @@ class ReviewPagination(PageNumberPagination):
 
 class ProductReviewListView(APIView):
     """GET: approved reviews. POST: write a review (signed-in, eligible customers)."""
+    permission_classes = [AllowAny]   # public
 
     def get_permissions(self):
         return [IsAuthenticated()] if self.request.method == 'POST' else [AllowAny()]
@@ -324,8 +325,7 @@ class ReviewMediaUploadView(APIView):
                 media.file.save('photo.jpg', full, save=False)
                 media.thumbnail.save('thumb.jpg', thumb, save=False)
             else:
-                review_media.check_video(upload)
-                media.file.save(upload.name, upload, save=False)
+                media.file.save(review_media.check_video(upload), upload, save=False)
         except review_media.MediaError as exc:
             logger.info("review media rejected for user=%s: %s", request.user.pk, exc)
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)

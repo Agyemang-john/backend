@@ -297,8 +297,9 @@ class ProductDetailAPIView(APIView):
             return Response(response_data, status=status.HTTP_200_OK)
 
         except Exception as e:
+            logger.error(f"Product detail error: {e}", exc_info=True)
             return Response(
-                {"error": "Failed to load product data", "detail": str(e)},
+                {"error": "Failed to load product data"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
@@ -455,6 +456,7 @@ class ProductAuthStateAPIView(APIView):
 
 
 class SearchSuggestionsAPIView(APIView):
+    permission_classes = [AllowAny]   # public
     def get(self, request, *args, **kwargs):
         query = request.GET.get("q", "").strip()
 
@@ -1008,6 +1010,7 @@ class ProductSearchAPIView(APIView):
          
 
 class RecentlyViewedProducts(APIView):
+    permission_classes = [AllowAny]   # public
     def get(self, request):
         import math
 
@@ -1048,6 +1051,7 @@ class RecentlyViewedProducts(APIView):
 
 
 class ClearRecentlyViewed(APIView):
+    permission_classes = [AllowAny]   # public
     http_method_names = ['post']
 
     def post(self, request):
@@ -1059,6 +1063,7 @@ class ClearRecentlyViewed(APIView):
 
 
 class RemoveRecentlyViewedItem(APIView):
+    permission_classes = [AllowAny]   # public
     http_method_names = ['post']
 
     def post(self, request):

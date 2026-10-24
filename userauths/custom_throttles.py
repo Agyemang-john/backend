@@ -15,11 +15,13 @@ class RegisterThrottle(AnonRateThrottle):
 
 # Checkout should not be spammed
 class CheckoutThrottle(UserRateThrottle):
+    scope = "checkout"   # own scope: sharing "user" mixed its counter with the global one
     rate = "20/hour"
 
 
 # Password reset (avoid abuse)
 class PasswordResetThrottle(AnonRateThrottle):
+    scope = "password_reset"
     rate = "3/min"
 
 

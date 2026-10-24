@@ -231,7 +231,12 @@ class SellerSecurityTests(TestCase):
     def _otp_sign_in(self, ua):
         OTPRecord.create_for_user(self.user, 12345)
         client = APIClient(HTTP_USER_AGENT=ua)
-        client.cookies['otp_identifier'] = self.user.email
+        from django.core import signing
+        from .views import VENDOR_LOGIN_COOKIE, VENDOR_LOGIN_SALT
+        client.cookies[VENDOR_LOGIN_COOKIE] = signing.dumps(
+            {'uid': self.user.pk, 'ch': 'email', 'pw': self.user.get_session_auth_hash()[:20]},
+            salt=VENDOR_LOGIN_SALT,
+        )
         with mock.patch('userauths.tasks.send_new_sign_in_alert.delay') as alert:
             res = client.post('/api/jwt/otp-verify/vendor/', {'otp': '12345'}, format='json')
         self.assertEqual(res.status_code, 200)

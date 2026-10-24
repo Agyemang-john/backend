@@ -1,4 +1,5 @@
 from django.db import models
+from .kyc import KycUploadTo, kyc_storage
 from userauths.models import User
 from django.utils import timezone
 from django.utils.text import slugify
@@ -122,27 +123,31 @@ class Vendor(models.Model):
     )
     followers = models.ManyToManyField(User, related_name='vendor_following', blank=True)
 
-    # Business Documents
+    # Business Documents: private, content-checked, random names (vendor/kyc.py)
     license = models.FileField(
-        upload_to='vendor/license/',
+        upload_to=KycUploadTo('license'),
+        storage=kyc_storage,
         blank=True,
         null=True,
         help_text="Business license for non-student vendors."
     )
     student_id = models.FileField(
-        upload_to='vendor/studentid/',
+        upload_to=KycUploadTo('studentid'),
+        storage=kyc_storage,
         blank=True,
         null=True,
         help_text="Student ID for student vendors."
     )
     proof_of_address = models.FileField(
-        upload_to='vendor_addresses/',
+        upload_to=KycUploadTo('address'),
+        storage=kyc_storage,
         blank=True,
         null=True,
         help_text="Proof of address (e.g., utility bill) dated within 180 days."
     )
     government_issued_id = models.FileField(
-        upload_to='vendor/id_photos/',
+        upload_to=KycUploadTo('id'),
+        storage=kyc_storage,
         blank=True,
         null=True,
         help_text="Photo of government-issued ID (e.g., ID card, passport, driver's license)."

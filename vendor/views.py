@@ -50,7 +50,8 @@ from vendor.permissions import IsVerifiedVendor
 # Team access: "my store" is resolved through VendorMember, and sensitive
 # endpoints ask for a capability rather than a role (see vendor/access.py).
 from vendor.access import (
-    ANY_MEMBER, Capability, capabilities_for_role, get_vendor_or_404, require_capability,
+    ANY_MEMBER, Capability, IsSellerSignIn, capabilities_for_role, get_vendor_or_404,
+    require_capability,
 )
 from order.models import OrderProduct, Order
 from product.models import Wishlist, SavedProduct, ProductReview
@@ -74,10 +75,8 @@ logger = logging.getLogger(__name__)
 # ── Activity tracking helpers ─────────────────────────────────────────────────
 
 def _get_client_ip(request):
-    xff = request.META.get('HTTP_X_FORWARDED_FOR')
-    if xff:
-        return xff.split(',')[0].strip()
-    return request.META.get('REMOTE_ADDR')
+    from core.client_ip import client_ip
+    return client_ip(request)
 
 
 class VendorHeartbeatAPIView(APIView):
@@ -86,7 +85,7 @@ class VendorHeartbeatAPIView(APIView):
     Called by the seller dashboard every ~10 minutes while the tab is open.
     Updates Redis last_seen key and logs a heartbeat event (once per hour max).
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsSellerSignIn]
     throttle_classes   = [VendorHeartbeatThrottle]
 
     def post(self, request):
@@ -746,7 +745,8 @@ class VendorStatusAPIView(APIView):
                 # (unchanged meaning for existing clients); `can_access_dashboard`
                 # is the live access decision used by the API itself.
                 'is_vendor': True,
-                'can_access_dashboard': user.is_vendor,
+                # Whether the store lets them in; asked with a shopper token too.
+                'can_access_dashboard': vendor.is_approved,
                 'vendor_role': membership.role,
                 'capabilities': sorted(capabilities_for_role(membership.role)),
                 'vendor_status': vendor.status,
@@ -843,6 +843,7 @@ class VendorSignupAPIView(APIView):
 
 
 class VendorDetailView(APIView):
+    permission_classes = [AllowAny]   # public
     def get(self, request, slug):
         vendor     = get_object_or_404(Vendor, slug=slug)
         cache_key  = f"vendor_metadata_v2:{slug}"
@@ -1134,13 +1135,27 @@ class ProductRelatedDataAPIView(APIView):
         })
 
 
+class BankValidationThrottle(UserRateThrottle):
+    scope = 'bank_validation'
+    rate = '30/hour'
+
+
 class BankValidationView(APIView):
-    def __init__(self):
+    # Signed-in only, throttled and cached: each uncached call spends our
+    # Paystack secret key.
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [BankValidationThrottle]
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         self.api_key  = settings.PAYSTACK_SECRET_KEY
         self.base_url = "https://api.paystack.co"
         self.stopwords = {'BANK','GHANA','LIMITED','LTD','PLC','AND','LOANS','SAVINGS','AFRICA','AGRICULTURAL','DEVELOPMENT'}
 
     def get_ghana_banks(self):
+        cached = cache.get('paystack:ghana_banks')
+        if cached:
+            return cached
         try:
             resp = requests.get(
                 f"{self.base_url}/bank?country=ghana",
@@ -1150,7 +1165,9 @@ class BankValidationView(APIView):
             data = resp.json()
             if resp.status_code == 200 and data.get("status"):
                 filtered = [b for b in data['data'] if b.get('currency') == 'GHS' and b.get('type') == 'ghipss' and b.get('active')]
-                return {self._norm(b['name']): {'name': b['name'], 'code': b['code']} for b in filtered}
+                banks = {self._norm(b['name']): {'name': b['name'], 'code': b['code']} for b in filtered}
+                cache.set('paystack:ghana_banks', banks, 3600)
+                return banks
         except Exception as e:
             logger.error(f"Error fetching banks: {e}")
         return {}
@@ -1404,6 +1421,23 @@ class VendorOrderDetailView(APIView):
             raise APIException("An error occurred.")
 
 
+def _status_from_lines(order):
+    """Whole-order status for an order shared by several stores."""
+    statuses = set(order.order_products.values_list('status', flat=True))
+    if not statuses or statuses == {'canceled'}:
+        return 'canceled'
+    statuses.discard('canceled')
+    if statuses == {'delivered'}:
+        return 'delivered'
+    if 'delivered' in statuses:
+        return 'partially_delivered'
+    if 'shipped' in statuses:
+        return 'shipped'
+    if 'processing' in statuses:
+        return 'processing'
+    return 'pending'
+
+
 class UpdateOrderStatusAPIView(APIView):
     permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.MANAGE_ORDERS)]
 
@@ -1414,15 +1448,28 @@ class UpdateOrderStatusAPIView(APIView):
             return Response({"error": "Invalid status choice."}, status=status.HTTP_400_BAD_REQUEST)
         try:
             order        = Order.objects.get(id=id, vendors__in=[vendor])
-            if new_status == 'canceled' and order.status != 'canceled':
+            # A store only changes its own part of an order: its lines and its
+            # shipments. With several stores in one order, the order's own
+            # status follows from all lines (see _status_from_lines).
+            own_lines = order.order_products.filter(product__vendor=vendor)
+            if new_status == 'canceled':
                 # The courier is told first: an order cancelled here while its
                 # parcel is still booked would still be picked up and delivered.
                 try:
-                    cancel_open_shipments(order)
+                    cancel_open_shipments(order, vendor=vendor)
                 except DeliveryProviderError as exc:
                     return Response({"error": str(exc)}, status=status.HTTP_409_CONFLICT)
-            order.status = new_status
+            line_status = 'delivered' if new_status == 'partially_delivered' else new_status
+            own_lines.update(status=line_status)
+            previous = order.status
+            if order.vendors.exclude(pk=vendor.pk).exists():
+                order.status = _status_from_lines(order)
+            else:
+                order.status = new_status
             order.save()
+            new_status = order.status
+            if new_status == previous:
+                return Response(OrderSerializer(order, context={'vendor': vendor, 'request': request}).data)
 
             # ── Broadcast status change to customer tracking WebSocket ─────────
             from asgiref.sync import async_to_sync

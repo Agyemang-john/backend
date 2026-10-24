@@ -132,6 +132,8 @@ class User(AbstractBaseUser, PermissionsMixin):
         # Only track the phone when its stamp was loaded too (not deferred).
         instance._loaded_phone = loaded.get('phone') if 'phone_verified_at' in loaded else None
         instance._loaded_phone_verified_at = loaded.get('phone_verified_at')
+        instance._loaded_email = loaded.get('email') if 'email_verified_at' in loaded else None
+        instance._loaded_email_verified_at = loaded.get('email_verified_at')
         instance._loaded_is_active = loaded.get('is_active')
         return instance
 
@@ -140,8 +142,8 @@ class User(AbstractBaseUser, PermissionsMixin):
         Keep the verification stamps honest whatever code path edits the user
         (customer profile form, admin, djoser, shell):
 
-        - A new phone number is unverified, unless the caller stamped
-          phone_verified_at in the same save (verification.confirm_phone).
+        - A new phone number or email address is unverified, unless the caller
+          stamped its *_verified_at in the same save (verification.confirm_*).
         - An account becoming active has proven its email (activation link,
           seller-signup code), or an admin vouched for it, so stamp it.
         """
@@ -152,6 +154,12 @@ class User(AbstractBaseUser, PermissionsMixin):
             if self.phone_verified_at == getattr(self, '_loaded_phone_verified_at', None):
                 self.phone_verified_at = None
                 changed.add('phone_verified_at')
+        loaded_email = getattr(self, '_loaded_email', None)
+        if self.pk and loaded_email is not None and (self.email or '').lower() != loaded_email.lower():
+            # Same rule for a new email address (djoser set_email, admin, ...).
+            if self.email_verified_at == getattr(self, '_loaded_email_verified_at', None):
+                self.email_verified_at = None
+                changed.add('email_verified_at')
         if self.is_active and getattr(self, '_loaded_is_active', None) is False and self.email_verified_at is None:
             self.email_verified_at = timezone.now()
             changed.add('email_verified_at')
@@ -166,6 +174,8 @@ class User(AbstractBaseUser, PermissionsMixin):
         super().save(*args, **kwargs)
         self._loaded_phone = self.phone
         self._loaded_phone_verified_at = self.phone_verified_at
+        self._loaded_email = self.email
+        self._loaded_email_verified_at = self.email_verified_at
         self._loaded_is_active = self.is_active
 
     def set_password(self, raw_password):

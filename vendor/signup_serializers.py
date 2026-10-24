@@ -1,3 +1,4 @@
+from .kyc import KycFilesMixin
 from django.db import transaction
 from rest_framework import serializers
 from .models import Vendor, About, VendorPaymentMethod
@@ -70,7 +71,7 @@ class VendorPaymentMethodSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(errors)
         return data
 
-class VendorSignupSerializer(CountryFieldMixin, serializers.ModelSerializer):
+class VendorSignupSerializer(KycFilesMixin, CountryFieldMixin, serializers.ModelSerializer):
     about = AboutSerializer()
     payment_method = VendorPaymentMethodSerializer()  # Nested serializer for payment method
 

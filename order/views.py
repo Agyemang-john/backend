@@ -36,7 +36,9 @@ class AddToCartView(APIView):
         if not product_id:
             return Response({"error": "product_id is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        product = get_object_or_404(Product, id=product_id)
+        # Only what the storefront shows can be bought: not drafts, rejected
+        # or disabled listings, nor products of paused or suspended stores.
+        product = get_object_or_404(Product.published, id=product_id)
         variant = get_object_or_404(Variants, id=variant_id, product=product) if variant_id else None
         item_key = f"{product.id}_{variant.id if variant else 'none'}"
 
@@ -145,10 +147,10 @@ class RemoveFromCartView(APIView):
             }, status=status.HTTP_200_OK)
 
         except Exception as e:
+            logger.error(f"Cart update error: {e}", exc_info=True)
             return Response({
                 "success": False,
                 "error": "Something went wrong",
-                "detail": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -216,7 +218,7 @@ class SyncGuestCartView(APIView):
                 continue  # Skip malformed keys
 
             try:
-                product = Product.objects.get(id=product_id)
+                product = Product.published.get(id=product_id)
                 variant = Variants.objects.get(id=variant_id, product=product) if variant_id else None
             except (Product.DoesNotExist, Variants.DoesNotExist):
                 continue  # Skip invalid products
@@ -272,7 +274,6 @@ class CartView(APIView):
             logger.error(f"CartView error: {str(e)}", exc_info=True)
             return Response({
                 "detail": "Error loading cart",
-                "error": str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 ##############################################################################################
@@ -314,6 +315,7 @@ class NavInfo(APIView):
 
 #####################CHECKOUT##################################
 class CheckoutAPIView(APIView):
+    permission_classes = [AllowAny]   # public
     def get(self, request):
         user = request.user
         default_address = Address.objects.filter(user=user, status=True).first()

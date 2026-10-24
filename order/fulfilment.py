@@ -195,9 +195,15 @@ def cancel_shipment(shipment):
     return shipment
 
 
-def cancel_open_shipments(order):
-    """Cancel every shipment of `order` that is still moving. Stops at the first refusal."""
-    for shipment in order.shipments.exclude(status__in=TERMINAL_SHIPMENT_STATUSES):
+def cancel_open_shipments(order, vendor=None):
+    """
+    Cancel every shipment of `order` that is still moving, or only `vendor`'s
+    when a store cancels its part of a shared order. Stops at the first refusal.
+    """
+    shipments = order.shipments.exclude(status__in=TERMINAL_SHIPMENT_STATUSES)
+    if vendor is not None:
+        shipments = shipments.filter(vendor=vendor)
+    for shipment in shipments:
         cancel_shipment(shipment)
 
 

@@ -123,6 +123,20 @@ def get_vendor_or_404(user):
     return membership.vendor
 
 
+def signed_in_as_seller(user):
+    """
+    False when this request authenticated with a shopper token.
+
+    Shopper sign-in is password only; the dashboard also needs the emailed or
+    texted code. So a shopper token still knows which store the person is in
+    (get_membership, for "you can't message your own store" and application
+    status) but never grants dashboard access. Users not loaded by JWT
+    authentication (admin, Celery, tests) are not restricted.
+    """
+    from userauths.authentication import AUTH_SCOPE_ATTR
+    return getattr(user, '__dict__', {}).get(AUTH_SCOPE_ATTR) != 'shopper'
+
+
 def is_vendor(user):
     """
     May this user use the seller dashboard right now?
@@ -131,11 +145,15 @@ def is_vendor(user):
     back on reject/suspend, both of which also toggle is_approved), but derived
     from live data, so it can never drift out of sync.
     """
+    if not signed_in_as_seller(user):
+        return False
     membership = get_membership(user)
     return bool(membership and membership.vendor.is_approved)
 
 
 def has_capability(user, capability):
+    if not signed_in_as_seller(user):
+        return False
     membership = get_membership(user)
     if membership is None or not membership.vendor.is_approved:
         return False
@@ -149,6 +167,8 @@ def get_vendor_with_capability(user, capability):
     - Not in any store       → None (callers keep their existing "no vendor" handling)
     - In a store, role lacks → raises PermissionDenied with a clear message
     """
+    if not signed_in_as_seller(user):
+        raise PermissionDenied(SELLER_SIGN_IN_REQUIRED)
     membership = get_membership(user)
     if membership is None:
         return None
@@ -173,6 +193,17 @@ def _role_denied_message(role):
 
 # ── DRF permissions ───────────────────────────────────────────────────────────
 
+SELLER_SIGN_IN_REQUIRED = "Sign in to the seller dashboard to do this."
+
+class IsSellerSignIn(BasePermission):
+    """Signed in through the seller sign-in, whatever the store's state."""
+    message = SELLER_SIGN_IN_REQUIRED
+
+    def has_permission(self, request, view):
+        user = request.user
+        return bool(user and user.is_authenticated and signed_in_as_seller(user))
+
+
 class IsVendorMember(BasePermission):
     """Authenticated user with an active membership in an approved store."""
     message = "You must be a member of an approved store to use the seller dashboard."
@@ -196,6 +227,9 @@ def require_capability(write, read=None):
 
     class _RequireCapability(BasePermission):
         def has_permission(self, request, view):
+            if not signed_in_as_seller(request.user):
+                self.message = SELLER_SIGN_IN_REQUIRED
+                return False
             membership = get_membership(request.user)
             if membership is None or not membership.vendor.is_approved:
                 self.message = IsVendorMember.message

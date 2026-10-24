@@ -410,7 +410,34 @@ def _activate_free_plan(vendor, plan: SubscriptionPlan) -> dict:
 # Adds: idempotency check, select_for_update row lock, IntegrityError handling.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def verify_and_activate(reference: str) -> dict:
+class SubscriptionVerifyError(Exception):
+    """A payment that must not activate anything; the message is safe to show."""
+
+
+def _pesewas(amount) -> int:
+    return int((Decimal(str(amount)) * 100).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+
+
+def _check_paid_transaction(txn, ps_data, meta):
+    """
+    The Paystack payment must be the one we started: same store, same currency,
+    at least the amount we quoted. Anyone holding the public key can create a
+    Paystack transaction with any metadata they like, so nothing about the
+    store, plan or period is taken from a payment we did not initialise.
+    """
+    if txn is None or txn.vendor_id is None:
+        raise SubscriptionVerifyError("We don't recognise this payment.")
+    if str(meta.get("vendor_id", txn.vendor_id)) != str(txn.vendor_id):
+        raise SubscriptionVerifyError("This payment belongs to a different store.")
+    paid = int(ps_data.get("amount") or 0)
+    if (ps_data.get("currency") or "").upper() != (txn.currency or "GHS").upper() \
+            or paid + 1 < _pesewas(txn.amount):
+        logger.warning("Subscription payment mismatch ref=%s paid=%s %s expected=%s %s",
+                       txn.paystack_reference, paid, ps_data.get("currency"), txn.amount, txn.currency)
+        raise SubscriptionVerifyError("The amount paid does not match this plan.")
+
+
+def verify_and_activate(reference: str, vendor=None) -> dict:
     """
     Called from the /verify/ endpoint after Paystack redirects (card payments),
     and from poll_momo_status on MoMo success.
@@ -420,8 +447,18 @@ def verify_and_activate(reference: str) -> dict:
 
     RACE-SAFE: Uses select_for_update on the vendor row to prevent two
     simultaneous calls (e.g. webhook + frontend verify) from both activating.
+
+    TRUSTED: only references we created (a PaymentTransaction row) activate,
+    for the store that started them, and only once the amount we quoted was
+    paid. `vendor`, when given, is the caller's store and must match.
     """
     from django.db import IntegrityError
+
+    txn_record = PaymentTransaction.objects.filter(paystack_reference=reference).first()
+    if txn_record is None or txn_record.vendor_id is None:
+        raise SubscriptionVerifyError("We don't recognise this payment.")
+    if vendor is not None and txn_record.vendor_id != vendor.id:
+        raise SubscriptionVerifyError("This payment belongs to a different store.")
 
     # ── Idempotency: already activated? ──────────────────────────────────────
     existing_txn = PaymentTransaction.objects.filter(
@@ -458,9 +495,17 @@ def verify_and_activate(reference: str) -> dict:
         )
         raise Exception("Payment was not successful.")
 
-    meta      = ps_data.get("metadata", {})
-    vendor    = Vendor.objects.get(pk=meta["vendor_id"])
-    plan      = SubscriptionPlan.objects.get(pk=meta["plan_id"])
+    meta      = ps_data.get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    if ps_data.get("reference") not in (None, reference):
+        raise SubscriptionVerifyError("We don't recognise this payment.")
+    _check_paid_transaction(txn_record, ps_data, meta)
+    vendor    = Vendor.objects.get(pk=txn_record.vendor_id)
+    try:
+        plan  = SubscriptionPlan.objects.get(pk=meta["plan_id"])
+    except (KeyError, ValueError, SubscriptionPlan.DoesNotExist):
+        raise SubscriptionVerifyError("This payment is not for a plan we offer.")
     billing   = meta.get("billing", "monthly")
     txn_type  = meta.get("transaction_type", "initial")
 
@@ -899,6 +944,10 @@ def initiate_card_add(vendor) -> dict:
             raise Exception(f"Paystack error: {data.get('message', 'Unknown error')}")
  
         logger.info(f"Card add initiated: vendor={vendor.id} ref={reference}")
+        # Our record of the reference: only card adds we started, for this
+        # store, are saved (the metadata alone can be forged client-side).
+        from django.core.cache import cache
+        cache.set(f"{CARD_ADD_KEY}{reference}", vendor.id, CARD_ADD_TTL)
         return {
             "authorization_url": data["data"]["authorization_url"],
             "reference":         reference,
@@ -910,7 +959,11 @@ def initiate_card_add(vendor) -> dict:
         raise
  
  
-def verify_card_add(reference: str) -> dict:
+CARD_ADD_KEY = 'card_add_ref:'
+CARD_ADD_TTL = 2 * 60 * 60
+
+
+def verify_card_add(reference: str, vendor=None) -> dict:
     """
     Called after Paystack redirects back from the card tokenization charge.
  
@@ -921,7 +974,14 @@ def verify_card_add(reference: str) -> dict:
  
     If a card with this authorization_code already exists (duplicate), returns
     { card_saved: False, reason: 'duplicate' } without raising.
+
+    Only references initiate_card_add started (and, when `vendor` is given,
+    started by that store) are accepted.
     """
+    from django.core.cache import cache
+    started_by = cache.get(f"{CARD_ADD_KEY}{reference}")
+    if started_by is None or (vendor is not None and started_by != vendor.id):
+        raise SubscriptionVerifyError("We don't recognise this card check. Please add the card again.")
     try:
         resp = requests.get(
             f"{PAYSTACK_BASE}/transaction/verify/{reference}",
@@ -935,21 +995,23 @@ def verify_card_add(reference: str) -> dict:
         raise
  
     if ps_data.get("status") != "success":
-        raise Exception("Card charge was not successful — card not saved.")
+        raise SubscriptionVerifyError("Card charge was not successful — card not saved.")
  
     meta = ps_data.get("metadata") or {}
     if meta.get("purpose") != "card_add":
         # This reference is for a subscription, not a card add — don't process here
-        raise Exception("Reference is not a card-add transaction.")
+        raise SubscriptionVerifyError("Reference is not a card-add transaction.")
  
     from vendor.models import Vendor
-    vendor = Vendor.objects.get(pk=meta["vendor_id"])
+    if str(meta.get("vendor_id")) != str(started_by):
+        raise SubscriptionVerifyError("We don't recognise this card check. Please add the card again.")
+    vendor = Vendor.objects.get(pk=started_by)
  
     auth_data = ps_data.get("authorization", {})
     auth_code = auth_data.get("authorization_code", "")
  
     if not auth_code or not auth_data.get("reusable"):
-        raise Exception("Card is not reusable — it cannot be saved for future charges.")
+        raise SubscriptionVerifyError("Card is not reusable — it cannot be saved for future charges.")
  
     # Prevent duplicates
     if PaystackAuthorization.objects.filter(authorization_code=auth_code).exists():

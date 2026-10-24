@@ -104,10 +104,8 @@ class SellerAccountSerializer(RegisterSerializer):
 
 
 def _client_ip(request):
-    return (
-        request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
-        or request.META.get('REMOTE_ADDR')
-    )
+    from core.client_ip import client_ip
+    return client_ip(request)
 
 
 def _set_signup_cookie(response, user):

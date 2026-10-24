@@ -230,6 +230,16 @@ REST_FRAMEWORK = {
         "userauths.authentication.CustomJWTAuthentication",
     ],
 
+    # Nginx is the one proxy in front of Django and writes X-Forwarded-For
+    # itself, so throttles key on the address it saw, not on a client-sent
+    # header (see core/client_ip.py).
+    "NUM_PROXIES": 1,
+
+    # Views are private unless they say otherwise (permission_classes = [AllowAny]).
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
+
     "DEFAULT_THROTTLE_CLASSES": [
         "rest_framework.throttling.AnonRateThrottle",
         "rest_framework.throttling.UserRateThrottle",
@@ -244,6 +254,11 @@ REST_FRAMEWORK = {
         "auth_refresh": "30/min",
         "auth_verify": "100/min",
         "vendor_heartbeat": "30/hour",
+        "email_action": "5/hour",
+        "password_check": "5/min",
+        "bank_validation": "30/hour",
+        "checkout": "20/hour",
+        "password_reset": "3/min",
     },
 }
 
@@ -311,7 +326,9 @@ CACHES = {
 SESSION_COOKIE_AGE = 60 * 60 * 24 * 60 # 60 days in seconds
 SESSION_SAVE_EVERY_REQUEST = True
 SESSION_EXPIRE_AT_BROWSER_CLOSE = False
-SESSION_COOKIE_SAMESITE = 'Lax' if DEBUG else 'None'
+# Lax everywhere: every frontend is a negromart.com subdomain (same site), and
+# cross-site forms must not carry our cookies (CSRF).
+SESSION_COOKIE_SAMESITE = 'Lax'
 SESSION_COOKIE_SECURE = False if DEBUG else True
 SESSION_COOKIE_NAME = "sessionid"
 SESSION_COOKIE_HTTPONLY = True
@@ -660,7 +677,7 @@ AUTH_REFRESH_MAX_AGE = timedelta(days=90).total_seconds()
 AUTH_COOKIE_SECURE = False if DEBUG else True 
 AUTH_COOKIE_HTTP_ONLY = True
 AUTH_COOKIE_PATH = '/'
-AUTH_COOKIE_SAMESITE = "Lax" if DEBUG else "None"
+AUTH_COOKIE_SAMESITE = "Lax"   # see SESSION_COOKIE_SAMESITE
 AUTH_COOKIE_DOMAIN = None
 if not DEBUG:
     AUTH_COOKIE_DOMAIN = ".negromart.com"
@@ -673,7 +690,7 @@ VENDOR_AUTH_REFRESH_MAX_AGE = timedelta(days=12).total_seconds()
 VENDOR_AUTH_COOKIE_SECURE = False if DEBUG else True 
 VENDOR_AUTH_COOKIE_HTTP_ONLY = True
 VENDOR_AUTH_COOKIE_PATH = '/'
-VENDOR_AUTH_COOKIE_SAMESITE = "Lax" if DEBUG else "None"
+VENDOR_AUTH_COOKIE_SAMESITE = "Lax"   # see SESSION_COOKIE_SAMESITE
 VENDOR_AUTH_COOKIE_DOMAIN = None
 if not DEBUG:
     VENDOR_AUTH_COOKIE_DOMAIN = ".negromart.com"
@@ -726,8 +743,8 @@ CORS_ALLOWED_ORIGINS = [
     "https://www.negromart.com",
     "https://seller.negromart.com",
     "https://corporate.negromart.com",
-    "https://negromart-space.sfo3.cdn.digitaloceanspaces.com",
-    "https://negromart-space.sfo3.digitaloceanspaces.com",
+    # Never list the Spaces bucket here: it serves user uploads, and an origin
+    # in this list may make signed-in requests to the API.
 ]
 
 if DEBUG:

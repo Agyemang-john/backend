@@ -100,7 +100,7 @@ class SubscriptionTestCase(TestCase):
 
     def paystack_verify_data(self, reference, metadata, amount):
         return {'data': {
-            'status': 'success', 'id': 42, 'reference': reference, 'amount': amount,
+            'status': 'success', 'id': 42, 'reference': reference, 'amount': amount, 'currency': 'GHS',
             'metadata': metadata,
             'customer': {'customer_code': 'CUS_test'},
             'authorization': {'reusable': True, 'authorization_code': 'AUTH_test', 'card_type': 'visa',
@@ -328,3 +328,70 @@ class SubscriptionApiTests(SubscriptionTestCase):
         res = self.api.delete('/api/v1/payments/scheduled-change/')
         self.assertEqual(res.status_code, 200, res.content)
         self.assertIsNone(res.data['subscription']['scheduled_plan'])
+
+
+class ForgedPaymentTests(SubscriptionTestCase):
+    """Payments we didn't start, or that paid too little, activate nothing."""
+
+    def meta(self, vendor=None, plan=None):
+        return {'vendor_id': str((vendor or self.vendor).id), 'plan_id': str((plan or self.pro_yearly).id),
+                'billing': 'yearly', 'transaction_type': 'initial',
+                'period_end': (self.now + timedelta(days=3650)).isoformat()}
+
+    def assert_nothing_active(self):
+        self.assertFalse(VendorSubscription.objects.filter(vendor=self.vendor, status='active').exists())
+
+    @mock.patch('payments.services.requests.get')
+    def test_client_created_payment_is_refused(self, get):
+        # Made in the browser with the public key: no PaymentTransaction of ours.
+        get.return_value = fake_response(self.paystack_verify_data('T-CLIENT-1', self.meta(), 100))
+        with self.assertRaises(services.SubscriptionVerifyError):
+            services.verify_and_activate('T-CLIENT-1')
+        self.assert_nothing_active()
+
+    @mock.patch('payments.services.requests.get')
+    def test_underpaid_payment_is_refused(self, get):
+        PaymentTransaction.objects.create(vendor=self.vendor, transaction_type='initial',
+                                          amount=Decimal('2880.00'), paystack_reference='SUB-LOW')
+        get.return_value = fake_response(self.paystack_verify_data('SUB-LOW', self.meta(), 100))
+        with self.assertRaises(services.SubscriptionVerifyError):
+            services.verify_and_activate('SUB-LOW')
+        self.assert_nothing_active()
+
+    @mock.patch('payments.services.requests.get')
+    def test_wrong_currency_is_refused(self, get):
+        PaymentTransaction.objects.create(vendor=self.vendor, transaction_type='initial',
+                                          amount=Decimal('100.00'), paystack_reference='SUB-NGN')
+        data = self.paystack_verify_data('SUB-NGN', self.meta(plan=self.basic), 10000)
+        data['data']['currency'] = 'NGN'
+        get.return_value = fake_response(data)
+        with self.assertRaises(services.SubscriptionVerifyError):
+            services.verify_and_activate('SUB-NGN')
+        self.assert_nothing_active()
+
+    @mock.patch('payments.services.requests.get')
+    def test_metadata_naming_another_store_is_refused(self, get):
+        other_user = User.objects.create_user('O', 'T', 'other@example.com', '+233241009002', PASSWORD)
+        other = Vendor.objects.create(name='Other', user=other_user, email='other-shop@example.com',
+                                      contact='+233550009002', is_approved=True, status='VERIFIED')
+        PaymentTransaction.objects.create(vendor=other, transaction_type='initial',
+                                          amount=Decimal('100.00'), paystack_reference='SUB-OTHER')
+        get.return_value = fake_response(self.paystack_verify_data('SUB-OTHER', self.meta(), 10000))
+        with self.assertRaises(services.SubscriptionVerifyError):
+            services.verify_and_activate('SUB-OTHER')
+        # And a store can't activate another store's payment through the API.
+        with self.assertRaises(services.SubscriptionVerifyError):
+            services.verify_and_activate('SUB-OTHER', vendor=self.vendor)
+        self.assert_nothing_active()
+
+    @mock.patch('payments.services.requests.get')
+    def test_verify_endpoint_hides_internal_errors(self, get):
+        get.side_effect = RuntimeError('secret internals')
+        PaymentTransaction.objects.create(vendor=self.vendor, transaction_type='initial',
+                                          amount=Decimal('100.00'), paystack_reference='SUB-ERR')
+        api = APIClient()
+        api.cookies['vendor_access'] = str(CustomVendorRefreshToken.for_user(self.owner).access_token)
+        api.credentials(HTTP_X_USER_TYPE='vendor')
+        res = api.get('/api/v1/payments/verify/', {'ref': 'SUB-ERR'})
+        self.assertEqual(res.status_code, 400)
+        self.assertNotIn('secret', str(res.data))

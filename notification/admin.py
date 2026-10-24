@@ -1,6 +1,7 @@
 # notification/admin.py
 from django.contrib import admin
 from django.utils.html import format_html
+from django.utils.safestring import mark_safe
 from django.urls import NoReverseMatch, reverse
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.contenttypes.prefetch import GenericPrefetch
@@ -110,17 +111,19 @@ class NotificationAdmin(admin.ModelAdmin):
     def data_display(self, obj):
         if not obj.data:
             return "—"
+        # Every value is escaped: notification data can carry text that
+        # shoppers or sellers typed (product titles, messages).
         items = []
         for key, value in obj.data.items():
             if key == "order_number":
-                items.append(f'<strong>Order #:</strong> {value}')
+                items.append(format_html('<strong>Order #:</strong> {}', value))
             elif key == "amount":
-                items.append(f'<strong>Amount:</strong> ${value}')
-            elif key == "url":
-                items.append(f'<a href="{value}" target="_blank">View →</a>')
+                items.append(format_html('<strong>Amount:</strong> ${}', value))
+            elif key == "url" and str(value).startswith(('https://', 'http://', '/')):
+                items.append(format_html('<a href="{}" target="_blank" rel="noopener noreferrer">View →</a>', value))
             else:
-                items.append(f'<strong>{key}:</strong> {value}')
-        return format_html("<br>".join(items))
+                items.append(format_html('<strong>{}:</strong> {}', key, value))
+        return mark_safe("<br>".join(str(item) for item in items))
     data_display.short_description = "Extra Data"
 
     # ──────────────────────────────────────

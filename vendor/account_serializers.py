@@ -1,10 +1,11 @@
 import re
 from rest_framework import serializers
 from django_countries.serializers import CountryFieldMixin
+from .kyc import KycFilesMixin
 from .models import Vendor
 
 
-class VendorAccountSerializer(CountryFieldMixin, serializers.ModelSerializer):
+class VendorAccountSerializer(KycFilesMixin, CountryFieldMixin, serializers.ModelSerializer):
     """Read / partial-update the core Vendor row (account fields + documents)."""
 
     class Meta:

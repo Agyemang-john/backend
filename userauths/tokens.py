@@ -27,10 +27,27 @@ otp_token_generator = OTPTokenGenerator()
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
 
+SELLER_SCOPE = 'seller'
+
+
+def is_seller_token(token):
+    """
+    Was this token issued by the seller sign-in? Tokens from before `scope`
+    existed are recognised by the vendor claims only seller tokens carry.
+    """
+    try:
+        return token.get('scope') == SELLER_SCOPE or 'is_vendor' in token.payload
+    except AttributeError:
+        return False
+
+
 def _apply_vendor_claims(token, user):
     from vendor.access import capabilities_for_role
 
     is_vendor = user.is_vendor
+    # Marks a token as issued by the seller sign-in (password + OTP). Shopper
+    # tokens never carry it, so they can't be used on the dashboard.
+    token["scope"] = SELLER_SCOPE
     # `role` stays 'vendor' for dashboard users so a seller proxy that is
     # still deployed with the old `payload.role === 'vendor'` check keeps
     # working during rollout. New code reads `is_vendor`.

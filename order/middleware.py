@@ -19,6 +19,6 @@ class CartIDMiddleware(MiddlewareMixin):
                 path="/",
                 secure=not settings.DEBUG,  # Secure in production
                 httponly=True,
-                samesite="None",
+                samesite="Lax",
             )
-        return response
+        return response

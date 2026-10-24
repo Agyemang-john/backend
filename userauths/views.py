@@ -24,6 +24,7 @@ from django.utils.http import urlsafe_base64_decode
 from django.contrib.auth.tokens import default_token_generator
 from django.utils import timezone
 from .session_utils import register_session, get_client_ip
+from vendor.access import IsSellerSignIn
 
 class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
@@ -33,7 +34,7 @@ class RegisterView(generics.CreateAPIView):
     def post(self, request, *args, **kwargs):
         from .captcha import verify_turnstile
         token = request.data.get('cf_turnstile_response', '')
-        ip = request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip() or request.META.get('REMOTE_ADDR')
+        ip = get_client_ip(request)
         if not verify_turnstile(token, ip):
             return Response({'detail': 'CAPTCHA verification failed. Please try again.'}, status=status.HTTP_400_BAD_REQUEST)
         return super().post(request, *args, **kwargs)
@@ -83,7 +84,7 @@ class CustomTokenObtainPairView(TokenObtainPairView):
     def post(self, request, *args, **kwargs):
         from .captcha import verify_turnstile
         token = request.data.get('cf_turnstile_response', '')
-        ip = request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip() or request.META.get('REMOTE_ADDR')
+        ip = get_client_ip(request)
         if not verify_turnstile(token, ip):
             return Response({'detail': 'CAPTCHA verification failed. Please try again.'}, status=status.HTTP_400_BAD_REQUEST)
         response = super().post(request, *args, **kwargs)
@@ -196,6 +197,7 @@ class CustomTokenVerifyView(TokenVerifyView):
         return super().post(request, *args, **kwargs)
 
 class LogoutView(APIView):
+    permission_classes = [AllowAny]   # public
     def post(self, request, *args, **kwargs):
         refresh_cookie = request.COOKIES.get('refresh')
         if refresh_cookie:
@@ -258,6 +260,67 @@ def _mask_identifier(value: str) -> str:
     return '***' + value[-3:]
 
 
+# ── Seller sign-in, step two ──────────────────────────────────────────────────
+# After the password checks out we hand the browser a signed, HttpOnly cookie
+# naming the account (by id). The OTP step only ever trusts that cookie: a
+# plain email in it, as before, let anyone point the OTP step at any seller and
+# guess their code without knowing the password. The signature also covers the
+# password hash, so changing the password kills every half-finished sign-in.
+
+VENDOR_LOGIN_COOKIE = 'otp_identifier'
+VENDOR_LOGIN_SALT = 'userauths.vendor_login'
+VENDOR_LOGIN_MAX_AGE = 600              # 10 minutes, same as the code
+MAX_RESENDS_PER_LOGIN = 5
+
+
+def _set_vendor_login_cookie(response, user, channel):
+    from django.core import signing
+    value = signing.dumps(
+        {'uid': user.pk, 'ch': channel, 'pw': user.get_session_auth_hash()[:20]},
+        salt=VENDOR_LOGIN_SALT,
+    )
+    response.set_cookie(
+        VENDOR_LOGIN_COOKIE,
+        value,
+        max_age=VENDOR_LOGIN_MAX_AGE,
+        path='/',
+        secure=settings.VENDOR_AUTH_COOKIE_SECURE,
+        httponly=True,
+        samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
+        domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
+    )
+
+
+def _vendor_login_state(request):
+    """(user, channel) for a sign-in whose password step passed, else (None, None)."""
+    import hmac as _hmac
+    from django.core import signing
+    raw = request.COOKIES.get(VENDOR_LOGIN_COOKIE)
+    if not raw:
+        return None, None
+    try:
+        data = signing.loads(raw, salt=VENDOR_LOGIN_SALT, max_age=VENDOR_LOGIN_MAX_AGE)
+        user = User.objects.get(pk=data['uid'])
+    except (signing.BadSignature, KeyError, TypeError, ValueError, User.DoesNotExist):
+        return None, None
+    if not _hmac.compare_digest(str(data.get('pw', '')), user.get_session_auth_hash()[:20]):
+        return None, None
+    if not user.is_active or getattr(user, 'is_suspended', False) or not user.is_vendor:
+        return None, None
+    return user, (data.get('ch') if data.get('ch') in ('email', 'sms') else 'email')
+
+
+def _clear_vendor_login_cookie(response):
+    response.delete_cookie(VENDOR_LOGIN_COOKIE, path='/', domain=settings.VENDOR_AUTH_COOKIE_DOMAIN)
+
+
+def _session_expired():
+    response = Response({'detail': 'Session expired. Please log in again.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    _clear_vendor_login_cookie(response)
+    return response
+
+
 class VendorTokenObtainPairView(TokenObtainPairView):
     permission_classes = [AllowAny]
     throttle_classes = [LoginThrottle, AnonLoginThrottle]
@@ -265,12 +328,14 @@ class VendorTokenObtainPairView(TokenObtainPairView):
     def post(self, request):
         from .captcha import verify_turnstile
         token = request.data.get('cf_turnstile_response', '')
-        ip = request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip() or request.META.get('REMOTE_ADDR')
+        ip = get_client_ip(request)
         if not verify_turnstile(token, ip):
             return Response({'detail': 'CAPTCHA verification failed. Please try again.'}, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = VendorLoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        user = serializer.validated_data['user']
+        channel = serializer.validated_data['channel']
 
         identifier = request.data.get('email', '')
         response = Response(
@@ -280,17 +345,7 @@ class VendorTokenObtainPairView(TokenObtainPairView):
             },
             status=200,
         )
-        # Store the identifier in an HttpOnly cookie so JS cannot read it
-        response.set_cookie(
-            'otp_identifier',
-            identifier,
-            max_age=600,            # 10 minutes — matches OTP TTL
-            path='/',
-            secure=settings.VENDOR_AUTH_COOKIE_SECURE,
-            httponly=True,
-            samesite=settings.VENDOR_AUTH_COOKIE_SAMESITE,
-            domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
-        )
+        _set_vendor_login_cookie(response, user, channel)
         return response
 
 import logging as _logging
@@ -303,49 +358,22 @@ class VendorOTPVerifyView(APIView):
 
     def post(self, request, *args, **kwargs):
         from .models import OTPRecord
-        # Identifier is read from the HttpOnly cookie set during login — not from the request body
-        email_or_phone = request.COOKIES.get('otp_identifier')
+        from .verification import check_code
+        user, _channel = _vendor_login_state(request)
+        if user is None:
+            return _session_expired()
         otp = request.data.get("otp")
+        if not otp:
+            return Response({'detail': 'Enter the code we sent you.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not email_or_phone or not otp:
-            return Response(
-                {'detail': 'Session expired or OTP missing. Please log in again.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # Capped at verification.MAX_ATTEMPTS wrong guesses per code and
+        # consumed atomically on success.
+        result = check_code(user, OTPRecord.PURPOSE_VENDOR_LOGIN, otp)
+        if not result.ok:
+            _otp_logger.warning("OTP verify: %s for user=%s", result.reason, user.pk)
+            detail = 'Invalid or expired OTP.' if result.reason == 'invalid' else result.message
+            return Response({'detail': detail, 'reason': result.reason}, status=status.HTTP_400_BAD_REQUEST)
 
-        try:
-            user = User.objects.get(Q(email__iexact=email_or_phone) | Q(phone=email_or_phone))
-        except User.DoesNotExist:
-            return Response({'detail': 'User not found.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        if not user.is_vendor:
-            return Response(
-                {'detail': 'OTP verification not required for this user.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # Fetch the most recent unused, non-expired login OTP from DB. Codes
-        # issued for other purposes (email/phone verification) never count.
-        otp_record = OTPRecord.objects.filter(
-            user=user,
-            purpose=OTPRecord.PURPOSE_VENDOR_LOGIN,
-            is_used=False,
-            expires_at__gt=timezone.now(),
-        ).order_by('-created_at').first()
-
-        if otp_record is None:
-            _otp_logger.warning("OTP verify: no valid record for user=%s", user.pk)
-            return Response({'detail': 'Invalid or expired OTP.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Validate using constant-time hash comparison (OTP is stored hashed)
-        import hmac as _hmac
-        from .models import OTPRecord as _OTPRecord
-        submitted_hash = _OTPRecord._hash(str(otp).strip())
-        if not _hmac.compare_digest(otp_record.otp, submitted_hash):
-            _otp_logger.warning("OTP verify: mismatch for user=%s", user.pk)
-            return Response({'detail': 'Invalid or expired OTP.'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Issue tokens first — if this fails the OTP is still valid for retry
         try:
             refresh = CustomVendorRefreshToken.for_user(user)
             access_token = str(refresh.access_token)
@@ -356,13 +384,6 @@ class VendorOTPVerifyView(APIView):
                 {'detail': 'Login failed. Please try again.'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-
-        # Atomically mark OTP as used now that tokens are ready
-        consumed = OTPRecord.objects.filter(pk=otp_record.pk, is_used=False).update(is_used=True)
-        if consumed == 0:
-            # Concurrent request already consumed this OTP
-            _otp_logger.warning("OTP verify: race — OTP already used for user=%s", user.pk)
-            return Response({'detail': 'Invalid or expired OTP.'}, status=status.HTTP_400_BAD_REQUEST)
 
         _otp_logger.info("OTP verify: success for user=%s", user.pk)
 
@@ -399,10 +420,7 @@ class VendorOTPVerifyView(APIView):
             from django_redis import get_redis_connection
             vendor = getattr(user, 'current_vendor', None)
             if vendor:
-                ip = (
-                    request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
-                    or request.META.get('REMOTE_ADDR')
-                )
+                ip = get_client_ip(request)
                 ua = request.META.get('HTTP_USER_AGENT', '')[:500]
                 was_auto_closed = vendor.inactivity_auto_closed
                 # Record which team member signed in, not just which store.
@@ -447,7 +465,7 @@ class VendorOTPVerifyView(APIView):
             domain=settings.VENDOR_AUTH_COOKIE_DOMAIN,
         )
         # Clear the OTP session cookie now that login is complete
-        response.delete_cookie('otp_identifier', path='/', domain=settings.VENDOR_AUTH_COOKIE_DOMAIN)
+        _clear_vendor_login_cookie(response)
         return response
 
 class VendorOTPResendView(APIView):
@@ -455,45 +473,44 @@ class VendorOTPResendView(APIView):
     throttle_classes = [LoginThrottle]
 
     def post(self, request, *args, **kwargs):
-        # Read identifier from HttpOnly cookie — not from request body
-        email_or_phone = request.COOKIES.get('otp_identifier')
-        if not email_or_phone:
-            return Response(
-                {'detail': 'Session expired. Please log in again.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        from django.core.cache import cache
+        from .models import OTPRecord
+        from .verification import RESEND_COOLDOWN_SECONDS, ResendTooSoon, _pending
+
+        # Only a browser that passed the password step holds a valid cookie.
+        user, channel = _vendor_login_state(request)
+        if user is None:
+            return _session_expired()
+
+        recent = _pending(user, OTPRecord.PURPOSE_VENDOR_LOGIN)
+        if recent:
+            elapsed = (timezone.now() - recent.created_at).total_seconds()
+            if elapsed < RESEND_COOLDOWN_SECONDS:
+                wait = int(RESEND_COOLDOWN_SECONDS - elapsed) + 1
+                return Response({'detail': str(ResendTooSoon(wait))},
+                                status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+        # Every new code starts with a fresh wrong-guess counter, so cap the
+        # codes too: 5 codes x 5 guesses out of 90,000 per sign-in.
+        key = f'vendor_otp_resends:{user.pk}'
+        cache.add(key, 0, timeout=VENDOR_LOGIN_MAX_AGE)
         try:
-            user = User.objects.get(Q(email__iexact=email_or_phone) | Q(phone=email_or_phone))
-            if not user.is_vendor:
-                return Response({'detail': 'OTP verification not required for this user.'}, status=status.HTTP_400_BAD_REQUEST)
+            sent = cache.incr(key)
+        except ValueError:
+            cache.set(key, 1, timeout=VENDOR_LOGIN_MAX_AGE)
+            sent = 1
+        if sent > MAX_RESENDS_PER_LOGIN:
+            return Response(
+                {'detail': 'Too many codes requested. Please sign in again in a few minutes.'},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
 
-            from .models import OTPRecord
-            # Enforce 60-second cooldown between resends
-            recent = OTPRecord.objects.filter(
-                user=user,
-                purpose=OTPRecord.PURPOSE_VENDOR_LOGIN,
-                is_used=False,
-                expires_at__gt=timezone.now(),
-            ).order_by('-created_at').first()
-            if recent:
-                cooldown_seconds = 60
-                elapsed = (timezone.now() - recent.created_at).total_seconds()
-                if elapsed < cooldown_seconds:
-                    wait = int(cooldown_seconds - elapsed)
-                    return Response(
-                        {'detail': f'Please wait {wait} seconds before requesting a new OTP.'},
-                        status=status.HTTP_429_TOO_MANY_REQUESTS,
-                    )
-
-            otp = otp_token_generator.generate_otp()
-            OTPRecord.create_for_user(user, otp)
-            recipient = user.email if '@' in email_or_phone else user.phone
-            is_email = '@' in email_or_phone
-            send_otp.delay(recipient, otp, is_email)
-            _otp_logger.info("OTP resend: new OTP issued for user=%s", user.pk)
-            return Response({'detail': 'OTP sent to your email or phone.'}, status=status.HTTP_200_OK)
-        except User.DoesNotExist:
-            return Response({'detail': 'User not found.'}, status=status.HTTP_400_BAD_REQUEST)
+        otp = otp_token_generator.generate_otp()
+        OTPRecord.create_for_user(user, otp)
+        is_email = channel == 'email'
+        send_otp.delay(user.email if is_email else user.phone, otp, is_email)
+        _otp_logger.info("OTP resend: new OTP issued for user=%s", user.pk)
+        return Response({'detail': 'OTP sent to your email or phone.'}, status=status.HTTP_200_OK)
 
 class VendorTokenVerifyView(TokenVerifyView):
     permission_classes = [AllowAny]
@@ -511,7 +528,13 @@ class VendorTokenVerifyView(TokenVerifyView):
         if response.status_code == 200:
             from rest_framework_simplejwt.tokens import UntypedToken
             from .session_utils import is_session_revoked
-            sid = UntypedToken(request.data.get('token')).get('sid')
+            from .tokens import is_seller_token
+            token = UntypedToken(request.data.get('token'))
+            if not is_seller_token(token):
+                # A shopper token is valid, but not for the dashboard.
+                return Response({'detail': 'Please sign in to the seller dashboard.', 'code': 'not_seller'},
+                                status=status.HTTP_401_UNAUTHORIZED)
+            sid = token.get('sid')
             if sid and is_session_revoked(sid):
                 return Response(
                     {'detail': 'This device was signed out.', 'code': 'session_revoked'},
@@ -520,6 +543,7 @@ class VendorTokenVerifyView(TokenVerifyView):
         return response
 
 class VendorLogoutView(APIView):
+    permission_classes = [AllowAny]   # public
     def post(self, request, *args, **kwargs):
         # Fire async logout activity before clearing auth
         if request.user.is_authenticated and request.user.is_vendor:
@@ -528,10 +552,7 @@ class VendorLogoutView(APIView):
                 from vendor.models import Vendor
                 vendor = getattr(request.user, 'current_vendor', None)
                 if vendor:
-                    ip = (
-                        request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
-                        or request.META.get('REMOTE_ADDR')
-                    )
+                    ip = get_client_ip(request)
                     ua = request.META.get('HTTP_USER_AGENT', '')[:500]
                     log_vendor_activity.delay(
                         vendor.pk, 'logout', ip, ua,
@@ -641,7 +662,7 @@ class VendorSessionListView(APIView):
     Every device signed in to this account: seller dashboard sessions first,
     then shopping sessions on negromart.com.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsSellerSignIn]
 
     def get(self, request):
         from .models import UserSession
@@ -654,7 +675,7 @@ class VendorSessionListView(APIView):
 
 class VendorSessionRevokeView(APIView):
     """DELETE /api/vendor/sessions/<uuid>/ — sign out one device."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsSellerSignIn]
 
     def delete(self, request, session_id):
         from .models import SecurityEvent, UserSession
@@ -685,7 +706,7 @@ class VendorLogoutAllView(APIView):
     The "someone else is in my account" button: every token this account holds
     stops working, on every device and on the shop too, this browser included.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsSellerSignIn]
 
     def post(self, request):
         from .models import SecurityEvent, UserSession
@@ -708,7 +729,7 @@ class VendorLogoutAllView(APIView):
 
 class VendorLogoutOtherSessionsView(APIView):
     """POST /api/vendor/logout-other-sessions/ — keep only this browser signed in."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsSellerSignIn]
 
     def post(self, request):
         from .models import SecurityEvent
@@ -730,7 +751,7 @@ class VendorChangePasswordView(APIView):
     POST /api/vendor/security/password/
     {current_password, new_password, sign_out_other_devices=true}
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsSellerSignIn]
     throttle_classes = [LoginThrottle]
 
     def post(self, request):
@@ -783,7 +804,7 @@ class VendorSecurityOverviewView(APIView):
     is: verified contacts, two-step sign-in, password age, signed-in devices
     and recent security activity.
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsSellerSignIn]
 
     def get(self, request):
         from .models import SecurityEvent, UserSession
@@ -856,7 +877,10 @@ class CustomerSessionRevokeView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        session.delete()
+        # Blacklist its refresh token too: deleting the row alone let a copied
+        # token sign back in once no other shopper session was left.
+        from .session_utils import revoke_sessions
+        revoke_sessions([session])
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

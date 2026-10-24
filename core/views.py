@@ -35,13 +35,17 @@ from product.shipping import get_ip_address_from_request, get_user_country_regio
 from product.serializers import LightProductSerializer
 
 
+from rest_framework.permissions import IsAdminUser
+
+
 class DebugIPView(APIView):
     """
     Temporary debug endpoint to verify IP detection in production.
     Hit GET /api/debug/ip/ and check what Django sees.
     REMOVE THIS VIEW once IP geolocation is confirmed working.
+    Staff only: it reveals internal proxy addresses.
     """
-    permission_classes = []
+    permission_classes = [IsAdminUser]
 
     def get(self, request):
         ip = get_ip_address_from_request(request)
@@ -79,6 +83,7 @@ def _apply_currency(products_data: list, currency: str, rates: dict) -> list:
 
 class HomeSliderView(APIView):
 
+    permission_classes = [AllowAny]   # public
     def get(self, request):
         cache_key = 'home_sliders_static_v1'
 
@@ -136,6 +141,7 @@ class BannersView(APIView):
     """
     API View to retrieve all banners with caching
     """
+    permission_classes = [AllowAny]   # public
     def get(self, request):
         cache_key = 'banners'
         cached_data = cache.get(cache_key)
@@ -149,6 +155,7 @@ class BannersView(APIView):
         return Response(cached_data, status=status.HTTP_200_OK)
 
 class MainCategoryWithCategoriesAPIView(APIView):
+    permission_classes = [AllowAny]   # public
     def get(self, request):
         cache_key = 'main_categories_with_categories'
         cached_data = cache.get(cache_key)
@@ -162,6 +169,7 @@ class MainCategoryWithCategoriesAPIView(APIView):
         return Response(cached_data)
 
 class CategoryDetailView(APIView):
+    permission_classes = [AllowAny]   # public
     def get(self, request, slug):
         cache_key = f'category_detail_{slug}'
         cached_data = cache.get(cache_key)
@@ -184,6 +192,7 @@ class CategoryDetailView(APIView):
 
 
 class TopEngagedCategoryView(APIView):
+    permission_classes = [AllowAny]   # public
     def get(self, request):
         cache_key = 'top_engaged_category'
         cached_data = cache.get(cache_key)
@@ -202,6 +211,7 @@ class TopEngagedCategoryView(APIView):
 
 class MainAPIView(APIView):
     """Combined homepage payload: new products, most popular, brands, subcategories, top category."""
+    permission_classes = [AllowAny]   # public
 
     def get(self, request, *args, **kwargs):
         cache_key = "homepage_main_v1"
@@ -245,6 +255,7 @@ class MainAPIView(APIView):
 
 
 class SearchedProducts(APIView):
+    permission_classes = [AllowAny]   # public
     def post(self, request):
         from django.utils import timezone as tz
 
@@ -302,6 +313,7 @@ class SearchHistoryView(APIView):
     GET  — return the user's search history (DB for auth, cookie for guest).
     DELETE — remove one query ({query: str}) or clear all (no body).
     """
+    permission_classes = [AllowAny]   # public
 
     def get(self, request):
         if request.user.is_authenticated:

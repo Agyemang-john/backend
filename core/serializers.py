@@ -201,7 +201,8 @@ class VendorSerializer(serializers.ModelSerializer):
     class Meta:
         model = Vendor
         fields = [
-            'id', 'name', 'slug', 'about', 'email', 'country', 'contact', 'is_featured', 'is_approved', 'followers', 
+            # Not 'followers': who follows a store is private.
+            'id', 'name', 'slug', 'about', 'email', 'country', 'contact', 'is_featured', 'is_approved',
             'is_subscribed', 'subscription_end_date', 'created_at', 'modified_at', 'is_open_now', 'opening_hours'
         ]
 
