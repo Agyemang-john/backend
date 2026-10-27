@@ -12,22 +12,24 @@ Every endpoint takes ?as=customer (default, storefront) or ?as=vendor (seller da
     POST   /api/v1/chat/conversations/<id>/read/?as=               mark read (sends a read receipt)
     GET    /api/v1/chat/unread/?as=                                {conversations: n} for badges
     GET    /api/v1/chat/store/<slug>/                              the shopper's chat with a store, if any
+    GET    /api/v1/chat/store/<slug>/presence/                     public: {online, last_seen} for the store page
 """
 
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
+from django.utils.dateparse import parse_datetime
 from rest_framework import status
 from rest_framework.pagination import CursorPagination
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.throttling import UserRateThrottle
+from rest_framework.throttling import AnonRateThrottle, UserRateThrottle
 from rest_framework.views import APIView
 
 from product.models import Product
 from vendor.access import get_membership
 from vendor.models import Vendor
 
-from . import services
+from . import realtime, services
 from .models import Conversation, Message, Side
 from .serializers import ConversationSerializer, MessageSerializer, serialize_conversations
 
@@ -203,3 +205,29 @@ class StoreConversationView(APIView):
             'muted_until': muted_until.isoformat() if muted_until else None,
             'policy': _policy(),
         })
+
+
+class StorePresenceThrottle(AnonRateThrottle):
+    scope = 'chat_presence'
+    rate = '120/min'
+
+
+class StorePresenceView(APIView):
+    """
+    "Online" / "Active 5 min ago" on the public store page. Only for stores that
+    take messages: for the rest there's nothing to act on, so nothing is shown.
+    last_seen is the later of the chat socket's last ping and the store's last
+    dashboard request (Vendor.last_seen_at), so it still says something for a
+    store whose team hasn't had the dashboard open since chat presence began.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes = [StorePresenceThrottle]
+
+    def get(self, request, slug):
+        vendor = get_object_or_404(Vendor, slug=slug)
+        if not services.store_accepts_messages(vendor):
+            return Response({'accepting_messages': False, 'online': False, 'last_seen': None})
+        online, seen = realtime.presence(Side.VENDOR, vendor.pk)
+        times = [t for t in (seen and parse_datetime(seen), vendor.last_seen_at) if t]
+        last_seen = max(times).isoformat() if times else None
+        return Response({'accepting_messages': True, 'online': online, 'last_seen': last_seen})

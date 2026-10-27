@@ -267,6 +267,20 @@ class ChatApiTests(ChatFixtures, TestCase):
             self.start()
         self.assertFalse(Notification.objects.filter(verb='message').exists())
 
+    def test_store_presence_is_public(self):
+        url = f'/api/v1/chat/store/{self.vendor.slug}/presence/'
+        res = APIClient().get(url)
+        self.assertEqual((res.status_code, res.data['online'], res.data['last_seen']), (200, False, None))
+
+        earlier = timezone.now() - timedelta(hours=2)
+        Vendor.objects.filter(pk=self.vendor.pk).update(last_seen_at=earlier)
+        self.assertEqual(APIClient().get(url).data['last_seen'], earlier.isoformat())
+
+        realtime.mark_online('vendor', self.vendor.pk)
+        res = APIClient().get(url)
+        self.assertTrue(res.data['online'])
+        self.assertGreater(res.data['last_seen'], earlier.isoformat())
+
     def test_purge_deletes_old_chats(self):
         old_id = self.start().data['conversation']['id']
         Conversation.objects.filter(pk=old_id).update(last_message_at=timezone.now() - timedelta(days=40))
@@ -344,6 +358,9 @@ class ChatPlanTests(ChatFixtures, TestCase):
     def test_free_store_cannot_be_contacted_or_use_inbox(self):
         self.assertFalse(client_for(self.shopper).get(f'/api/v1/vendor/seller-detail/{self.vendor.slug}/').data['accepts_messages'])
         self.assertFalse(client_for(self.shopper).get(f'/api/v1/chat/store/{self.vendor.slug}/').data['accepting_messages'])
+        realtime.mark_online('vendor', self.vendor.pk)
+        presence = client_for(self.shopper).get(f'/api/v1/chat/store/{self.vendor.slug}/presence/').data
+        self.assertEqual((presence['accepting_messages'], presence['online']), (False, False))
         self.assertEqual(self.start().status_code, 409)
         res = client_for(self.owner).get('/api/v1/chat/conversations/?as=vendor')
         self.assertEqual((res.status_code, res.data['code'], res.data['required_tier']), (403, 'plan_upgrade_required', 'basic'))

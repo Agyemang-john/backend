@@ -9,4 +9,5 @@ urlpatterns = [
     path('conversations/<int:pk>/read/', views.MarkReadView.as_view(), name='chat-read'),
     path('unread/', views.UnreadCountView.as_view(), name='chat-unread'),
     path('store/<slug:slug>/', views.StoreConversationView.as_view(), name='chat-store'),
+    path('store/<slug:slug>/presence/', views.StorePresenceView.as_view(), name='chat-store-presence'),
 ]
