@@ -14,6 +14,7 @@ urlpatterns = [
 
     # ── Customer tracking ──────────────────────────────────────────────────
     path('tracking/<int:order_id>/', views.OrderTrackingAPIView.as_view(), name='order-tracking'),
+    path('<int:order_id>/items/<int:item_id>/cancel/', views.CancelSourcedItemView.as_view(), name='order-item-cancel'),
 
     # ── Admin tracking management ──────────────────────────────────────────
     path('admin/dashboard/', admin_views.AdminTrackingDashboardView.as_view(), name='admin-tracking-dashboard'),

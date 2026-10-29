@@ -24,6 +24,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django_filters.rest_framework import DjangoFilterBackend
 
+from django.db import transaction
 from django.db.models import Avg, Count, Sum, F, Q
 from django.db.models.functions import TruncWeek, TruncMonth, TruncDate
 from django.utils import timezone
@@ -1421,21 +1422,7 @@ class VendorOrderDetailView(APIView):
             raise APIException("An error occurred.")
 
 
-def _status_from_lines(order):
-    """Whole-order status for an order shared by several stores."""
-    statuses = set(order.order_products.values_list('status', flat=True))
-    if not statuses or statuses == {'canceled'}:
-        return 'canceled'
-    statuses.discard('canceled')
-    if statuses == {'delivered'}:
-        return 'delivered'
-    if 'delivered' in statuses:
-        return 'partially_delivered'
-    if 'shipped' in statuses:
-        return 'shipped'
-    if 'processing' in statuses:
-        return 'processing'
-    return 'pending'
+from order.fulfilment import status_from_lines as _status_from_lines
 
 
 class UpdateOrderStatusAPIView(APIView):
@@ -1826,3 +1813,23 @@ class VendorNotificationPrefsView(APIView):
         vendor.notification_prefs = {**vendor.notification_prefs, **updates}
         vendor.save(update_fields=['notification_prefs'])
         return Response(self._merged(vendor))
+
+
+class OrderSourcingAPIView(APIView):
+    """
+    POST /api/v1/vendor/orders/<id>/sourcing/  {"status": "ordered" | "in_transit" | "arrived"}
+    Report progress on this store's imported / made-to-order items in the order
+    (order/sourcing.py). The buyer is notified and their order page updates live.
+    """
+    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.MANAGE_ORDERS)]
+
+    def post(self, request, id):
+        from order.sourcing import SourcingError, advance
+        vendor = get_vendor_or_404(request.user)
+        order = get_object_or_404(Order, id=id, vendors__in=[vendor])
+        try:
+            with transaction.atomic():
+                advance(order, vendor, request.data.get('status'))
+        except SourcingError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(OrderSerializer(order, context={'vendor': vendor, 'request': request}).data)

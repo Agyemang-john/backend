@@ -2,6 +2,7 @@ from django.urls import path
 from .variant_gallery import VariantGalleryUploadView
 from .views import (
     VendorAccountAPIView,
+    OrderSourcingAPIView,
     VendorDeletionRequestView,
     VendorStatusAPIView,
     VendorSignupAPIView,
@@ -141,6 +142,7 @@ urlpatterns = [
     path('orders/<int:id>/detail/', VendorOrderDetailView.as_view(), name='vendor-order-detail'),
     path('orders/<int:id>/status/', UpdateOrderStatusAPIView.as_view(), name='vendor-order-status-update'),
     path('orders/<int:id>/shipment/', ShipmentAPIView.as_view(), name='vendor-shipment-list-create'),
+    path('orders/<int:id>/sourcing/', OrderSourcingAPIView.as_view(), name='vendor-order-sourcing'),
     path('orders/<int:id>/shipment/<str:shipment_id>/', ShipmentAPIView.as_view(), name='vendor-shipment-update'),
     path('orders/<int:id>/shipment/<str:shipment_id>/event/', TrackingEventAddAPIView.as_view(), name='vendor-tracking-event'),
 

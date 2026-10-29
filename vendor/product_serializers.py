@@ -1,3 +1,4 @@
+from product import sourcing as product_sourcing
 import re
 from rest_framework import serializers
 from django.utils.text import slugify
@@ -59,7 +60,19 @@ class VariantsSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Variants
-        fields = ['id', 'title', 'size', 'color', 'image', 'quantity', 'price', 'seller_sku', 'gallery']
+        fields = ['id', 'title', 'size', 'color', 'image', 'quantity', 'price', 'seller_sku', 'gallery',
+                  'fulfilment_type', 'sourcing_min_days', 'sourcing_max_days']
+
+    def validate(self, attrs):
+        # Blank fulfilment_type: the variant follows its product.
+        kind = attrs.get('fulfilment_type', '')
+        if kind:
+            error = product_sourcing.validate(kind, attrs.get('sourcing_min_days', 0), attrs.get('sourcing_max_days', 0))
+            if error:
+                raise serializers.ValidationError({'sourcing_max_days': error})
+        if kind in ('', product_sourcing.IN_STOCK):
+            attrs['sourcing_min_days'] = attrs['sourcing_max_days'] = 0
+        return attrs
 
     def create(self, validated_data):
         variant = Variants.objects.create(**validated_data)
@@ -105,7 +118,8 @@ class ProductSerializer(serializers.ModelSerializer):
             'weight', 'volume', 'life', 'mfd', 'return_period_days', 'warranty_period_days',
             'trending_score', 'deals_of_the_day', 'recommended_for_you', 'popular_product',
             'delivery_options', 'sku', 'seller_sku', 'review_note', 'date', 'updated', 'views',
-            'p_images', 'variants'
+            'p_images', 'variants',
+            'fulfilment_type', 'sourcing_min_days', 'sourcing_max_days', 'sourced_from',
         ]
         # review_note is written by Negromart reviewers (e.g. why it was rejected).
         read_only_fields = ['vendor', 'sku', 'review_note', 'date', 'updated', 'views']
@@ -147,6 +161,17 @@ class ProductSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, attrs):
+        # Sourcing (product/sourcing.py): check against what is saved for any
+        # field a partial update leaves out.
+        def current(name, default):
+            return attrs.get(name, getattr(self.instance, name, default) if self.instance else default)
+        kind = current('fulfilment_type', product_sourcing.IN_STOCK)
+        error = product_sourcing.validate(kind, current('sourcing_min_days', 0), current('sourcing_max_days', 0))
+        if error:
+            raise serializers.ValidationError({'sourcing_max_days': error})
+        if kind == product_sourcing.IN_STOCK:
+            attrs.update(sourcing_min_days=0, sourcing_max_days=0, sourced_from=None)
+
         # Variants arrive as a JSON string in multipart requests, outside the
         # nested serializer; check their SKUs here, before anything is saved.
         raw = self.context['request'].data.get('variants')
@@ -461,4 +486,4 @@ class VendorProductListSerializer(serializers.ModelSerializer):
         if not obj.old_price:
             return None
         currency = self._get_currency(obj)
-        return round(obj.old_price * self._get_rate(currency), 2)
+        return round(obj.old_price * self._get_rate(currency), 2)

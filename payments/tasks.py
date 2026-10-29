@@ -1,4 +1,5 @@
 from celery import shared_task
+from order.sourcing import snapshot as sourcing_snapshot
 from order.models import *
 from product.models import *
 from django.utils.crypto import get_random_string
@@ -83,6 +84,7 @@ def create_order_from_payment_task(
                     price=order_unit_price(amount, quantity),
                     amount=amount,
                     selected_delivery_option_id=item_data["delivery_option_id"],
+                    **sourcing_snapshot(product, variant, delivery_option_id=item_data["delivery_option_id"]),
                 ))
 
                 # Update stock deduction

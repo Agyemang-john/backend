@@ -95,3 +95,15 @@ def send_order_email_to_customer(self, order_id):
     except Exception as exc:
         logger.error(f"Error sending customer email for order {order_id}: {str(exc)}")
         raise self.retry(exc=exc)
+
+
+@shared_task(ignore_result=True)
+def check_sourced_orders():
+    """
+    Daily: nudge stores that haven't ordered imported / made-to-order items,
+    and tell buyers when a late one can be cancelled (order/sourcing.py).
+    """
+    from .sourcing import notify_overdue, remind_sellers
+    stores = remind_sellers()
+    buyers = notify_overdue()
+    logger.info("check_sourced_orders: reminded %s store(s), %s late line(s) now cancellable", stores, buyers)

@@ -243,6 +243,7 @@ class OptimizedVariantSerializer(serializers.ModelSerializer):
 
 
 class OrderProductSerializer(serializers.ModelSerializer):
+    sourcing = serializers.SerializerMethodField()
     delivery_range = serializers.SerializerMethodField()
     delivery_status = serializers.SerializerMethodField()
     returns = serializers.SerializerMethodField()
@@ -268,6 +269,7 @@ class OrderProductSerializer(serializers.ModelSerializer):
             'delivery_status',
             'returns',
             'review',
+            'sourcing',
         ]
 
     def get_review(self, obj):
@@ -312,6 +314,10 @@ class OrderProductSerializer(serializers.ModelSerializer):
             'window_ends_at': eligibility.window_ends_at if eligibility else None,
             'accepts_change_of_mind': bool(obj.product and obj.product.return_period_days > 0),
         }
+
+    def get_sourcing(self, obj):
+        from order.sourcing import line_info
+        return line_info(obj)
 
     def get_delivery_range(self, obj):
         try:

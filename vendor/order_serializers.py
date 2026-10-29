@@ -43,6 +43,11 @@ class OrderProductSerializer(serializers.ModelSerializer):
     delivery_date_range = serializers.SerializerMethodField()
     delivery_status = serializers.SerializerMethodField()
     selected_delivery_option = DeliveryOptionSerializer(allow_null=True)
+    sourcing = serializers.SerializerMethodField()
+
+    def get_sourcing(self, obj):
+        from order.sourcing import line_info
+        return line_info(obj)
 
     class Meta:
         model = OrderProduct
@@ -57,6 +62,7 @@ class OrderProductSerializer(serializers.ModelSerializer):
             'delivery_date_range',
             'delivery_status',
             'selected_delivery_option',
+            'sourcing',
         ]
 
     def get_delivery_date_range(self, obj):

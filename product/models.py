@@ -21,6 +21,7 @@ from core.models import *
 from .utils import *
 from datetime import timedelta
 from address.models import Country
+from .sourcing import FULFILMENT_CHOICES, IN_STOCK
 from django_ckeditor_5.fields import CKEditor5Field
 from django.conf import settings
 from django.contrib.postgres.indexes import GinIndex
@@ -188,9 +189,10 @@ class DeliveryOption(models.Model):
     def __str__(self):
         return self.name
 
-    def get_delivery_date_range(self, reference_date=None, dynamic_min_days=None, dynamic_max_days=None):
+    def get_delivery_date_range(self, reference_date=None, dynamic_min_days=None, dynamic_max_days=None, sourcing=(0, 0)):
         """
         Calculate the delivery date range based on the provided reference date or now.
+        `sourcing` is (min, max) days the seller needs to get the item first (product/sourcing.py).
         Supports overriding with dynamic values from third-party API for international.
         Returns a formatted string for user display (e.g., 'Today', 'Tomorrow', or 'Sep 25 to Sep 27, 2025').
         """
@@ -199,8 +201,10 @@ class DeliveryOption(models.Model):
 
         use_min_days = dynamic_min_days if dynamic_min_days is not None else self.min_days
         use_max_days = dynamic_max_days if dynamic_max_days is not None else self.max_days
+        use_min_days += sourcing[0]
+        use_max_days += sourcing[1]
 
-        if self.name.lower() in ["same-day delivery", "same-day"] and self.type == self.LOCAL:
+        if self.name.lower() in ["same-day delivery", "same-day"] and self.type == self.LOCAL and not sourcing[1]:
             cutoff_hour = 10
             if now.hour >= cutoff_hour:
                 delivery_date = today + timedelta(days=1)
@@ -221,7 +225,7 @@ class DeliveryOption(models.Model):
             return f"{from_date}"
         return f"{from_date} to {to_date}"
 
-    def get_delivery_status(self, reference_date=None, dynamic_min_days=None, dynamic_max_days=None):
+    def get_delivery_status(self, reference_date=None, dynamic_min_days=None, dynamic_max_days=None, sourcing=(0, 0)):
         """
         Determine the delivery status based on the current date and delivery range.
         Supports dynamic overrides for international.
@@ -234,8 +238,10 @@ class DeliveryOption(models.Model):
         use_max_days = dynamic_max_days if dynamic_max_days is not None else self.max_days
 
         delivery_range = self.get_delivery_date_range(
-            reference_date, dynamic_min_days=use_min_days, dynamic_max_days=use_max_days
+            reference_date, dynamic_min_days=use_min_days, dynamic_max_days=use_max_days, sourcing=sourcing
         )
+        use_min_days += sourcing[0]
+        use_max_days += sourcing[1]
 
         if isinstance(delivery_range, str):
             if "Overdue" in delivery_range:
@@ -306,6 +312,12 @@ class Product(models.Model):
     recommended_for_you = models.BooleanField(default=False)
     popular_product = models.BooleanField(default=False)
     delivery_options = models.ManyToManyField(DeliveryOption, through='ProductDeliveryOption', related_name='delivery_options')
+    # Not held in stock: imported once ordered, or made to order. Getting the
+    # item takes sourcing_min/max_days before the courier's days (product/sourcing.py).
+    fulfilment_type = models.CharField(max_length=16, choices=FULFILMENT_CHOICES, default=IN_STOCK, db_index=True)
+    sourcing_min_days = models.PositiveSmallIntegerField(default=0)
+    sourcing_max_days = models.PositiveSmallIntegerField(default=0)
+    sourced_from = models.ForeignKey(Country, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     # Internal, platform-generated id. Was 4 digits (only 10,000 possible
     # values, so creates would start failing as the catalogue grew); new rows
     # get 10 digits. Existing short values stay valid.
@@ -445,6 +457,10 @@ class Variants(models.Model):
     # Seller's own code for this exact size/colour. Uniqueness within the
     # store is checked in the seller product serializer (it spans products).
     seller_sku = models.CharField(max_length=64, blank=True, default='')
+    # Blank: same as the product. Set: this variant's own sourcing (product/sourcing.py).
+    fulfilment_type = models.CharField(max_length=16, choices=FULFILMENT_CHOICES, blank=True, default='')
+    sourcing_min_days = models.PositiveSmallIntegerField(default=0)
+    sourcing_max_days = models.PositiveSmallIntegerField(default=0)
     date = models.DateTimeField(auto_now_add=True)
     updated = models.DateTimeField(auto_now=True)
 
@@ -853,7 +869,7 @@ class ProductDeliveryOption(models.Model):
     def __str__(self):
         return self.delivery_option.name
 
-    def get_delivery_date_range(self, reference_date=None, buyer_country=None, dynamic_min_days=None, dynamic_max_days=None):
+    def get_delivery_date_range(self, reference_date=None, buyer_country=None, dynamic_min_days=None, dynamic_max_days=None, sourcing=None):
         """
         Get the delivery date range for this product, delegating to DeliveryOption.
         Supports buyer_country for international checks and dynamic overrides from DHL API.
@@ -866,8 +882,11 @@ class ProductDeliveryOption(models.Model):
         vendor_country = self.product.vendor.shipping_from_country.code if self.product.vendor.shipping_from_country else 'GH'
         is_international = buyer_country and buyer_country != vendor_country
 
+        if sourcing is None:
+            from .sourcing import window
+            sourcing = window(self.product, self.variant)
         return self.delivery_option.get_delivery_date_range(
-            reference_date, dynamic_min_days=dynamic_min_days, dynamic_max_days=dynamic_max_days
+            reference_date, dynamic_min_days=dynamic_min_days, dynamic_max_days=dynamic_max_days, sourcing=sourcing
         )
     
 class Coupon(models.Model):

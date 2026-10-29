@@ -11,6 +11,7 @@ import logging
 from datetime import timedelta
 
 from django.db import transaction
+from django.db.models import DateTimeField, ExpressionWrapper, F
 from django.utils import timezone
 
 from .models import Order, OrderProduct, Shipment, TrackingEvent
@@ -67,6 +68,23 @@ def recompute_order_status(order):
         order.save(update_fields=['status'])
 
 
+def status_from_lines(order):
+    """Whole-order status from its lines (several stores, or a buyer cancelling one item)."""
+    statuses = set(order.order_products.values_list('status', flat=True))
+    if not statuses or statuses == {'canceled'}:
+        return 'canceled'
+    statuses.discard('canceled')
+    if statuses == {'delivered'}:
+        return 'delivered'
+    if 'delivered' in statuses:
+        return 'partially_delivered'
+    if 'shipped' in statuses:
+        return 'shipped'
+    if 'processing' in statuses:
+        return 'processing'
+    return 'pending'
+
+
 # ── Delivery ──────────────────────────────────────────────────────────────────
 
 def on_shipment_delivered(shipment):
@@ -112,11 +130,22 @@ def record_tracking_event(shipment, *, status, description, event_date,
 
 # ── Ship-by deadlines ─────────────────────────────────────────────────────────
 # A seller has `vendor.handling_days` from the order date to hand the parcel
-# over. Derived, not stored: it stays correct if the seller changes the
-# setting, and it costs no write on the order-creation hot path.
+# over, plus the longest sourcing time of its lines when it first has to get
+# the item (order/sourcing.py). Derived, not stored: it stays correct if the
+# seller changes the setting, and it costs no write on the order-creation path.
+
+def _sourcing_days(order, vendor):
+    cache = getattr(order, '_prefetched_objects_cache', {})
+    if 'order_products' in cache:
+        return max((op.sourcing_max_days for op in cache['order_products']
+                    if op.product_id and op.product and op.product.vendor_id == vendor.pk), default=0)
+    from django.db.models import Max
+    return (OrderProduct.objects.filter(order=order, product__vendor=vendor)
+            .aggregate(m=Max('sourcing_max_days'))['m'] or 0)
+
 
 def ship_by_for(order, vendor):
-    return order.date_created + timedelta(days=vendor.handling_days)
+    return order.date_created + timedelta(days=vendor.handling_days + _sourcing_days(order, vendor))
 
 
 def awaiting_dispatch_orders(vendor):
@@ -131,7 +160,16 @@ def awaiting_dispatch_orders(vendor):
 
 def late_orders(vendor, now=None):
     cutoff = (now or timezone.now()) - timedelta(days=vendor.handling_days)
-    return awaiting_dispatch_orders(vendor).filter(date_created__lt=cutoff)
+    # Orders whose sourced lines still have time left are not late yet.
+    sourcing_in_time = (
+        OrderProduct.objects
+        .filter(product__vendor=vendor, sourcing_max_days__gt=0)
+        .annotate(due=ExpressionWrapper(F('date_created') + F('sourcing_max_days') * timedelta(days=1),
+                                       output_field=DateTimeField()))
+        .filter(due__gte=cutoff)
+        .values('order_id')
+    )
+    return awaiting_dispatch_orders(vendor).filter(date_created__lt=cutoff).exclude(pk__in=sourcing_in_time)
 
 
 def vendor_lines(order, vendor):

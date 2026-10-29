@@ -9,6 +9,7 @@ API views for payment processing and subscription management:
 - PaystackWebhookView: receives Paystack webhook events
 """
 
+from order.sourcing import snapshot as sourcing_snapshot
 import logging
 import re
 from decimal import Decimal, ROUND_HALF_UP
@@ -56,6 +57,16 @@ class PlaceOrderCODAPIView(APIView):
         if not cart or not cart.cart_items.exists():
             return Response(
                 {"status": "failed", "message": "Cart is empty or does not exist"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Items the seller has to import or make first: the buyer must have
+        # accepted the longer wait at checkout (order/sourcing.py).
+        from order.sourcing import cart_needs_ack
+        if cart_needs_ack(cart.cart_items.select_related("product", "variant")) and not request.data.get("accept_sourcing"):
+            return Response(
+                {"status": "failed", "code": "sourcing_ack_required",
+                 "message": "Some items ship from abroad or are made to order. Please confirm the delivery time."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -107,6 +118,7 @@ class PlaceOrderCODAPIView(APIView):
                             price=price,
                             amount=amount,
                             selected_delivery_option_id=item.delivery_option.id if item.delivery_option else None,
+                            **sourcing_snapshot(product, variant, item.delivery_option),
                         )
                     )
 

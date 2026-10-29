@@ -182,8 +182,14 @@ class CartItemSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'product', 'variant', 'quantity',
             'item_total', 'packaging_fee', 'delivery_option',
-            'flash_sale_price', 'effective_unit_price', 'is_flash_sale',
+            'flash_sale_price', 'effective_unit_price', 'is_flash_sale', 'sourcing',
         ]
+
+    sourcing = serializers.SerializerMethodField()
+
+    def get_sourcing(self, obj):
+        from product.sourcing import info
+        return info(obj.product, obj.variant)
 
     def _rate(self):
         request = self.context.get('request')
@@ -238,6 +244,7 @@ class OrderProductSerializer(serializers.ModelSerializer):
     variant_color = serializers.SerializerMethodField()
     delivery_option_name = serializers.SerializerMethodField()
     delivery_range = serializers.SerializerMethodField()
+    sourcing = serializers.SerializerMethodField()
 
     class Meta:
         model = OrderProduct
@@ -257,6 +264,7 @@ class OrderProductSerializer(serializers.ModelSerializer):
             'status',
             'delivery_range',
             'delivery_option_name',
+            'sourcing',
         ]
 
     def get_product_title(self, obj):
@@ -310,6 +318,10 @@ class OrderProductSerializer(serializers.ModelSerializer):
 
     def get_delivery_range(self, obj):
         return obj.get_delivery_range()
+
+    def get_sourcing(self, obj):
+        from .sourcing import line_info
+        return line_info(obj)
 
 class OrderSerializer(serializers.ModelSerializer):
     user = serializers.SerializerMethodField()

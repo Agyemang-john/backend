@@ -1,3 +1,5 @@
+from product.sourcing import info as sourcing_info, window as sourcing_window
+from order.sourcing import cart_needs_ack
 from decimal import Decimal
 from django.shortcuts import get_object_or_404
 from rest_framework import status
@@ -6,7 +8,7 @@ from .cart_utils import get_authenticated_cart_response, get_guest_cart_response
 from address.models import Address
 from address.serializers import AddressSerializer
 # from order.service import calculate_delivery_fee
-from .models import Cart, CartItem, Order, Shipment
+from .models import Cart, CartItem, Order, OrderProduct, Shipment
 from product.models import Product, Variants, ProductDeliveryOption
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -332,7 +334,7 @@ class CheckoutAPIView(APIView):
         deleted_items = cart.prevent_checkout_unavailable_products(default_address)
 
         cart_items = CartItem.objects.filter(cart=cart).select_related(
-            'product__vendor__about', 'product__vendor__shipping_from_country', 'delivery_option'
+            'product__vendor__about', 'product__vendor__shipping_from_country', 'delivery_option', 'variant'
         ).prefetch_related('product__productdeliveryoption_set__delivery_option')
         if not cart_items.exists():
             return Response({"detail": "There are no items to checkout."}, status=status.HTTP_400_BAD_REQUEST)
@@ -374,6 +376,7 @@ class CheckoutAPIView(APIView):
             ).data
 
             selected_option = item.selected_delivery_option
+            item_sourcing = sourcing_window(product, item.variant)
             if selected_option:
                 # Use ProductDeliveryOption to handle buyer_country
                 product_delivery_option = product.productdeliveryoption_set.filter(
@@ -384,13 +387,15 @@ class CheckoutAPIView(APIView):
                         reference_date=timezone.now(),
                         buyer_country=buyer_country,
                         dynamic_min_days=dynamic_quotes.get(vendor.id, {}).get('min_days'),
-                        dynamic_max_days=dynamic_quotes.get(vendor.id, {}).get('max_days')
+                        dynamic_max_days=dynamic_quotes.get(vendor.id, {}).get('max_days'),
+                        sourcing=item_sourcing,
                     )
                 else:
                     date_range = selected_option.get_delivery_date_range(
                         reference_date=timezone.now(),
                         dynamic_min_days=dynamic_quotes.get(vendor.id, {}).get('min_days'),
-                        dynamic_max_days=dynamic_quotes.get(vendor.id, {}).get('max_days')
+                        dynamic_max_days=dynamic_quotes.get(vendor.id, {}).get('max_days'),
+                        sourcing=item_sourcing,
                     )
             else:
                 date_range = "Delivery option not selected"
@@ -413,6 +418,9 @@ class CheckoutAPIView(APIView):
                 del request.session['applied_coupon']
 
         response_data = {
+            # Some items are imported or made to order: checkout asks the
+            # buyer to accept the wait (order/sourcing.py).
+            'needs_sourcing_ack': cart_needs_ack(cart_items),
             'cart_items': CartItemSerializer(cart_items, many=True, context={'request': request}).data,
             'sub_total': cart.total_price,
             'total_delivery_fee': total_delivery_fee,
@@ -598,6 +606,13 @@ class CartSummaryAPIView(APIView):
             "currency": currency,
             "buyer_country": buyer_country,
             "invalid_items": invalid_items,
+            # Imported / made-to-order items: the review step asks the buyer to
+            # accept the wait before paying (order/sourcing.py).
+            "sourcing_items": [
+                {"id": item.id, "title": item.product.title, "sourcing": info}
+                for item in cart.cart_items.select_related('product__sourced_from', 'variant')
+                if (info := sourcing_info(item.product, item.variant))
+            ],
         }
         return Response(summary, status=status.HTTP_200_OK)
 
@@ -836,3 +851,20 @@ class OrderTrackingAPIView(APIView):
 
         serializer = OrderTrackingSerializer(order, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+class CancelSourcedItemView(APIView):
+    """
+    POST /api/v1/order/<order_id>/items/<item_id>/cancel/
+    The buyer cancels an imported / made-to-order item: free before the seller
+    orders it, or once it is past its promised date (order/sourcing.py).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, order_id, item_id):
+        from .sourcing import SourcingError, cancel_line, line_info
+        line = get_object_or_404(OrderProduct, pk=item_id, order_id=order_id, order__user=request.user)
+        try:
+            line = cancel_line(line, request.user)
+        except SourcingError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"id": line.id, "status": line.status, "sourcing": line_info(line)})

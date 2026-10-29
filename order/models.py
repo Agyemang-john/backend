@@ -486,6 +486,24 @@ class OrderProduct(models.Model):
     delivered_date = models.DateTimeField(null=True, blank=True)
     refund_reason = models.CharField(max_length=200, null=True, blank=True)
 
+    # Items imported or made after the order (product/sourcing.py). The window
+    # is copied at order time so the promise stays fixed if the seller later
+    # edits the product; see order/sourcing.py for the rules.
+    SOURCING_STATUS_CHOICES = [
+        ('', 'Not needed'),
+        ('awaiting', 'Waiting for the seller to order it'),
+        ('ordered', 'Ordered from the supplier'),
+        ('in_transit', 'On its way to the seller'),
+        ('arrived', 'With the seller, preparing to ship'),
+    ]
+    sourcing_status = models.CharField(max_length=12, choices=SOURCING_STATUS_CHOICES, blank=True, default='', db_index=True)
+    sourcing_min_days = models.PositiveSmallIntegerField(default=0)
+    sourcing_max_days = models.PositiveSmallIntegerField(default=0)
+    sourcing_updated_at = models.DateTimeField(null=True, blank=True)
+    # Latest delivery date promised at checkout (sourcing + courier days).
+    promised_by = models.DateField(null=True, blank=True, db_index=True)
+    overdue_notified_at = models.DateTimeField(null=True, blank=True)
+
     date_created = models.DateTimeField(auto_now_add=True)
     date_updated = models.DateTimeField(auto_now=True)
 
@@ -509,10 +527,10 @@ class OrderProduct(models.Model):
                 product=self.product, variant=self.variant, default=True
             ).first()
             if product_delivery_option and product_delivery_option.delivery_option:
-                return product_delivery_option.get_delivery_date_range(self.date_created)
+                return product_delivery_option.get_delivery_date_range(self.date_created, sourcing=self.sourcing_window)
             logger.warning(f"No delivery option for OrderProduct (product: {self.product.title})")
             return None
-        return self.selected_delivery_option.get_delivery_date_range(self.date_created)
+        return self.selected_delivery_option.get_delivery_date_range(self.date_created, sourcing=self.sourcing_window)
 
     def get_delivery_status(self):
         if not self.selected_delivery_option:
@@ -522,9 +540,13 @@ class OrderProduct(models.Model):
                 product=self.product, variant=self.variant, default=True
             ).first()
             if product_delivery_option and product_delivery_option.delivery_option:
-                return product_delivery_option.delivery_option.get_delivery_status(self.date_created)
+                return product_delivery_option.delivery_option.get_delivery_status(self.date_created, sourcing=self.sourcing_window)
             return "Delivery option unavailable"
-        return self.selected_delivery_option.get_delivery_status(self.date_created)
+        return self.selected_delivery_option.get_delivery_status(self.date_created, sourcing=self.sourcing_window)
+
+    @property
+    def sourcing_window(self):
+        return (self.sourcing_min_days, self.sourcing_max_days)
 
     def __str__(self):
         product_name = self.product.title if self.product else "Deleted Product"

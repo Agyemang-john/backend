@@ -1,3 +1,4 @@
+from product import sourcing as product_sourcing
 from rest_framework import serializers
 from product.models import  *
 from order.models import *
@@ -151,6 +152,7 @@ class ProductSerializer(serializers.ModelSerializer):
     currency = serializers.SerializerMethodField()
     price = serializers.SerializerMethodField()
     old_price = serializers.SerializerMethodField()
+    sourcing = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -187,7 +189,11 @@ class ProductSerializer(serializers.ModelSerializer):
             "updated",
             "views",
             "currency",
+            "sourcing",
         ]
+
+    def get_sourcing(self, obj):
+        return product_sourcing.info(obj)
 
     def get_currency(self, obj):
         request = self.context.get('request')
@@ -246,6 +252,8 @@ class ProductListSerializer(serializers.ModelSerializer):
             'avg_rating', 'review_count',
             'deals_of_the_day', 'recommended_for_you', 'popular_product',
             'date', 'total_quantity',
+            # Badge on product cards ("Ships from abroad · 4–6 weeks").
+            'fulfilment_type', 'sourcing_min_days', 'sourcing_max_days',
         ]
 
     def _currency_and_rate(self):
@@ -370,8 +378,13 @@ class VariantSerializer(serializers.ModelSerializer):
         model = Variants
         fields = [
             "product", "price", "title", "color", "size",
-            "quantity", "image", "currency", "id"
+            "quantity", "image", "currency", "id", "sourcing",
         ]
+
+    sourcing = serializers.SerializerMethodField()
+
+    def get_sourcing(self, obj):
+        return product_sourcing.info(obj.product, obj)
 
     def get_currency(self, obj):
         request = self.context.get('request')

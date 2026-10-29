@@ -8,6 +8,7 @@ from .serializers import CartItemSerializer
 from core.service import get_exchange_rates
 from decimal import Decimal
 from .pricing import line_pricing
+from product.sourcing import info as sourcing_info
 
 from decimal import InvalidOperation
 import logging
@@ -99,6 +100,7 @@ def get_guest_cart_response(request):
             "effective_unit_price": float(pricing['unit_price']),
             "is_flash_sale": pricing['flash_sale'] is not None,
             "item_packaging_fee": float(item_packaging),
+            "sourcing": sourcing_info(product, variant),
         })
 
         total_amount += subtotal

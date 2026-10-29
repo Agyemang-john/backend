@@ -1,4 +1,5 @@
 from decimal import Decimal
+from order.sourcing import snapshot as sourcing_snapshot
 import requests
 from django.conf import settings
 from django.utils.crypto import get_random_string
@@ -109,7 +110,8 @@ class FlutterwaveCallbackAPIView(APIView):
                     quantity=cart_item.quantity,
                     price=price,
                     amount=amount,
-                    selected_delivery_option=cart_item.delivery_option
+                    selected_delivery_option=cart_item.delivery_option,
+                    **sourcing_snapshot(cart_item.product, cart_item.variant, cart_item.delivery_option),
                 )
 
                 deduct_stock(cart_item.product, cart_item.variant, cart_item.quantity)

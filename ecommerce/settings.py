@@ -617,6 +617,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "vendor.tasks.remind_late_orders",
         "schedule": crontab(hour=7, minute=0),
     },
+    # Imported / made-to-order items: seller reminders + late-item notices
+    "check-sourced-orders": {
+        "task": "order.tasks.check_sourced_orders",
+        "schedule": crontab(hour=7, minute=15),
+    },
 
     # ── Vendor subscription lifecycle tasks ───────────────────────────────────
     # These three tasks run on a crontab schedule defined in the

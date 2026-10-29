@@ -1,3 +1,4 @@
+from product.sourcing import filter_fast_delivery
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework.response import Response
@@ -122,7 +123,7 @@ def get_cached_product_data(sku: str, slug: str, request):
     # Main product with optimized prefetching
     product = get_object_or_404(
         Product.published
-        .select_related('vendor', 'sub_category')
+        .select_related('vendor', 'sub_category', 'sourced_from')
         .prefetch_related(
             Prefetch('p_images', queryset=ProductImages.objects.order_by('id')),
         ),
@@ -145,7 +146,7 @@ def get_cached_product_data(sku: str, slug: str, request):
         "average_rating": product.avg_rating,
         "review_count": product.review_count,
         "delivery_options": ProductDeliveryOptionSerializer(
-            ProductDeliveryOption.objects.filter(product=product), many=True
+            ProductDeliveryOption.objects.filter(product=product).select_related('delivery_option', 'product', 'variant'), many=True
         ).data,
     }
 
@@ -590,6 +591,7 @@ class CategoryProductListView(APIView):
             filtered_qs = filtered_qs.filter(price__lte=max_price / exchange_rate)
         if active_ratings:
             filtered_qs = filtered_qs.filter(avg_rating__gte=min(active_ratings))
+        filtered_qs = filter_fast_delivery(filtered_qs, request)
 
         # 'featured' and any unknown value → trending score (most engaging first)
         filtered_qs = filtered_qs.order_by(_sort_map.get(sort, '-trending_score'))
@@ -753,6 +755,7 @@ class BrandProductListView(APIView):
             filtered_qs = filtered_qs.filter(price__lte=max_price / exchange_rate)
         if active_ratings:
             filtered_qs = filtered_qs.filter(avg_rating__gte=min(active_ratings))
+        filtered_qs = filter_fast_delivery(filtered_qs, request)
 
         # 'featured' and any unknown value → trending score
         filtered_qs = filtered_qs.order_by(_sort_map.get(sort, '-trending_score'))
@@ -931,6 +934,7 @@ class ProductSearchAPIView(APIView):
             filtered_qs = filtered_qs.filter(price__lte=max_price / exchange_rate)
         if active_ratings:
             filtered_qs = filtered_qs.filter(avg_rating__gte=min(active_ratings))
+        filtered_qs = filter_fast_delivery(filtered_qs, request)
 
         # ── Sort ───────────────────────────────────────────────────────────────
         _sort_map = {
@@ -1216,6 +1220,7 @@ class CollectionAPIView(APIView):
             filtered = filtered.filter(price__lte=max_price / exchange_rate)
         if active_ratings:
             filtered = filtered.filter(avg_rating__gte=min(active_ratings))
+        filtered = filter_fast_delivery(filtered, request)
 
         sort = request.GET.get('sort', 'featured')
         _sort_map = {'price_asc': 'price', 'price_desc': '-price', 'rating': '-avg_rating', 'newest': '-date'}
