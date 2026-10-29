@@ -7,6 +7,7 @@ nothing else writes Conversation / Message rows.
     start_conversation(...)            → shopper opens (or reopens) a chat with a store
     send_message(...)                  → either side posts; moderation, counters, push
     mark_read(conversation, side)      → read receipts + unread counters
+    mark_delivered / deliver_pending   → delivery receipts (✓✓) when a message reaches an open tab
     muted_until(user)                  → repeat offenders can't send for a while
 """
 
@@ -14,7 +15,8 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
-from django.db.models import F
+from django.db.models import F, Value
+from django.db.models.functions import Greatest
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied
 
@@ -224,8 +226,50 @@ def mark_read(conversation, side):
     if conversation.unread_for(side) == 0 and conversation.last_read_id_for(side) >= conversation.last_message_id:
         return False
     last_id = conversation.last_message_id
-    Conversation.objects.filter(pk=conversation.pk).update(**{f'{side}_unread': 0, f'{side}_last_read_id': last_id})
+    Conversation.objects.filter(pk=conversation.pk).update(**{
+        f'{side}_unread': 0, f'{side}_last_read_id': last_id,
+        f'{side}_delivered_id': Greatest(F(f'{side}_delivered_id'), Value(last_id)),
+    })
     setattr(conversation, f'{side}_unread', 0)
     setattr(conversation, f'{side}_last_read_id', last_id)
     transaction.on_commit(lambda: realtime.read_receipt(conversation, side, last_id))
     return True
+
+
+def unread_chats(side, party_id):
+    """Chats with unread messages for one side (the nav badge number)."""
+    lookup = {'customer_id': party_id} if side == Side.CUSTOMER else {'vendor_id': party_id}
+    return Conversation.objects.filter(**lookup, **{f'{side}_unread__gt': 0}).count()
+
+
+# ── Delivery ──────────────────────────────────────────────────────────────────
+# A message is "delivered" (✓✓ grey) once it reaches one of the recipient's open
+# app tabs: chat/consumers.py calls these when it pushes a message to a socket,
+# and when a socket connects (everything that arrived while they were away).
+
+def mark_delivered(conversation_id, side, party_id, message_id):
+    """`side` has received up to message_id in this chat. Pushes a receipt if that's news."""
+    lookup = {'customer_id': party_id} if side == Side.CUSTOMER else {'vendor_id': party_id}
+    changed = Conversation.objects.filter(
+        pk=conversation_id, **lookup, **{f'{side}_delivered_id__lt': message_id},
+    ).update(**{f'{side}_delivered_id': message_id})
+    if changed:
+        realtime.delivery_receipt(conversation_id, side, party_id, message_id)
+    return bool(changed)
+
+
+PENDING_DELIVERY_LIMIT = 200
+
+
+def deliver_pending(side, party_id):
+    """On connect: mark every chat with messages this side hasn't received yet as delivered."""
+    other = Side.other(side)
+    lookup = {'customer_id': party_id} if side == Side.CUSTOMER else {'vendor_id': party_id}
+    rows = list(
+        Conversation.objects.filter(**lookup, last_sender_side=other,
+                                    **{f'{side}_delivered_id__lt': F('last_message_id')})
+        .order_by('-last_message_at').values_list('pk', 'last_message_id')[:PENDING_DELIVERY_LIMIT]
+    )
+    for conversation_id, last_id in rows:
+        mark_delivered(conversation_id, side, party_id, last_id)
+    return len(rows)

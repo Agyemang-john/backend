@@ -267,6 +267,26 @@ class ChatApiTests(ChatFixtures, TestCase):
             self.start()
         self.assertFalse(Notification.objects.filter(verb='message').exists())
 
+    def test_reading_a_chat_clears_its_bell_notifications(self):
+        with self.captureOnCommitCallbacks(execute=True):
+            conv_id = self.start().data['conversation']['id']
+        self.assertEqual(Notification.objects.filter(verb='message', is_read=False).count(), 2)
+        with self.captureOnCommitCallbacks(execute=True):
+            client_for(self.staff).post(f'/api/v1/chat/conversations/{conv_id}/read/?as=vendor')
+        self.assertFalse(Notification.objects.filter(verb='message', is_read=False).exists())
+        conv = Conversation.objects.get(pk=conv_id)
+        self.assertEqual(conv.vendor_delivered_id, conv.last_message_id)  # read implies delivered
+
+    def test_bell_counts_are_split_between_shop_and_dashboard(self):
+        from notification.utils import send_notification
+        send_notification(self.owner, 'message', data={'audience': 'vendor'})
+        send_notification(self.owner, 'message', data={'audience': 'customer'})
+        send_notification(self.owner, 'vendor_new_order')
+        send_notification(self.owner, 'customer_order_shipped')
+        send_notification(self.owner, 'announcement')
+        count = Notification.objects.unread_count_for
+        self.assertEqual((count(self.owner, 'seller'), count(self.owner, 'shopper'), count(self.owner)), (3, 3, 5))
+
     def test_store_presence_is_public(self):
         url = f'/api/v1/chat/store/{self.vendor.slug}/presence/'
         res = APIClient().get(url)
@@ -334,6 +354,48 @@ class ChatSocketTests(ChatFixtures, TransactionTestCase):
             self.assertEqual((await store.receive_json_from(timeout=3))['type'], 'typing')
             await store.disconnect()
             await shopper.disconnect()
+        async_to_sync(scenario)()
+
+    def test_delivery_receipts(self):
+        async def scenario():
+            from asgiref.sync import sync_to_async
+            # Store offline: the first message is only sent (✓).
+            res = await sync_to_async(self.start)()
+            conv_id, first_id = res.data['conversation']['id'], res.data['message']['id']
+            conv = await sync_to_async(Conversation.objects.get)(pk=conv_id)
+            self.assertEqual(conv.delivered_id_for('vendor'), 0)
+
+            shopper = self._connect(self.shopper, 'customer')
+            self.assertTrue((await shopper.connect())[0])
+            # The store opens the dashboard: what came in while away is delivered (✓✓).
+            store = self._connect(self.staff, 'vendor')
+            self.assertTrue((await store.connect())[0])
+            event = await shopper.receive_json_from(timeout=3)
+            self.assertEqual((event['type'], event['side'], event['last_delivered_id']), ('delivered', 'vendor', first_id))
+
+            # Store online: a new message is delivered as it arrives.
+            res = await sync_to_async(self.start)('Also, do you have it in black?')
+            second_id = res.data['message']['id']
+            pushed = await store.receive_json_from(timeout=3)
+            self.assertEqual((pushed['type'], pushed['unread_chats']), ('message', 1))
+            types = {}
+            for _ in range(2):  # the echo of our own message, then the receipt
+                e = await shopper.receive_json_from(timeout=3)
+                types[e['type']] = e
+            self.assertEqual(types['delivered']['last_delivered_id'], second_id)
+            conv = await sync_to_async(Conversation.objects.get)(pk=conv_id)
+            self.assertEqual((conv.vendor_delivered_id, conv.vendor_last_read_id), (second_id, 0))
+
+            # The store reads it: ✓✓ blue for the shopper, badge back to 0 for the store.
+            await sync_to_async(client_for(self.staff).post)(f'/api/v1/chat/conversations/{conv_id}/read/?as=vendor')
+            read = await shopper.receive_json_from(timeout=3)
+            self.assertEqual((read['type'], read['last_read_id']), ('read', second_id))
+            own = await store.receive_json_from(timeout=3)
+            self.assertEqual((own['type'], own['unread_chats']), ('read', 0))
+
+            await store.disconnect()
+            await shopper.disconnect()
+            self.assertFalse(realtime.is_online('vendor', self.vendor.pk))
         async_to_sync(scenario)()
 
     def test_anonymous_and_non_members_are_rejected(self):

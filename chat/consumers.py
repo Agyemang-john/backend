@@ -3,8 +3,9 @@ chat/consumers.py
 One socket per open app tab:  ws/chat/?token=<access>&as=customer|vendor
 
 Server → client (JSON):
-    {"type": "message", "conversation": {...}, "message": {...}}
-    {"type": "read", "conversation_id", "side", "last_read_id"}
+    {"type": "message", "conversation": {...}, "message": {...}, "unread_chats": n}
+    {"type": "read", "conversation_id", "side", "last_read_id", "unread_chats"?}
+    {"type": "delivered", "conversation_id", "side", "last_delivered_id"}
     {"type": "typing", "conversation_id"}
     {"type": "pong"}
 Client → server:
@@ -13,6 +14,10 @@ Client → server:
 
 Messages are sent over REST (chat/views.py) so they get validation, throttling
 and moderation in one place; the socket only carries live events.
+
+Delivery receipts: a message pushed to one of the recipient's sockets is
+"delivered" (✓✓ grey); so is everything that arrived while they had no socket
+open, the moment one connects.
 """
 
 import json
@@ -23,7 +28,7 @@ from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
 from rest_framework.exceptions import PermissionDenied
 
-from . import realtime
+from . import realtime, services
 from .models import Conversation, Side
 
 TYPING_EVERY = 2.0  # seconds between forwarded typing events per conversation
@@ -70,10 +75,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
         await self.channel_layer.group_add(self.group_name, self.channel_name)
         await self.accept()
         await database_sync_to_async(realtime.mark_online)(self.side, self.party_id)
+        await database_sync_to_async(services.deliver_pending)(self.side, self.party_id)
 
     async def disconnect(self, close_code):
         if hasattr(self, 'group_name'):
             await self.channel_layer.group_discard(self.group_name, self.channel_name)
+            await database_sync_to_async(realtime.mark_offline)(self.side, self.party_id)
 
     async def receive(self, text_data=None, bytes_data=None):
         try:
@@ -110,14 +117,29 @@ class ChatConsumer(AsyncWebsocketConsumer):
     # ── Group events → this socket ────────────────────────────────────────────
 
     async def chat_message(self, event):
+        message = event['message']
         await self.send(text_data=json.dumps({
-            'type': 'message', 'conversation': event['conversation'], 'message': event['message'],
+            'type': 'message', 'conversation': event['conversation'], 'message': message,
+            'unread_chats': event.get('unread_chats'),
         }, default=str))
+        if message.get('side') != self.side:
+            # It reached the recipient's open tab: ✓ → ✓✓ for the sender.
+            await database_sync_to_async(services.mark_delivered)(
+                message['conversation_id'], self.side, self.party_id, message['id'])
 
     async def chat_read(self, event):
-        await self.send(text_data=json.dumps({
+        payload = {
             'type': 'read', 'conversation_id': event['conversation_id'], 'side': event['side'],
             'last_read_id': event['last_read_id'],
+        }
+        if 'unread_chats' in event:
+            payload['unread_chats'] = event['unread_chats']
+        await self.send(text_data=json.dumps(payload))
+
+    async def chat_delivered(self, event):
+        await self.send(text_data=json.dumps({
+            'type': 'delivered', 'conversation_id': event['conversation_id'], 'side': event['side'],
+            'last_delivered_id': event['last_delivered_id'],
         }))
 
     async def chat_typing(self, event):

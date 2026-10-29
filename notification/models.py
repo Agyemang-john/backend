@@ -20,9 +20,35 @@ import uuid
 User = get_user_model()
 
 
+def app_of(user):
+    """'seller' or 'shopper' by how this user signed in (JWT / socket ticket), None if unknown."""
+    return getattr(user, '__dict__', {}).get('_auth_scope')
+
+
+def in_app(app, verb, data=None):
+    """
+    Does this notification belong in the seller dashboard's or the shop's bell?
+    vendor_* verbs are the store's, customer_* the shopper's, a chat message
+    goes to the side it was sent to (data.audience); the rest show in both.
+    """
+    if app == 'seller':
+        return not verb.startswith('customer_') and not (verb == 'message' and (data or {}).get('audience') == 'customer')
+    if app == 'shopper':
+        return not verb.startswith('vendor_') and not (verb == 'message' and (data or {}).get('audience') == 'vendor')
+    return True
+
+
 class NotificationQuerySet(models.QuerySet):
     def unread(self):
         return self.filter(is_read=False)
+
+    def for_app(self, app):
+        """Only what in_app() would show for this app (None = everything)."""
+        if app == 'seller':
+            return self.exclude(verb__startswith='customer_').exclude(verb='message', data__audience='customer')
+        if app == 'shopper':
+            return self.exclude(verb__startswith='vendor_').exclude(verb='message', data__audience='vendor')
+        return self
 
     def read(self):
         return self.filter(is_read=True)
@@ -38,8 +64,11 @@ class NotificationManager(models.Manager):
     def get_queryset(self):
         return NotificationQuerySet(self.model, using=self._db)
 
-    def unread_count_for(self, user):
-        return self.get_queryset().unread().filter(recipient=user).count()
+    def unread_count_for(self, user, app=None):
+        return self.get_queryset().unread().filter(recipient=user).for_app(app).count()
+
+    def for_app(self, app):
+        return self.get_queryset().for_app(app)
 
 
 class Notification(models.Model):

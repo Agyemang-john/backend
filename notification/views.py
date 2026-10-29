@@ -18,8 +18,9 @@ from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
 
-from .models import Notification
+from .models import Notification, app_of
 from .serializers import NotificationSerializer
+from .utils import push_unread_count
 
 class NotificationListView(generics.ListAPIView):
     """
@@ -30,7 +31,8 @@ class NotificationListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Notification.objects.filter(recipient=self.request.user).order_by("-created_at")
+        return (Notification.objects.filter(recipient=self.request.user)
+                .for_app(app_of(self.request.user)).order_by("-created_at"))
 
 
 class NotificationMarkReadView(APIView):
@@ -47,6 +49,7 @@ class NotificationMarkReadView(APIView):
             return Response({"detail": "Notification not found"}, status=status.HTTP_404_NOT_FOUND)
         
         notif.mark_as_read()
+        push_unread_count(request.user.pk)
         serializer = NotificationSerializer(notif)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -59,7 +62,9 @@ class NotificationMarkAllReadView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        Notification.objects.filter(recipient=request.user, is_read=False).update(is_read=True)
+        (Notification.objects.filter(recipient=request.user, is_read=False)
+         .for_app(app_of(request.user)).update(is_read=True))
+        push_unread_count(request.user.pk)
         return Response({"detail": "All notifications marked as read"}, status=status.HTTP_200_OK)
 
 class NotificationDeleteView(APIView):
@@ -76,6 +81,7 @@ class NotificationDeleteView(APIView):
             return Response({"detail": "Notification not found"}, status=status.HTTP_404_NOT_FOUND)
 
         notif.delete()
+        push_unread_count(request.user.pk)
         return Response({"detail": "Notification deleted"}, status=status.HTTP_204_NO_CONTENT)
 
 
@@ -93,6 +99,7 @@ class NotificationDetailView(APIView):
 
         if not notif.is_read:
             notif.mark_as_read()
+            push_unread_count(request.user.pk)
 
         serializer = NotificationSerializer(notif)
         return Response(serializer.data, status=status.HTTP_200_OK)

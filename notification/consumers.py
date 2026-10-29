@@ -4,7 +4,7 @@ import logging
 from django.core.serializers.json import DjangoJSONEncoder
 from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.db import database_sync_to_async
-from .models import Notification
+from .models import Notification, app_of, in_app
 from .serializers import NotificationSerializer
 
 logger = logging.getLogger(__name__)
@@ -12,15 +12,23 @@ logger = logging.getLogger(__name__)
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
+# Each socket shows the notifications of the app it was opened from (the
+# seller dashboard or the shop: models.app_of / in_app), so counts are always
+# worked out per socket rather than sent in group events.
+
 @database_sync_to_async
 def get_notifications_for(user):
-    qs = Notification.objects.filter(recipient=user).order_by("-created_at")[:100]
+    qs = Notification.objects.filter(recipient=user).for_app(app_of(user)).order_by("-created_at")[:100]
     return list(NotificationSerializer(qs, many=True).data)
 
 
 @database_sync_to_async
 def get_unread_count_for(user):
-    return Notification.objects.unread_count_for(user)
+    return Notification.objects.unread_count_for(user, app_of(user))
+
+
+def _for_this_app(user, event):
+    return in_app(app_of(user), event.get("verb", ""), {"audience": event.get("audience")})
 
 
 # ── Bell (count-only) consumer ────────────────────────────────────────────────
@@ -50,7 +58,9 @@ class NotificationCountConsumer(AsyncWebsocketConsumer):
     # ── Group event handlers ──────────────────────────────────────────────────
 
     async def new_notification(self, event):
-        """New notification created — update count and ring the bell."""
+        """New notification created — update count and ring the bell (if it's this app's)."""
+        if not _for_this_app(self.user, event):
+            return
         count = await get_unread_count_for(self.user)
         await self.send(text_data=json.dumps({
             "type": "unread_count",
@@ -60,9 +70,10 @@ class NotificationCountConsumer(AsyncWebsocketConsumer):
 
     async def count_updated(self, event):
         """Count changed (e.g. user marked something read elsewhere)."""
+        count = await get_unread_count_for(self.user)
         await self.send(text_data=json.dumps({
             "type": "unread_count",
-            "count": event["count"],
+            "count": count,
         }, cls=DjangoJSONEncoder))
 
 
@@ -104,7 +115,7 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 
         elif action == "mark_all_read":
             await database_sync_to_async(
-                Notification.objects.filter(recipient=self.user, is_read=False).update
+                Notification.objects.filter(recipient=self.user, is_read=False).for_app(app_of(self.user)).update
             )(is_read=True)
 
         elif action == "delete":
@@ -115,13 +126,16 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         elif action == "view_detail":
             await self._mark_single_read(data.get("id"))
 
-        # Refresh this socket and sync the bell in every other tab
-        count = await get_unread_count_for(self.user)
-        await self.channel_layer.group_send(
-            self.group_name,
-            {"type": "count_updated", "count": count},
-        )
-        await self._send_refresh()
+        elif action == "ping":
+            await self.send(text_data='{"type": "pong"}')
+            return
+
+        else:
+            return
+
+        # Every open bell and list of this user (all tabs, both apps) recounts
+        # and refreshes, this socket included.
+        await self.channel_layer.group_send(self.group_name, {"type": "count_updated"})
 
     @database_sync_to_async
     def _mark_single_read(self, notif_id):
@@ -133,23 +147,22 @@ class NotificationConsumer(AsyncWebsocketConsumer):
 
     async def new_notification(self, event):
         """
-        A new Notification was just saved.
-        Refresh the list so the new item appears immediately.
-        Also push a count update to sync the bell.
+        A new Notification was just saved: refresh the list (it carries the
+        count) and ring the bell, unless it belongs to the other app.
         """
-        count = await get_unread_count_for(self.user)
-        await self.channel_layer.group_send(
-            self.group_name,
-            {"type": "count_updated", "count": count},
-        )
+        if not _for_this_app(self.user, event):
+            return
         await self._send_refresh()
-
-    async def count_updated(self, event):
-        """Bell sync — send lightweight count update to this socket too."""
+        count = await get_unread_count_for(self.user)
         await self.send(text_data=json.dumps({
             "type": "unread_count",
-            "count": event["count"],
+            "count": count,
+            "trigger_toast": True,
         }, cls=DjangoJSONEncoder))
+
+    async def count_updated(self, event):
+        """Read state changed somewhere (another tab, the chat, REST): refresh list + count."""
+        await self._send_refresh()
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

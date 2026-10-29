@@ -13,6 +13,7 @@ Hot paths and how they stay cheap at scale:
   - thread history    → keyset pagination on (conversation, -id).
   - read receipts     → each side's last_read_message_id; a message is "read"
                         when its id <= the other side's pointer (no per-message rows).
+                        Delivery receipts work the same way with <side>_delivered_id.
 """
 
 from django.conf import settings
@@ -62,6 +63,10 @@ class Conversation(models.Model):
     vendor_unread = models.PositiveIntegerField(default=0)
     customer_last_read_id = models.BigIntegerField(default=0)
     vendor_last_read_id = models.BigIntegerField(default=0)
+    # Delivery receipts (✓✓ grey): the newest message that reached one of the
+    # side's open app tabs. Always >= that side's last_read_id.
+    customer_delivered_id = models.BigIntegerField(default=0)
+    vendor_delivered_id = models.BigIntegerField(default=0)
     # The last message a "still waiting for your reply" reminder was sent for
     # (chat/tasks.py send_chat_reminders): one reminder per unanswered message.
     reminded_message_id = models.BigIntegerField(default=0)
@@ -85,6 +90,11 @@ class Conversation(models.Model):
 
     def last_read_id_for(self, side):
         return self.customer_last_read_id if side == Side.CUSTOMER else self.vendor_last_read_id
+
+    def delivered_id_for(self, side):
+        # Read implies delivered (rows from before delivery receipts only have the read pointer).
+        delivered = self.customer_delivered_id if side == Side.CUSTOMER else self.vendor_delivered_id
+        return max(delivered, self.last_read_id_for(side))
 
 
 class Message(models.Model):

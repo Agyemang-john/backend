@@ -87,3 +87,22 @@ def send_notification(recipient, verb, target=None, actor=None, data=None):
     )
     # The post_save signal in signals.py handles the WebSocket broadcast.
     return notification
+
+
+def push_unread_count(user_id):
+    """
+    Read state changed outside a notification socket (REST, chat read): every
+    open bell of this user recounts. Each socket counts for its own app
+    (seller dashboard / shop), so the event carries no number.
+    """
+    from asgiref.sync import async_to_sync
+    from channels.layers import get_channel_layer
+
+    layer = get_channel_layer()
+    if layer is None:
+        return
+    try:
+        async_to_sync(layer.group_send)(f"user_{user_id}", {"type": "count_updated"})
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("bell count push failed for user %s", user_id)

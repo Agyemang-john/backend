@@ -9,12 +9,18 @@ events only on that app's socket:
 
 Events sent to a group (handled in chat/consumers.py):
     chat.message   {conversation (recipient's view), message}
-    chat.read      {conversation_id, side, last_read_id}
+    chat.read      {conversation_id, side, last_read_id, unread_chats?}
+    chat.delivered {conversation_id, side, last_delivered_id}
     chat.typing    {conversation_id}
+
+chat.message and the reader's own chat.read carry unread_chats (the recipient
+group's nav-badge number), so badges update without a round trip.
 
 Presence lives in the cache (Redis): a socket refreshes chat:on:<side>:<id> every
 PING_SECONDS; the key outlives a ping by a margin, so "online" means "had a chat
-socket open in the last ~minute". No per-message DB work, no counters to drift.
+socket open in the last ~minute". A closing socket drops the key at once (another
+open tab sets it again on its next ping), so a shopper who just left doesn't look
+online and miss their bell notification. No per-message DB work, no counters to drift.
 
 When the recipient side is offline the message also raises a bell notification
 (notification.utils.send_notification), at most once per conversation per
@@ -55,6 +61,11 @@ def mark_online(side, party_id):
     cache.set(_seen_key(side, party_id), timezone.now().isoformat(), LAST_SEEN_TTL)
 
 
+def mark_offline(side, party_id):
+    cache.delete(_online_key(side, party_id))
+    cache.set(_seen_key(side, party_id), timezone.now().isoformat(), LAST_SEEN_TTL)
+
+
 def presence(side, party_id):
     """(online, last_seen ISO string or None)."""
     values = cache.get_many([_online_key(side, party_id), _seen_key(side, party_id)])
@@ -92,6 +103,7 @@ def _send(group, event):
 def message_created(conversation_id, message_id):
     from .models import Conversation, Message, Side
     from .serializers import ConversationSerializer, MessageSerializer
+    from .services import unread_chats
 
     conversation = (Conversation.objects.select_related('customer', 'vendor__about', 'product')
                     .filter(pk=conversation_id).first())
@@ -99,11 +111,15 @@ def message_created(conversation_id, message_id):
     if conversation is None or message is None:
         return
     message_data = MessageSerializer(message).data
-    for side, party_id in ((Side.CUSTOMER, conversation.customer_id), (Side.VENDOR, conversation.vendor_id)):
+    sides = ((Side.CUSTOMER, conversation.customer_id), (Side.VENDOR, conversation.vendor_id))
+    # Sender's tabs first, so the echo reaches them before the delivery receipt
+    # the recipient's socket sends back.
+    for side, party_id in sorted(sides, key=lambda s: s[0] != message.sender_side):
         _send(group_for(side, party_id), {
             'type': 'chat.message',
             'conversation': ConversationSerializer(conversation, context={'side': side}).data,
             'message': message_data,
+            'unread_chats': unread_chats(side, party_id),
         })
 
     recipient = Side.other(message.sender_side)
@@ -114,13 +130,29 @@ def message_created(conversation_id, message_id):
 
 def read_receipt(conversation, side, last_read_id):
     from .models import Side
+    from .services import unread_chats
     other = Side.other(side)
     other_id = conversation.customer_id if other == Side.CUSTOMER else conversation.vendor_id
     event = {'type': 'chat.read', 'conversation_id': conversation.pk, 'side': side, 'last_read_id': last_read_id}
     _send(group_for(other, other_id), event)
     # The reader's other tabs/devices clear their unread badge too.
     own_id = conversation.customer_id if side == Side.CUSTOMER else conversation.vendor_id
-    _send(group_for(side, own_id), event)
+    _send(group_for(side, own_id), {**event, 'unread_chats': unread_chats(side, own_id)})
+    clear_notifications(conversation, side)
+
+
+def delivery_receipt(conversation_id, side, party_id, last_delivered_id):
+    """`side` received up to last_delivered_id: tell the sender (✓ → ✓✓)."""
+    from .models import Conversation, Side
+    other = Side.other(side)
+    field = 'vendor_id' if other == Side.VENDOR else 'customer_id'
+    other_id = Conversation.objects.filter(pk=conversation_id).values_list(field, flat=True).first()
+    if other_id is None:
+        return
+    _send(group_for(other, other_id), {
+        'type': 'chat.delivered', 'conversation_id': conversation_id, 'side': side,
+        'last_delivered_id': last_delivered_id,
+    })
 
 
 def typing(conversation_id, to_side, to_party_id):
@@ -157,6 +189,37 @@ def notify_offline(conversation, message, recipient_side):
             })
     except Exception:
         logger.exception("chat offline notification failed for conversation %s", conversation.pk)
+
+
+def clear_notifications(conversation, side):
+    """
+    Reading a chat also reads its "New message" bell notifications, on every
+    device, so the bell count never shows messages already seen in the chat.
+    """
+    from django.contrib.contenttypes.models import ContentType
+    from notification.models import Notification
+    from notification.utils import push_unread_count
+
+    from .models import Side
+
+    try:
+        qs = Notification.objects.filter(
+            verb='message', is_read=False,
+            target_content_type=ContentType.objects.get_for_model(conversation),
+            target_object_id=conversation.pk,
+        )
+        if side == Side.CUSTOMER:
+            qs = qs.filter(recipient_id=conversation.customer_id)
+        else:
+            qs = qs.exclude(recipient_id=conversation.customer_id)
+        recipients = set(qs.values_list('recipient_id', flat=True))
+        if not recipients:
+            return
+        qs.update(is_read=True)
+        for user_id in recipients:
+            push_unread_count(user_id)
+    except Exception:
+        logger.exception("clearing chat notifications failed for conversation %s", conversation.pk)
 
 
 def vendor_recipients(vendor_id):

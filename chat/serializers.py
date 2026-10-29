@@ -64,13 +64,14 @@ class MessageSerializer(serializers.ModelSerializer):
 class ConversationSerializer(serializers.ModelSerializer):
     unread = serializers.SerializerMethodField()
     other_last_read_id = serializers.SerializerMethodField()
+    other_delivered_id = serializers.SerializerMethodField()
     counterpart = serializers.SerializerMethodField()
     product = serializers.SerializerMethodField()
 
     class Meta:
         model = Conversation
         fields = ['id', 'reason', 'created_at', 'last_message_at', 'last_message_preview', 'last_sender_side',
-                  'last_message_id', 'unread', 'other_last_read_id', 'counterpart', 'product']
+                  'last_message_id', 'unread', 'other_last_read_id', 'other_delivered_id', 'counterpart', 'product']
 
     @property
     def side(self):
@@ -81,6 +82,9 @@ class ConversationSerializer(serializers.ModelSerializer):
 
     def get_other_last_read_id(self, obj):
         return obj.last_read_id_for(Side.other(self.side))
+
+    def get_other_delivered_id(self, obj):
+        return obj.delivered_id_for(Side.other(self.side))
 
     def get_counterpart(self, obj):
         presence = self.context.get('presence')
