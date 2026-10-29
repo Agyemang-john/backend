@@ -163,7 +163,25 @@ class TopEngagedCategoryView(APIView):
             cache.set(cache_key, cached_data, timeout=60 * 30)  # Cache for 15 minutes
         
         return Response(cached_data, status=status.HTTP_200_OK if cached_data.get('detail') is None else status.HTTP_404_NOT_FOUND)
-    
+
+
+def _apply_currency(products_data: list, currency: str, rates: dict) -> list:
+    """
+    Shared helper — converts price/old_price fields in a list of product dicts
+    and stamps the currency. Always works on a fresh copy so the cached list
+    is never mutated.
+    """
+    exchange_rate = Decimal(str(rates.get(currency, 1)))
+    converted = []
+    for product in products_data:
+        p = dict(product)
+        p["currency"] = currency
+        p["price"] = round(Decimal(str(p["price"])) * exchange_rate, 2)
+        if p.get("old_price"):
+            p["old_price"] = round(Decimal(str(p["old_price"])) * exchange_rate, 2)
+        converted.append(p)
+    return converted
+
 
 class MainAPIView(APIView):
     """Combined homepage payload: new products, most popular, brands, subcategories, top category."""
