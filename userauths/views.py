@@ -25,6 +25,7 @@ from django.contrib.auth.tokens import default_token_generator
 from django.utils import timezone
 from .session_utils import register_session, get_client_ip
 from vendor.access import IsSellerSignIn
+from address import delivery
 
 class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
@@ -103,6 +104,7 @@ class CustomTokenObtainPairView(TokenObtainPairView):
                     if jti and user_id:
                         user = User.objects.get(id=user_id)
                         register_session(user, jti, request, is_vendor=False)
+                        delivery.sync_cookie(response, request, user)
                 except Exception:
                     pass
 
@@ -219,6 +221,7 @@ class LogoutView(APIView):
         response = Response(status=status.HTTP_204_NO_CONTENT)
         response.delete_cookie('access', path=settings.AUTH_COOKIE_PATH, domain=settings.AUTH_COOKIE_DOMAIN)
         response.delete_cookie('refresh', path=settings.AUTH_COOKIE_PATH, domain=settings.AUTH_COOKIE_DOMAIN)
+        delivery.delete_cookie(response)
         return response
     
 
@@ -724,6 +727,7 @@ class VendorLogoutAllView(APIView):
         # This browser's shopping session is dead too; drop its cookies.
         response.delete_cookie('access', path=settings.AUTH_COOKIE_PATH, domain=settings.AUTH_COOKIE_DOMAIN)
         response.delete_cookie('refresh', path=settings.AUTH_COOKIE_PATH, domain=settings.AUTH_COOKIE_DOMAIN)
+        delivery.delete_cookie(response)
         return response
 
 
@@ -898,4 +902,5 @@ class CustomerLogoutAllView(APIView):
         response = Response({'detail': 'Logged out from all devices.'}, status=status.HTTP_200_OK)
         response.delete_cookie('access', path=settings.AUTH_COOKIE_PATH, domain=settings.AUTH_COOKIE_DOMAIN)
         response.delete_cookie('refresh', path=settings.AUTH_COOKIE_PATH, domain=settings.AUTH_COOKIE_DOMAIN)
+        delivery.delete_cookie(response)
         return response

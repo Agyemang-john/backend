@@ -1,7 +1,7 @@
 from django.contrib.auth.signals import user_logged_in, user_logged_out
 from django.dispatch import receiver
 from order.models import Cart
-from django.db.models.signals import post_save, post_delete
+from django.db.models.signals import post_save, post_delete, m2m_changed
 from product.models import Product, ProductReview, ReviewMedia
 from django.core.cache import cache
 from django.db.models import Avg, Count
@@ -67,10 +67,34 @@ def save_carts_before_logout(sender, request, user, **kwargs):
 # def delete_product_index(sender, instance, **kwargs):
 #     es.delete(index="products", id=instance.id, ignore=[404])
 
+def product_detail_cache_key(product):
+    # Must match product/views.get_cached_product_data.
+    return f"product_detail_v2:{product.sku}:{product.slug}"
+
+
 @receiver([post_save, post_delete], sender=Product)
 def invalidate_category_cache(sender, instance, **kwargs):
-    cache_key = f"product_detail_cache:{instance.sku}:{instance.slug}"
-    cache.delete(cache_key)
+    cache.delete(product_detail_cache_key(instance))
+
+
+@receiver(m2m_changed, sender=Product.available_in_regions.through)
+def invalidate_on_region_change(sender, instance, action, reverse, **kwargs):
+    # The storefront decides "ships to you" from the cached available_in_regions,
+    # and regions are saved with .set() after Product.save(), so post_save
+    # alone would leave the old list cached.
+    if not reverse:
+        if action in ('post_add', 'post_remove', 'post_clear'):
+            cache.delete(product_detail_cache_key(instance))
+        return
+    # Edited from the Country side: instance is a Country. A clear() has to be
+    # caught before the rows go, while we can still see which products had it.
+    if action == 'pre_clear':
+        products = Product.objects.filter(available_in_regions=instance)
+    elif action in ('post_add', 'post_remove'):
+        products = Product.objects.filter(pk__in=kwargs.get('pk_set') or ())
+    else:
+        return
+    cache.delete_many([product_detail_cache_key(p) for p in products.only('sku', 'slug')])
 
 
 @receiver([post_save, post_delete], sender=ProductReview)

@@ -21,6 +21,7 @@ from django.db import transaction
 from userauths.models import Profile
 from order.service import *
 from address.models import Address
+from . import delivery
 from .serializers import AddressSerializer
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,9 @@ class AddressListCreateView(GenericAPIView):
                 if serializer.validated_data.get('status'):
                     Address.objects.filter(user=self.request.user, status=True).update(status=False)
                 serializer.save(user=self.request.user)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            response = Response(serializer.data, status=status.HTTP_201_CREATED)
+            delivery.sync_cookie(response, request, request.user)
+            return response
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class AddressDetailView(RetrieveUpdateDestroyAPIView):
@@ -121,11 +124,13 @@ class AddressDetailView(RetrieveUpdateDestroyAPIView):
         # Wrap response and handle errors
         try:
             response = super().update(request, *args, **kwargs)
-            return Response({
+            response = Response({
                 'status': 'success',
                 'message': 'Address updated successfully.',
                 'data': response.data
             }, status=status.HTTP_200_OK)
+            delivery.sync_cookie(response, request, request.user)
+            return response
         except ValidationError as e:
             logger.error(f"Validation error updating address {self.kwargs['id']}: {e.detail}")
             return Response({
@@ -137,11 +142,13 @@ class AddressDetailView(RetrieveUpdateDestroyAPIView):
     def destroy(self, request, *args, **kwargs):
         try:
             response = super().destroy(request, *args, **kwargs)
-            return Response({
+            response = Response({
                 'status': 'success',
                 'message': 'Address deleted successfully.',
                 'data': None
             }, status=status.HTTP_204_NO_CONTENT)
+            delivery.sync_cookie(response, request, request.user)
+            return response
         except ProtectedError as e:
             logger.error(f"Cannot delete address {self.kwargs['id']} due to associated orders: {e}")
             return Response({
@@ -180,7 +187,9 @@ class MakeDefaultAddressView(APIView):
                 profile.longitude = address.longitude
                 profile.save()
 
-            return Response({"success": True, "message": "Address set as default"}, status=status.HTTP_200_OK)
+            response = Response({"success": True, "message": "Address set as default"}, status=status.HTTP_200_OK)
+            delivery.set_cookie(response, request, delivery.country_code(address.country))
+            return response
 
         except Address.DoesNotExist:
             return Response({"error": "Address not found"}, status=status.HTTP_404_NOT_FOUND)

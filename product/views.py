@@ -22,8 +22,8 @@ from .utils import (
     clear_recently_viewed, remove_recently_viewed, buffer_view_count,
     track_view, _get_redis,
 )
-from .shipping import can_product_ship_to_user
 from .listing import listing_page_size
+from address import delivery
 
 from .review_serializers import PublicReviewSerializer  # noqa: E402
 from .review_views import visible_reviews  # noqa: E402
@@ -219,8 +219,6 @@ class ProductDetailAPIView(APIView):
             stock_quantity = product.get_stock_quantity(variant)
             is_out_of_stock = stock_quantity <= 0
 
-            can_ship, user_region = can_product_ship_to_user(request, product)
-
             variant_data = {}
             if product.variant != "None" and variant:
                 variants = Variants.objects.filter(product=product).select_related(
@@ -286,8 +284,6 @@ class ProductDetailAPIView(APIView):
                 "cart_item_id": cart_data["cart_item_id"],
                 'is_following': is_following,
                 'follower_count': follower_count,
-                "user_region": user_region,
-                "can_ship": can_ship,
                 "is_wishlisted": is_wishlisted,
                 "wishlist_item_id": wishlist_item_id,
                 "active_flash_sale": flash_data,
@@ -375,8 +371,11 @@ class ProductAuthStateAPIView(APIView):
     """
     GET /api/v1/product/<sku>/<slug>/auth-state/?variantid=<id>
 
-    Returns cart status, wishlist status, vendor follow state, and shipping
-    eligibility for the current user — logged-in OR guest.
+    Returns cart status, wishlist status and vendor follow state for the
+    current user — logged-in OR guest — plus, when logged in, `ship_country`.
+    Whether the product ships is worked out by the storefront from the
+    product's available_in_regions and the delivery-country cookie
+    (address/delivery.py), so no location lookup happens here.
 
     Called client-side from the browser (ProductDetail.tsx useEffect) so the
     browser automatically sends its session cookie, allowing Django to read
@@ -417,30 +416,31 @@ class ProductAuthStateAPIView(APIView):
             wishlist_item   = Wishlist.objects.filter(user=request.user, product=product).first()
             is_following    = product.vendor.followers.filter(id=request.user.id).exists()
             follower_count  = product.vendor.followers.count()
-            can_ship, user_region = can_product_ship_to_user(request, product)
 
             from .review_services import eligibility
             review_check = eligibility(request.user, product)
 
-            return Response({
+            response = Response({
                 **cart_data,
                 'is_wishlisted':    wishlist_item is not None,
                 'wishlist_item_id': wishlist_item.id if wishlist_item else None,
                 'is_following':     is_following,
                 'follower_count':   follower_count,
-                'can_ship':         can_ship,
-                'user_region':      user_region,
                 'has_reviewed':     review_check.reason == 'already_reviewed',
                 # Whether to offer the review form: delivered purchase, not yet reviewed.
                 'can_review':       review_check.can_review,
             })
+            # Country of the default address (None: none saved, the page falls
+            # back to geo). Re-syncing the cookie here lets sessions on other
+            # devices catch up with an address changed elsewhere.
+            response.data['ship_country'] = delivery.sync_cookie(response, request, request.user)
+            return response
 
         else:
             # ── Guest: check session cart (browser sends sessionid cookie) ───
             item_key = f"{product.id}_{variant.id if variant else 'none'}"
             guest_cart = request.session.get("guest_cart", {})
             quantity = guest_cart.get(item_key, 0)
-            can_ship, user_region = can_product_ship_to_user(request, product)
 
             return Response({
                 'is_in_cart':       quantity > 0,
@@ -450,8 +450,6 @@ class ProductAuthStateAPIView(APIView):
                 'wishlist_item_id': None,
                 'is_following':     False,
                 'follower_count':   product.vendor.followers.count(),
-                'can_ship':         can_ship,
-                'user_region':      user_region,
             })
 
 

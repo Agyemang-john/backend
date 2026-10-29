@@ -12,7 +12,6 @@ from .views import *
 
 urlpatterns = [
     # Temporary debug endpoint — remove after confirming IP detection works
-    path('debug/ip/', DebugIPView.as_view(), name='debug-ip'),
     path('sliders/', HomeSliderView.as_view(), name='home-sliders'),
     path('banners/', BannersView.as_view(), name='home-banners'),
     path('promo-grid/', PromoGridView.as_view(), name='promo-grid'),

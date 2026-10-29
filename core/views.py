@@ -31,54 +31,10 @@ from order.service import *
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from .service import *
 from decimal import Decimal
-from product.shipping import get_ip_address_from_request, get_user_country_region
 from product.serializers import LightProductSerializer
 
 
 from rest_framework.permissions import IsAdminUser
-
-
-class DebugIPView(APIView):
-    """
-    Temporary debug endpoint to verify IP detection in production.
-    Hit GET /api/debug/ip/ and check what Django sees.
-    REMOVE THIS VIEW once IP geolocation is confirmed working.
-    Staff only: it reveals internal proxy addresses.
-    """
-    permission_classes = [IsAdminUser]
-
-    def get(self, request):
-        ip = get_ip_address_from_request(request)
-        country, region = get_user_country_region(request)
-        return Response({
-            "resolved_ip": ip,
-            "country": str(country),
-            "region": region,
-            "headers": {
-                "REMOTE_ADDR": request.META.get("REMOTE_ADDR"),
-                "HTTP_X_FORWARDED_FOR": request.META.get("HTTP_X_FORWARDED_FOR"),
-                "HTTP_X_REAL_IP": request.META.get("HTTP_X_REAL_IP"),
-                "HTTP_CF_CONNECTING_IP": request.META.get("HTTP_CF_CONNECTING_IP"),
-                "HTTP_X_CLIENT_IP": request.META.get("HTTP_X_CLIENT_IP"),
-            },
-        })
-
-def _apply_currency(products_data: list, currency: str, rates: dict) -> list:
-    """
-    Shared helper — converts price/old_price fields in a list of product dicts
-    and stamps the currency. Always works on a fresh copy so the cached list
-    is never mutated.
-    """
-    exchange_rate = Decimal(str(rates.get(currency, 1)))
-    converted = []
-    for product in products_data:
-        p = dict(product)
-        p["currency"] = currency
-        p["price"] = round(Decimal(str(p["price"])) * exchange_rate, 2)
-        if p.get("old_price"):
-            p["old_price"] = round(Decimal(str(p["old_price"])) * exchange_rate, 2)
-        converted.append(p)
-    return converted
 
 
 class HomeSliderView(APIView):

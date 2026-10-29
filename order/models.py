@@ -142,22 +142,30 @@ class Cart(models.Model):
         Deletes cart items if the user's address region is not in the available regions for any product.
         Returns a list of deleted items for frontend notification.
         """
-        user_region = user_profile.country
+        from address.delivery import country_code
+
+        user_region = getattr(user_profile, 'country', None)
+        # Same rule the storefront shows on the product page: compare ISO codes,
+        # whether the address stores the country's name or its code.
+        code = country_code(user_region)
         deleted_items = []
+        if code is None:
+            # No address (or an unknown country) yet: nothing to check against.
+            return deleted_items
 
-        # Go through each cart item and check the product's available regions
-        for item in self.cart_items.all():
+        items = self.cart_items.select_related('product').prefetch_related('product__available_in_regions')
+        for item in items:
             product = item.product
-
-            # Check if the product has available regions
-            if product.available_in_regions.exists():
-                # If the user's region is not in the product's available regions, mark for deletion
-                if not product.available_in_regions.filter(Q(name__iexact=user_region) | Q(name__icontains=user_region)).exists():
-                    deleted_items.append({
-                        'product_title': product.title,
-                        'region': user_region
-                    })
-                    item.delete() 
+            if product is None:
+                continue
+            allowed = {c.code.upper() for c in product.available_in_regions.all() if c.code}
+            # No regions set means the product ships everywhere.
+            if allowed and code not in allowed:
+                deleted_items.append({
+                    'product_title': product.title,
+                    'region': user_region
+                })
+                item.delete()
 
         return deleted_items
                 
