@@ -500,6 +500,16 @@ class OrderProduct(models.Model):
     sourcing_min_days = models.PositiveSmallIntegerField(default=0)
     sourcing_max_days = models.PositiveSmallIntegerField(default=0)
     sourcing_updated_at = models.DateTimeField(null=True, blank=True)
+    # When each step was reported, so the seller and buyer see real dates.
+    sourcing_ordered_at = models.DateTimeField(null=True, blank=True)
+    sourcing_in_transit_at = models.DateTimeField(null=True, blank=True)
+    sourcing_arrived_at = models.DateTimeField(null=True, blank=True)
+    # The supplier's own arrival date and tracking number, for the seller only.
+    supplier_eta = models.DateField(null=True, blank=True)
+    supplier_tracking = models.CharField(max_length=120, blank=True, default='')
+    # Worst state ('due_soon' / 'overdue' / 'late') the store was emailed about
+    # for the current step; cleared when the step moves on.
+    sourcing_alert_level = models.CharField(max_length=10, blank=True, default='')
     # Latest delivery date promised at checkout (sourcing + courier days).
     promised_by = models.DateField(null=True, blank=True, db_index=True)
     overdue_notified_at = models.DateTimeField(null=True, blank=True)

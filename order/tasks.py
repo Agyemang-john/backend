@@ -100,8 +100,9 @@ def send_order_email_to_customer(self, order_id):
 @shared_task(ignore_result=True)
 def check_sourced_orders():
     """
-    Daily: nudge stores that haven't ordered imported / made-to-order items,
-    and tell buyers when a late one can be cancelled (order/sourcing.py).
+    Daily: send each store a digest of imported / made-to-order items that are
+    late, overdue or due soon (bell daily, email when one gets worse), and tell
+    buyers when a late one can be cancelled (order/sourcing.py).
     """
     from .sourcing import notify_overdue, remind_sellers
     stores = remind_sellers()

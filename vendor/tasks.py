@@ -720,6 +720,37 @@ def send_team_invitation_email(self, invitation_id, raw_token):
 
 
 @shared_task(ignore_result=True)
+def send_sourcing_digest_email(vendor_id, items, summary):
+    """
+    Email the store its imported / made-to-order items that are late, overdue
+    or due soon (order/sourcing.py remind_sellers). `items` is the digest list.
+    """
+    from .models import Vendor
+    try:
+        vendor = Vendor.objects.select_related('user').get(pk=vendor_id)
+        to_email = vendor.email or (vendor.user.email if vendor.user else None)
+        if not to_email:
+            return
+        body = render_to_string('email/vendor-sourcing-digest.html', {
+            'vendor_name': vendor.name,
+            'summary': summary,
+            'items': items,
+            'dashboard_url': f"{getattr(settings, 'SELLER_DASHBOARD_URL', 'https://seller.negromart.com').rstrip('/')}/imported-orders",
+        })
+        email = EmailMessage(
+            subject=f"Imported orders need attention: {summary}",
+            body=body,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to=[to_email],
+        )
+        email.content_subtype = 'html'
+        email.send()
+        logger.info("send_sourcing_digest_email: sent to vendor %s (%s items)", vendor_id, len(items))
+    except Exception as e:
+        logger.error("send_sourcing_digest_email: vendor=%s err=%s", vendor_id, e)
+
+
+@shared_task(ignore_result=True)
 def remind_late_orders():
     """
     Daily: tell each store owner how many orders are past their ship-by date

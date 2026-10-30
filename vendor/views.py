@@ -1817,19 +1817,71 @@ class VendorNotificationPrefsView(APIView):
 
 class OrderSourcingAPIView(APIView):
     """
-    POST /api/v1/vendor/orders/<id>/sourcing/  {"status": "ordered" | "in_transit" | "arrived"}
+    POST /api/v1/vendor/orders/<id>/sourcing/
+      {"status": "ordered" | "in_transit" | "arrived",
+       "supplier_eta": "YYYY-MM-DD" | null, "supplier_tracking": "..."}   (each optional)
     Report progress on this store's imported / made-to-order items in the order
     (order/sourcing.py). The buyer is notified and their order page updates live.
+    The supplier's date and tracking number are for the seller only.
     """
     permission_classes = [IsAuthenticated, IsVerifiedVendor, require_capability(Capability.MANAGE_ORDERS)]
 
     def post(self, request, id):
-        from order.sourcing import SourcingError, advance
+        from order.sourcing import SourcingError, advance, set_supplier_details
         vendor = get_vendor_or_404(request.user)
         order = get_object_or_404(Order, id=id, vendors__in=[vendor])
+        details = {k: request.data[k] for k in ('supplier_eta', 'supplier_tracking') if k in request.data}
+        new_status = request.data.get('status')
+        if not new_status and not details:
+            return Response({"error": "Nothing to update."}, status=status.HTTP_400_BAD_REQUEST)
         try:
             with transaction.atomic():
-                advance(order, vendor, request.data.get('status'))
+                if details:
+                    set_supplier_details(order, vendor, details)
+                if new_status:
+                    advance(order, vendor, new_status)
         except SourcingError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(OrderSerializer(order, context={'vendor': vendor, 'request': request}).data)
+
+
+class SourcedItemsAPIView(APIView):
+    """
+    GET /api/v1/vendor/sourced-items/[?health=late,overdue,due_soon,on_track]
+    Every imported / made-to-order item this store still has to get and ship,
+    most urgent first, with its dates and days left (order/sourcing.py). This
+    is the seller's "Imported orders" page; lines leave it once shipped.
+    """
+    permission_classes = [IsAuthenticated, require_capability(Capability.MANAGE_ORDERS)]
+    LIMIT = 200
+
+    def get(self, request):
+        from order.sourcing import attention, health_counts, line_info
+        from .order_serializers import ProductSerializer as LineProductSerializer
+
+        vendor = get_vendor_or_404(request.user)
+        today = timezone.localdate()
+        rows = attention(vendor, today)
+        counts = health_counts(rows)
+        wanted = {h for h in request.query_params.get('health', '').split(',') if h}
+        if wanted:
+            rows = [r for r in rows if r[2] in wanted]
+
+        items = []
+        for line, dates, _ in rows[:self.LIMIT]:
+            order = line.order
+            variant = line.variant
+            items.append({
+                'id': line.id,
+                'order_id': order.id,
+                'order_number': order.order_number,
+                'customer': (order.address.full_name if order.address else '') or (order.user.email if order.user else ''),
+                'product': LineProductSerializer(line.product, context={'request': request}).data if line.product else None,
+                'variant': ' / '.join(v for v in (
+                    variant.size.name if variant and variant.size else '',
+                    variant.color.name if variant and variant.color else '') if v),
+                'quantity': line.quantity,
+                'amount': line.amount,
+                'sourcing': line_info(line, seller=True, today=today, dates=dates, shipped=False),
+            })
+        return Response({'counts': counts, 'total': sum(counts.values()), 'items': items})

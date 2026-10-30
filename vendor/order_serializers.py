@@ -47,7 +47,7 @@ class OrderProductSerializer(serializers.ModelSerializer):
 
     def get_sourcing(self, obj):
         from order.sourcing import line_info
-        return line_info(obj)
+        return line_info(obj, seller=True)
 
     class Meta:
         model = OrderProduct
@@ -107,6 +107,7 @@ class VendorOrderSerializer(ShipByMixin, serializers.ModelSerializer):
     vendor_delivery_date_range = serializers.SerializerMethodField()
     vendor_delivery_status = serializers.SerializerMethodField()
     vendor_delivery_fee = serializers.SerializerMethodField()
+    imported = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
@@ -123,8 +124,15 @@ class VendorOrderSerializer(ShipByMixin, serializers.ModelSerializer):
             'vendor_delivery_fee',
             'ship_by',
             'is_late',
+            'imported',
         ]
         read_only_fields = ['id', 'order_number', 'date_created', 'grand_total', 'status']
+
+    def get_imported(self, obj):
+        """True when this store has to get one of the items first (order/sourcing.py)."""
+        vendor = self.context.get('vendor')
+        return any(op.sourcing_status and op.product and op.product.vendor_id == getattr(vendor, 'pk', None)
+                   for op in obj.order_products.all())
 
     def get_vendor_delivery_fee(self, obj):
         vendor = self.context.get('vendor')

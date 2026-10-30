@@ -48,6 +48,29 @@ def check_orders_to_ship(vendor):
                           n, '/orders?filter=to_ship')
 
 
+def check_sourced_items(vendor):
+    """Imported / made-to-order items: shown while any are open, so long waits aren't forgotten."""
+    from order.sourcing import attention, health_counts
+    counts = health_counts(attention(vendor))
+    total = sum(counts.values())
+    if not total:
+        return None
+    urgent = counts['late'] + counts['overdue']
+    if urgent:
+        return ActionItem('sourced_overdue', 'critical',
+                          f"{urgent} imported {_plural(urgent, 'item is', 'items are')} behind schedule",
+                          "Order, chase your supplier or ship now, and update the step so the customer knows.",
+                          urgent, '/imported-orders?health=late,overdue')
+    if counts['due_soon']:
+        n = counts['due_soon']
+        return ActionItem('sourced_due_soon', 'warning',
+                          f"{n} imported {_plural(n, 'item has', 'items have')} a deadline in the next few days",
+                          "Check each one so the customer's promised date holds.", n, '/imported-orders?health=due_soon')
+    return ActionItem('sourced_in_progress', 'info',
+                      f"{total} imported {_plural(total, 'item', 'items')} on the way",
+                      "All on schedule. Update each step as it moves.", total, '/imported-orders')
+
+
 def check_returns(vendor):
     from order.models import ReturnRequest
     qs = ReturnRequest.objects.filter(vendor=vendor)
@@ -118,6 +141,7 @@ def check_subscription(vendor):
 CHECKS = [
     (check_late_orders, Capability.MANAGE_ORDERS),
     (check_orders_to_ship, Capability.MANAGE_ORDERS),
+    (check_sourced_items, Capability.MANAGE_ORDERS),
     (check_returns, Capability.MANAGE_ORDERS),
     (check_payout_method, Capability.VIEW_FINANCE),
     (check_rejected_products, Capability.MANAGE_CATALOG),

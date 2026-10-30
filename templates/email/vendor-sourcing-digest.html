@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Imported orders need attention</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #f4f4f4; margin: 0; padding: 0; }
+    .wrapper { max-width: 600px; margin: 30px auto; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,.1); }
+    .header { background: #e65100; padding: 28px 32px; text-align: center; }
+    .header h1 { color: #fff; margin: 0; font-size: 22px; }
+    .body { padding: 32px; color: #333; }
+    .body p { line-height: 1.7; margin: 0 0 16px; }
+    .item { border: 1px solid #eee; border-left: 4px solid #f9a825; border-radius: 6px; padding: 14px 18px; margin: 0 0 12px; }
+    .item.late, .item.overdue { border-left-color: #c62828; }
+    .item .title { font-weight: bold; font-size: 15px; margin: 0 0 4px; }
+    .item .meta { color: #666; font-size: 13px; margin: 0 0 6px; }
+    .item .action { font-size: 14px; margin: 0; }
+    .tag { display: inline-block; font-size: 11px; font-weight: bold; letter-spacing: .04em; padding: 2px 8px; border-radius: 4px; background: #fff8e1; color: #8d6e00; margin-left: 6px; }
+    .tag.late, .tag.overdue { background: #ffebee; color: #c62828; }
+    .cta { text-align: center; margin: 28px 0; }
+    .cta a { background: #1976d2; color: #fff; padding: 14px 32px; border-radius: 6px; text-decoration: none; font-weight: bold; font-size: 16px; display: inline-block; }
+    .footer { background: #f9f9f9; padding: 20px 32px; text-align: center; color: #888; font-size: 13px; border-top: 1px solid #eee; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="header">
+      <h1>Imported orders need attention</h1>
+    </div>
+    <div class="body">
+      <p>Hi <strong>{{ vendor_name }}</strong>,</p>
+      <p>
+        Customers are waiting on items you are getting from your supplier: <strong>{{ summary }}</strong>.
+        Keep each order moving and update its step so the customer can follow along.
+      </p>
+      {% for item in items %}
+      <div class="item {{ item.level }}">
+        <p class="title">
+          {{ item.item }}
+          {% if item.level == 'late' %}<span class="tag late">LATE</span>
+          {% elif item.level == 'overdue' %}<span class="tag overdue">OVERDUE</span>
+          {% elif item.level == 'due_soon' %}<span class="tag">DUE SOON</span>{% endif %}
+        </p>
+        <p class="meta">
+          Order #{{ item.order_number }}{% if item.promised_by %} · promised to the customer by {{ item.promised_by }}{% endif %}{% if item.days_left is not None and item.days_left >= 0 %} ({{ item.days_left }} day{{ item.days_left|pluralize }} left){% endif %}
+        </p>
+        <p class="action">{{ item.action }} {{ item.when }}.</p>
+      </div>
+      {% endfor %}
+      <div class="cta">
+        <a href="{{ dashboard_url }}">Open imported orders →</a>
+      </div>
+      <p style="font-size:13px; color:#666;">
+        If the customer's date can't be met, message them from the order page. Once the promised
+        date has passed by 3 days they can cancel for a full refund.
+      </p>
+    </div>
+    <div class="footer">
+      <p>© Negromart &bull; <a href="mailto:support@negromart.com">support@negromart.com</a></p>
+    </div>
+  </div>
+</body>
+</html>

@@ -70,8 +70,10 @@ def cleanup_orphaned_files():
         logger.error(f"Failed to list files in storage: {e}")
         return deleted_files, [(None, str(e))]
 
-    # Identify orphaned files
-    orphaned_files = all_files - referenced_files
+    # Identify orphaned files. The WebP copies (core/thumbnails.py) belong to
+    # their original and are never referenced by a model, so never delete them here.
+    orphaned_files = {f for f in all_files - referenced_files
+                      if not f.startswith(('thumbs/', 'media/thumbs/'))}
 
     # Delete orphaned files
     for file in orphaned_files:

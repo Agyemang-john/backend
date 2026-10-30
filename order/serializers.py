@@ -321,7 +321,8 @@ class OrderProductSerializer(serializers.ModelSerializer):
 
     def get_sourcing(self, obj):
         from .sourcing import line_info
-        return line_info(obj)
+        # Seller views pass `vendor`; only they get deadlines and supplier details.
+        return line_info(obj, seller='vendor' in self.context)
 
 class OrderSerializer(serializers.ModelSerializer):
     user = serializers.SerializerMethodField()

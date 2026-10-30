@@ -55,6 +55,7 @@ VERB_META = {
     "subscription_reminder":     {"title": "Subscription Expiring",     "icon": "subscriptions",   "color": "#E65100"},
     # Fulfilment & returns
     "vendor_orders_late":        {"title": "Orders Past Ship-by Date",  "icon": "schedule",        "color": "#C62828"},
+    "vendor_sourcing_due":       {"title": "Imported Orders Need Attention", "icon": "flight_land", "color": "#E65100"},
     "vendor_return_requested":   {"title": "Return Requested",          "icon": "assignment_return", "color": "#E65100"},
     "customer_return_update":    {"title": "Return Update",             "icon": "assignment_return", "color": "#1565C0"},
     # Reviews

@@ -144,3 +144,139 @@ class OrderSideTests(SourcingTestCase):
         self.assertEqual(sourcing.remind_sellers(), 0)
         OrderProduct.objects.filter(pk=self.line.pk).update(date_created=timezone.now() - timedelta(days=4))
         self.assertEqual(sourcing.remind_sellers(), 1)
+
+
+class SellerTimelineTests(SourcingTestCase):
+    """Dated steps, supplier details, deadlines, the Imported orders page and the daily digest."""
+
+    def age(self, days):
+        """Pretend the order was placed `days` ago (promise moves with it)."""
+        then = timezone.now() - timedelta(days=days)
+        type(self.order).objects.filter(pk=self.order.pk).update(date_created=then)
+        OrderProduct.objects.filter(pk=self.line.pk).update(date_created=then)
+        self.line.refresh_from_db()
+        return self.make_sourced()
+
+    def test_skipping_steps_still_dates_each_one(self):
+        self.make_sourced()
+        client = vendor_client(self.owner)
+        res = client.post(f'/api/v1/vendor/orders/{self.order.pk}/sourcing/', {'status': 'arrived'}, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.line.refresh_from_db()
+        self.assertIsNotNone(self.line.sourcing_ordered_at)
+        self.assertIsNotNone(self.line.sourcing_in_transit_at)
+        self.assertIsNotNone(self.line.sourcing_arrived_at)
+        steps = sourcing.line_info(self.line)['steps']
+        self.assertTrue(all(s['date'] for s in steps))
+
+    def test_supplier_details_are_seller_only(self):
+        self.make_sourced(sourcing_status='ordered')
+        eta = (timezone.localdate() + timedelta(days=20)).isoformat()
+        client = vendor_client(self.owner)
+        url = f'/api/v1/vendor/orders/{self.order.pk}/sourcing/'
+        res = client.post(url, {'supplier_eta': eta, 'supplier_tracking': 'LP00123CN'}, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.line.refresh_from_db()
+        self.assertEqual(self.line.supplier_tracking, 'LP00123CN')
+        self.assertEqual(self.line.sourcing_status, 'ordered')  # details alone don't move the step
+
+        seller = sourcing.line_info(self.line, seller=True)
+        self.assertEqual(seller['supplier_eta'], eta)
+        buyer = sourcing.line_info(self.line)
+        self.assertNotIn('supplier_tracking', buyer)
+        self.assertNotIn('deadlines', buyer)
+
+        past = (timezone.localdate() - timedelta(days=2)).isoformat()
+        self.assertEqual(client.post(url, {'supplier_eta': past}, format='json').status_code, 400)
+        self.assertEqual(client.post(url, {}, format='json').status_code, 400)
+
+    def test_health_follows_the_current_step(self):
+        line = self.make_sourced()
+        self.assertEqual(sourcing.health(line), 'on_track')  # fresh order, 3 days to order it
+        line = self.age(4)
+        self.assertEqual(sourcing.health(line), 'overdue')   # still not ordered
+        line = self.age(4)
+        OrderProduct.objects.filter(pk=line.pk).update(sourcing_status='ordered')
+        line.refresh_from_db()
+        self.assertEqual(sourcing.health(line), 'on_track')  # 42-day window just started
+        line = self.age(40)
+        OrderProduct.objects.filter(pk=line.pk).update(sourcing_status='in_transit')
+        line.refresh_from_db()
+        self.assertEqual(sourcing.health(line), 'due_soon')  # should arrive within 2 days
+        line = self.age(50)
+        OrderProduct.objects.filter(pk=line.pk).update(sourcing_status='arrived')
+        line.refresh_from_db()
+        self.assertEqual(sourcing.health(line), 'late')      # past the promise to the buyer
+
+    def test_imported_orders_page(self):
+        self.make_sourced()
+        client = vendor_client(self.owner)
+        res = client.get('/api/v1/vendor/sourced-items/')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(res.data['total'], 1)
+        item = res.data['items'][0]
+        self.assertEqual(item['order_id'], self.order.pk)
+        s = item['sourcing']
+        self.assertEqual(s['health'], 'on_track')
+        self.assertEqual(s['next_action'], 'Order it from your supplier')
+        self.assertEqual(s['day_number'], 1)
+        self.assertEqual(s['total_days'], 47)
+        self.assertEqual(s['days_left'], 47)
+        self.assertEqual(client.get('/api/v1/vendor/sourced-items/?health=late,overdue').data['items'], [])
+
+        # Handed to the courier: off the page.
+        from order.models import Shipment
+        shipment = Shipment.objects.create(order=self.order, vendor=self.vendor, status='in_transit')
+        shipment.items.add(self.line)
+        self.assertEqual(client.get('/api/v1/vendor/sourced-items/').data['total'], 0)
+
+    def test_order_list_flags_imported_orders(self):
+        self.make_sourced()
+        res = vendor_client(self.owner).get('/api/v1/vendor/orders/')
+        self.assertTrue(res.data['results'][0]['imported'])
+
+    def test_action_center_keeps_open_imports_visible(self):
+        from vendor.action_center import check_sourced_items
+        self.make_sourced()
+        self.assertEqual(check_sourced_items(self.vendor).key, 'sourced_in_progress')
+        self.age(4)
+        self.assertEqual(check_sourced_items(self.vendor).key, 'sourced_overdue')
+
+    def test_digest_emails_only_when_things_get_worse(self):
+        with mock.patch('vendor.tasks.send_sourcing_digest_email.delay') as email:
+            self.make_sourced()
+            with self.captureOnCommitCallbacks(execute=True):
+                self.assertEqual(sourcing.remind_sellers(), 0)  # nothing needs action
+            self.age(4)
+            with self.captureOnCommitCallbacks(execute=True):
+                self.assertEqual(sourcing.remind_sellers(), 1)
+            self.assertEqual(email.call_count, 1)
+            self.assertEqual(email.call_args.args[1][0]['level'], 'overdue')
+
+            # Next day, same state: bell again, no second email.
+            with self.captureOnCommitCallbacks(execute=True):
+                self.assertEqual(sourcing.remind_sellers(), 1)
+            self.assertEqual(email.call_count, 1)
+
+            # It slips past the promise: email again.
+            self.age(50)
+            with self.captureOnCommitCallbacks(execute=True):
+                sourcing.remind_sellers()
+            self.assertEqual(email.call_count, 2)
+
+            # Seller moves it on: the alert resets for the new step.
+            client = vendor_client(self.owner)
+            client.post(f'/api/v1/vendor/orders/{self.order.pk}/sourcing/', {'status': 'ordered'}, format='json')
+            self.line.refresh_from_db()
+            self.assertEqual(self.line.sourcing_alert_level, '')
+
+    def test_digest_email_renders(self):
+        from django.core import mail
+        from vendor.tasks import send_sourcing_digest_email
+        send_sourcing_digest_email(self.vendor.pk, [{
+            'order_number': 'NM1', 'order_id': 1, 'item': 'Drone', 'action': 'Order it from your supplier',
+            'when': 'was due Oct 06 (2 days ago)', 'level': 'overdue', 'promised_by': '2026-11-20', 'days_left': 21,
+        }], '1 overdue')
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn('Drone', mail.outbox[0].body)
+        self.assertIn('/imported-orders', mail.outbox[0].body)

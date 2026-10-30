@@ -117,6 +117,7 @@ class Notification(models.Model):
 
         # ── Fulfilment & returns ──
         ("vendor_orders_late",        "Orders Past Ship-by Date"),
+        ("vendor_sourcing_due",       "Imported Orders Need Attention"),
         ("vendor_return_requested",   "Return Requested"),
         ("customer_return_update",    "Return Update"),
 
