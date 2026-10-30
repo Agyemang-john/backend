@@ -185,12 +185,9 @@ if ENV == 'production':
     # Static and media files in Spaces
     STORAGES = {
         "default": {
-            # Also writes small WebP copies for the storefront (core/thumbnails.py).
-            "BACKEND": "core.thumbnails.MediaStorage",
+            "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
             "OPTIONS": {
                 "location": "media",  # Media files in media/ directory
-                # Upload names are unique and never change in place: cache a year.
-                "object_parameters": {"CacheControl": "public, max-age=31536000, immutable"},
             },
         },
         "staticfiles": {
