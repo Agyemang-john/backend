@@ -257,12 +257,13 @@ def sponsored_products(placement, query=None, sub_category_id=None, exclude_ids=
 
 def sponsored(request, placement, **kwargs):
     """Sponsored rows in the listing-grid shape (products_with_details + 'sponsored' and 'ad_token')."""
-    from product.serializers import ProductListSerializer
+    from product.cards import listing_rows
     try:
-        return [{'product': ProductListSerializer(p, context={'request': request}).data,
-                 'average_rating': p.avg_rating, 'review_count': p.review_count, 'colors': [],
-                 'sponsored': True, 'ad_token': token}
-                for p, token in sponsored_products(placement, **kwargs)]
+        won = sponsored_products(placement, **kwargs)
+        rows = listing_rows([p for p, _ in won], request)
+        for row, (_, token) in zip(rows, won):
+            row['sponsored'], row['ad_token'] = True, token
+        return rows
     except Exception:  # noqa: BLE001
         logger.exception("sponsored rows failed for %s", placement)
         return []

@@ -17,6 +17,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from product.cards import card_extras
 from product.models import Product
 
 from . import serving
@@ -93,8 +94,10 @@ def _sponsored_deals(request, currency, flash_end):
         'request': request, 'reasons': {}, 'deal_scores': deal_scores,
         'flash_end': flash_end, 'include_debug': False,
     }).data
-    for card, (_, token) in zip(cards, won):
+    extras = card_extras(products)
+    for card, (p, token) in zip(cards, won):
         card['sponsored'], card['ad_token'] = True, token
+        card['card'] = extras.get(p.pk) or {}
     return apply_currency(cards, currency)
 
 
@@ -134,6 +137,10 @@ class DealsPageAPIView(APIView):
             'request': request, 'reasons': {}, 'deal_scores': deal_scores,
             'flash_end': data['flash_end'], 'include_debug': False,
         }).data
+
+        extras = card_extras(products)     # swatches, sizes, delivery, badge (product/cards.py)
+        for card in cards:
+            card['card'] = extras.get(card['id']) or {}
 
         to_currency = float(rate)
         collection = data['collection']

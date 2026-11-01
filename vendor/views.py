@@ -1019,6 +1019,7 @@ class VendorProductsView(APIView):
             rows = products.order_by(*self.SORTS[sort]).only(*self.CARD_FIELDS)[offset:offset + page_size]
 
             payload = {
+                'vendor_id': vendor_id,
                 'total': total,
                 'page': page,
                 'total_pages': total_pages,
@@ -1041,6 +1042,12 @@ class VendorProductsView(APIView):
             }
             cache.set(cache_key, payload, self.PAGE_TTL)
 
+        from ads import services as ad_services
+        from product.cards import card_extras
+
+        # Swatches, sizes, delivery and badge (product/cards.py) are cached per product,
+        # so they stay fresh even while this page sits in cache.
+        extras = card_extras([card['id'] for card in payload['results']])
         results = []
         for card in payload['results']:
             row = dict(card)
@@ -1049,9 +1056,14 @@ class VendorProductsView(APIView):
             row['old_price'] = round(card['old_price'] * rate, 2) if card['old_price'] else None
             if row['image']:
                 row['image'] = request.build_absolute_uri(row['image'])
+            row['card'] = extras.get(card['id']) or {}
             results.append(row)
 
-        return Response({**payload, 'currency': currency, 'results': results})
+        vendor_id = payload.get('vendor_id')
+        # This store's own sponsored products, first page only (ads/).
+        sponsored = ad_services.sponsored(request, 'seller', scope=Q(vendor_id=vendor_id), scope_key=str(vendor_id))             if vendor_id and payload['page'] == 1 else []
+        public = {k: v for k, v in payload.items() if k != 'vendor_id'}
+        return Response({**public, 'currency': currency, 'results': results, 'sponsored': sponsored})
 
     def _categories(self, slug, vendor_id):
         """Sub-categories this seller lists in, with counts — the category filter's options."""

@@ -26,6 +26,7 @@ from .utils import (
     track_view, _get_redis,
 )
 from .listing import listing_page_size
+from .cards import listing_rows
 from address import delivery
 
 from .review_serializers import PublicReviewSerializer  # noqa: E402
@@ -564,16 +565,7 @@ class CategoryProductListView(APIView):
         # One card per item: only each CatalogItem's featured offer (catalog/buybox.py).
         base_qs = Product.published.filter(
             sub_category=category, is_buybox_winner=True,
-        ).select_related('brand', 'vendor', 'sub_category').prefetch_related(
-            Prefetch(
-                'variants',
-                queryset=Variants.objects.select_related('color', 'size').only(
-                    'id', 'product_id', 'price',
-                    'color__id', 'color__name', 'color__code',
-                    'size__id', 'size__name', 'quantity',
-                )
-            )
-        )
+        ).select_related('brand', 'vendor', 'sub_category')
 
         # ── Apply filters (subquery for variants — no JOIN/DISTINCT) ───────────
         filtered_qs = base_qs
@@ -620,23 +612,7 @@ class CategoryProductListView(APIView):
         paged_products = list(filtered_qs[(page - 1) * PAGE_SIZE: page * PAGE_SIZE])
 
         # ── Serialize (lightweight — no reviews, no recursive VariantSerializer) ─
-        products_with_details = []
-        for product in paged_products:
-            variants = list(product.variants.all())
-            color_map = {}
-            for v in variants:
-                if v.color and v.color.id not in color_map:
-                    color_map[v.color.id] = {
-                        'id': v.id,
-                        'color__name': v.color.name,
-                        'color__code': v.color.code,
-                    }
-            products_with_details.append({
-                'product': ProductListSerializer(product, context={'request': request}).data,
-                'average_rating': product.avg_rating,
-                'review_count': product.review_count,
-                'colors': list(color_map.values()),
-            })
+        products_with_details = listing_rows(paged_products, request)
 
         # Counts reflect the other filters too, so the cache key carries them
         # (minus paging/sorting, which don't change counts).
@@ -737,16 +713,7 @@ class BrandProductListView(APIView):
         # ── Base queryset (uses stored avg_rating — no Avg JOIN) ───────────────
         base_qs = Product.published.filter(
             brand=brand, is_buybox_winner=True,
-        ).select_related("vendor", "brand", "sub_category").prefetch_related(
-            Prefetch(
-                'variants',
-                queryset=Variants.objects.select_related('color', 'size').only(
-                    'id', 'product_id', 'price',
-                    'color__id', 'color__name', 'color__code',
-                    'size__id', 'size__name', 'quantity',
-                )
-            )
-        )
+        ).select_related("vendor", "brand", "sub_category")
 
         # ── Unfiltered price range for slider bounds (cached 1 h) ─────────────
         price_range_key = f"brand_price_range:{slug}"
@@ -798,23 +765,7 @@ class BrandProductListView(APIView):
         paged_products = list(filtered_qs[(page - 1) * PAGE_SIZE: page * PAGE_SIZE])
 
         # ── Serialize (lightweight) ────────────────────────────────────────────
-        products_with_details = []
-        for product in paged_products:
-            variants = list(product.variants.all())
-            color_map = {}
-            for v in variants:
-                if v.color and v.color.id not in color_map:
-                    color_map[v.color.id] = {
-                        'id': v.id,
-                        'color__name': v.color.name,
-                        'color__code': v.color.code,
-                    }
-            products_with_details.append({
-                "product": ProductListSerializer(product, context={"request": request}).data,
-                "average_rating": product.avg_rating,
-                "review_count": product.review_count,
-                "colors": list(color_map.values()),
-            })
+        products_with_details = listing_rows(paged_products, request)
 
         # ── Sidebar filter options (cached 1 h, from unfiltered base) ──────────
         brand_filter_cache_key = f"brand_filters:{slug}"
@@ -905,16 +856,7 @@ class ProductSearchAPIView(APIView):
             .filter(search_vector=search_query, is_buybox_winner=True)
             .annotate(rank=SearchRank('search_vector', search_query))
             .select_related("brand", "vendor", "sub_category")
-            .prefetch_related(
-                Prefetch(
-                    'variants',
-                    queryset=Variants.objects.select_related('color', 'size').only(
-                        'id', 'product_id', 'price',
-                        'color__id', 'color__name', 'color__code',
-                        'size__id', 'size__name', 'quantity',
-                    )
-                )
-            )
+            
         )
 
         # ── Unfiltered price range + filter options (cached 10 min per query) ──
@@ -992,23 +934,7 @@ class ProductSearchAPIView(APIView):
         paged_products = list(filtered_qs[(page - 1) * PAGE_SIZE: page * PAGE_SIZE])
 
         # ── Serialize (lightweight) ────────────────────────────────────────────
-        products_with_details = []
-        for product in paged_products:
-            variants = list(product.variants.all())
-            color_map = {}
-            for v in variants:
-                if v.color and v.color.id not in color_map:
-                    color_map[v.color.id] = {
-                        'id': v.id,
-                        'color__name': v.color.name,
-                        'color__code': v.color.code,
-                    }
-            products_with_details.append({
-                'product': ProductListSerializer(product, context={'request': request}).data,
-                'average_rating': product.avg_rating,
-                'review_count': product.review_count,
-                'colors': list(color_map.values()),
-            })
+        products_with_details = listing_rows(paged_products, request)
 
         def build_url(page_num):
             if page_num < 1 or page_num > total_pages or total_items == 0:
@@ -1214,20 +1140,9 @@ class CollectionAPIView(APIView):
         country = storefront_country(request)
         base_qs = available_in(collection.get_products_qs(), country).select_related(
             'vendor', 'brand', 'sub_category'
-        ).prefetch_related(
-            Prefetch(
-                'variants',
-                queryset=Variants.objects.select_related('color', 'size').only(
-                    'id', 'product_id', 'color__id', 'color__name', 'color__code',
-                    'size__id', 'size__name', 'quantity', 'price',
-                )
-            )
-        ).only(
-            'id', 'title', 'slug', 'sku', 'image', 'price', 'old_price',
-            'brand__id', 'brand__title', 'brand__slug',
-            'vendor__id', 'vendor__name',
-            'sub_category__id', 'sub_category__title',
         )
+        # No .only(): the card serializer reads ~15 columns, and each deferred one
+        # is a query per product.
 
         filtered = base_qs
 
@@ -1262,23 +1177,7 @@ class CollectionAPIView(APIView):
         page = max(1, min(page, total_pages))
         paged = list(filtered[(page - 1) * PAGE_SIZE: page * PAGE_SIZE])
 
-        products_with_details = []
-        for product in paged:
-            variants = list(product.variants.all())
-            color_map = {}
-            for v in variants:
-                if v.color and v.color.id not in color_map:
-                    color_map[v.color.id] = {
-                        'color__name': v.color.name,
-                        'color__code': v.color.code,
-                        'id': v.id,
-                    }
-            products_with_details.append({
-                'product': ProductListSerializer(product, context={'request': request}).data,
-                'average_rating': product.avg_rating,
-                'review_count': product.review_count,
-                'colors': list(color_map.values()),
-            })
+        products_with_details = listing_rows(paged, request)
 
         # Sidebar filter options from the unfiltered base
         # Per country (the product set differs) and per curation (auto collections change overnight).

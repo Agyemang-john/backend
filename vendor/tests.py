@@ -89,17 +89,30 @@ class SellerStoreProductsTests(TestCase):
         self.assertEqual(self.get(page=99)['page'], 1)
 
     def test_query_count_does_not_grow_with_products(self):
+        def cold_count(**params):
+            cache.clear()
+            cache.set('exchange_rates', {'GHS': 1.0, 'USD': float(USD_RATE)}, 3600)
+            with CaptureQueriesContext(connection) as queries:
+                self.get(**params)
+            return len(queries)
+
+        # 5 cards vs 25 cards, nothing cached: the same queries either way —
+        # vendor id + count + page + category facets, the card details for the
+        # whole page (product/cards.py) and the store's sponsored slot (ads/).
+        few, many = cold_count(category=self.shoes.slug), cold_count()
+        self.assertEqual(few, many)
+        self.assertLessEqual(many, 10)
+        # Page and card caches warm: just the sponsored-slot check is left.
         with CaptureQueriesContext(connection) as queries:
             self.get()
-        # vendor id + count + page + category facets
-        self.assertLessEqual(len(queries), 4)
+        self.assertLessEqual(len(queries), 3)
 
     def test_card_fields(self):
         card = self.get()['results'][0]
         self.assertEqual(
             set(card),
             {'id', 'title', 'slug', 'sku', 'image', 'price', 'old_price',
-             'average_rating', 'review_count', 'currency'},
+             'average_rating', 'review_count', 'currency', 'card'},
         )
 
     def test_prices_are_converted_to_the_requested_currency(self):

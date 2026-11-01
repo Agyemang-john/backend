@@ -131,3 +131,20 @@ def sync_review_media_flag(sender, instance, **kwargs):
     product_id = ProductReview.objects.filter(pk=instance.review_id).values_list('product_id', flat=True).first()
     if product_id:
         cache.delete(summary_cache_key(product_id))
+
+
+# ── Storefront cards (product/cards.py) ──────────────────────────────────────
+# Cards are cached per product for a few minutes; drop one as soon as what it
+# shows changes (swatches, sizes, stock badge, delivery days, flash-sale label).
+from product.models import FlashSale, ProductDeliveryOption, Variants  # noqa: E402
+
+
+@receiver([post_save, post_delete], sender=Product)
+@receiver([post_save, post_delete], sender=Variants)
+@receiver([post_save, post_delete], sender=ProductDeliveryOption)
+@receiver([post_save, post_delete], sender=FlashSale)
+def forget_product_card(sender, instance, **kwargs):
+    from product.cards import forget
+    product_id = instance.pk if sender is Product else getattr(instance, 'product_id', None)
+    if product_id:
+        forget(product_id)
