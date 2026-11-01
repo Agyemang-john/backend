@@ -1133,6 +1133,7 @@ JAZZMIN_SETTINGS = {
         {"name": "Dashboard", "url": "admin:index"},
         {"name": "Orders", "url": "admin:order_order_changelist"},
         {"name": "View store", "url": SITE_URL, "new_window": True},
+        {"name": "Two-step verification", "url": "/dashboard/negromart/2fa/recovery/"},
     ],
     # Day-to-day apps first, plumbing last.
     "order_with_respect_to": [

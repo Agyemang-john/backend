@@ -391,6 +391,7 @@ class PaymentTransaction(models.Model):
         ('renewal', 'Auto Renewal'),
         ('upgrade', 'Plan Upgrade'),
         ('manual', 'Manual Payment'),
+        ('ads', 'Sponsored products'),
     ]
 
     vendor = models.ForeignKey(Vendor, on_delete=models.SET_NULL, null=True, blank=True, related_name='transactions')

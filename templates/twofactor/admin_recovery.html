@@ -1,0 +1,14 @@
+{% extends "twofactor/admin_base.html" %}
+{% block title %}Recovery codes{% endblock %}
+{% block card %}
+  <h2 style="margin-top:0">Recovery codes</h2>
+  <p>You have <b>{{ left }}</b> unused recovery code{{ left|pluralize }}. For security they are stored scrambled and
+     can't be shown again. Make a new set below: the old ones stop working.</p>
+  {% if error %}<p style="color:#c62828">{{ error }}</p>{% endif %}
+  <form method="post">{% csrf_token %}
+    <label>Current code from your authenticator app</label>
+    <input name="code" autocomplete="one-time-code" inputmode="numeric" required
+           style="font-size:22px;letter-spacing:4px;width:100%;padding:8px;margin:8px 0">
+    <button type="submit" class="button default" style="width:100%;padding:10px">Make new recovery codes</button>
+  </form>
+{% endblock %}

@@ -25,6 +25,7 @@ urlpatterns = [
     # Before admin.site.urls: staff two-step verification pages (twofactor/admin_views.py).
     path('dashboard/negromart/2fa/', twofactor_admin.verify_view, name='twofactor-admin-verify'),
     path('dashboard/negromart/2fa/setup/', twofactor_admin.setup_view, name='twofactor-admin-setup'),
+    path('dashboard/negromart/2fa/recovery/', twofactor_admin.recovery_view, name='twofactor-admin-recovery'),
     path('dashboard/negromart/', admin.site.urls),
     path("api/v1/auth/user/", include("customer.urls")),
     path("api/v1/vendor/", include("vendor.urls")),

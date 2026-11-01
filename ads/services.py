@@ -72,7 +72,11 @@ def funded_vendor_ids():
 
 
 def refresh_funded_vendors():
-    """Stores whose earnings (available + pending) exceed their not-yet-billed ad spend."""
+    """
+    Stores that can pay for clicks: earnings (available + pending) above their
+    not-yet-billed spend, or a saved card that nightly billing charges for any
+    shortfall (ads/billing.py) — so new stores without earnings can advertise.
+    """
     from payments.ledger_models import LedgerEntry
     vendor_ids = set(AdCampaign.objects.filter(status=AdCampaign.ACTIVE).values_list('vendor_id', flat=True))
     if not vendor_ids:
@@ -83,7 +87,10 @@ def refresh_funded_vendors():
     unbilled = dict(AdDailyStat.objects.filter(campaign__vendor_id__in=vendor_ids, billed=False)
                     .values_list('campaign__vendor_id').annotate(s=Sum('spend')))
     credit = Decimal(str(getattr(settings, 'ADS_CREDIT_LIMIT', '0')))
-    funded = {v for v in vendor_ids if (balances.get(v) or 0) - (unbilled.get(v) or 0) + credit > 0}
+    from .billing import card_paused, vendors_with_cards
+    funded = {v for v in vendor_ids
+              if (balances.get(v) or 0) - (unbilled.get(v) or 0) + credit > 0 and not card_paused(v)}
+    funded |= vendors_with_cards(vendor_ids - funded)
     cache.set(FUNDED_KEY, funded, 600)
     return funded
 
@@ -339,7 +346,7 @@ def bill_spend(today=None):
     today = today or timezone.localdate()
     rows = (AdDailyStat.objects.filter(billed=False, date__lt=today, spend__gt=0)
             .values_list('campaign__vendor_id', 'date').annotate(total=Sum('spend')))
-    posted = 0
+    posted, billed_vendors = 0, set()
     for vendor_id, day, total in rows:
         with transaction.atomic():
             stats = AdDailyStat.objects.select_for_update().filter(campaign__vendor_id=vendor_id, date=day, billed=False)
@@ -350,7 +357,15 @@ def bill_spend(today=None):
                                        description=f"Sponsored products, {day:%d %b %Y}", available_at=timezone.now())
             stats.update(billed=True)
             posted += 1
+            billed_vendors.add(vendor_id)
     AdDailyStat.objects.filter(billed=False, date__lt=today, spend=0).update(billed=True)
+    # Earnings didn't cover it: charge the saved card for the difference.
+    from vendor.models import Vendor
+
+    from .billing import settle_with_card
+    for vendor in Vendor.objects.filter(pk__in=billed_vendors).select_related('user'):
+        settle_with_card(vendor)
+    refresh_funded_vendors()
     return posted
 
 

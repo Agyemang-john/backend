@@ -31,6 +31,8 @@ class SellerTwoFactorView(APIView):
             if action == 'confirm':
                 codes = services.confirm(request.user, request.data.get('code'))
                 return Response({'enabled': True, 'recovery_codes': codes})
+            if action == 'recovery':
+                return Response({'recovery_codes': services.regenerate_recovery(request.user, request.data.get('code'))})
             if action == 'disable':
                 services.disable(request.user, request.data.get('code'))
                 return Response({'enabled': False})

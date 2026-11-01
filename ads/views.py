@@ -14,6 +14,7 @@ from product.models import Product
 from vendor.access import Capability, get_current_vendor, require_capability
 
 from . import services
+from .billing import card_paused, saved_card
 from .models import AdCampaign, AdCampaignProduct, AdDailyStat, AdKeyword
 
 MAX_PRODUCTS = 50
@@ -94,6 +95,8 @@ class SellerCampaignsView(APIView):
                         for c in campaigns],
             'reserve_cpc': services.RESERVE_CPC,
             'funded': vendor.pk in services.refresh_funded_vendors() if campaigns else True,
+            'has_card': bool(saved_card(vendor.pk)),
+            'card_paused': card_paused(vendor.pk),
         })
 
     def post(self, request):

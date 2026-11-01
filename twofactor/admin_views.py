@@ -84,3 +84,19 @@ def setup_view(request):
     else:
         secret, uri, qr = services.start_setup(request.user)
     return render(request, 'twofactor/admin_setup.html', {'secret': secret, 'qr': qr, 'error': error, 'next': _next(request)})
+
+
+@staff_required
+def recovery_view(request):
+    """Staff: get a fresh set of recovery codes (old ones stop working)."""
+    if not services.is_enabled(request.user):
+        return redirect(reverse('twofactor-admin-setup'))
+    error = ''
+    if request.method == 'POST':
+        try:
+            codes = services.regenerate_recovery(request.user, request.POST.get('code', ''))
+            return render(request, 'twofactor/admin_codes.html', {'codes': codes, 'next': ADMIN_PREFIX})
+        except services.TwoFactorError as exc:
+            error = str(exc)
+    return render(request, 'twofactor/admin_recovery.html',
+                  {'error': error, 'left': services.recovery_left(request.user)})

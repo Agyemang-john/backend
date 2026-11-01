@@ -147,3 +147,79 @@ class AdsTests(TestCase):
         res = api.patch(f'/api/v1/ads/seller/campaigns/{cid}/', {'status': 'paused'}, format='json')
         self.assertEqual(res.data['status'], 'paused')
         self.assertEqual(api.get(f'/api/v1/ads/seller/campaigns/{cid}/').status_code, 200)
+
+
+@override_settings(**TEST_SETTINGS)
+class NewStoreEndToEndTests(TestCase):
+    """A store with no earnings yet, exactly as in production: it can only advertise with a saved card."""
+
+    def setUp(self):
+        AdsTests.setUp(self)
+        LedgerEntry.objects.all().delete()          # brand-new stores: nothing earned yet
+        from django.core.cache import cache
+        cache.delete(services.FUNDED_KEY)
+        self.api = APIClient()
+        self.api.cookies['vendor_access'] = str(CustomVendorRefreshToken.for_user(self.owners[0]).access_token)
+        self.api.credentials(HTTP_X_USER_TYPE='vendor')
+
+    def create_campaign(self):
+        res = self.api.post('/api/v1/ads/seller/campaigns/', {
+            'name': 'Launch', 'bid': '1.00', 'daily_budget': '20', 'products': [self.products[0].pk]}, format='json')
+        self.assertEqual(res.status_code, 201, res.content)
+        from django.core.cache import cache
+        cache.delete(services.FUNDED_KEY)
+
+    def search(self):
+        return APIClient().get('/api/v1/product/search/', {'q': 'galaxy'}).data
+
+    def test_no_card_no_earnings_is_explained(self):
+        self.create_campaign()
+        self.assertEqual(self.search()['sponsored'], [])
+        page = self.api.get('/api/v1/ads/seller/campaigns/').data
+        self.assertEqual((page['funded'], page['has_card']), (False, False))
+
+    def test_saved_card_store_is_served_first_and_card_pays(self):
+        from payments.models import PaystackAuthorization, PaystackCustomer
+        cust = PaystackCustomer.objects.create(vendor=self.shops[0], customer_code='CUS_x', email='ads-shop0@example.com') \
+            if 'vendor' in [f.name for f in PaystackCustomer._meta.fields] else None
+        PaystackAuthorization.objects.create(vendor=self.shops[0], paystack_customer=cust, authorization_code='AUTH_x',
+                                             card_type='visa', last4='4081', exp_month='12', exp_year='2030',
+                                             is_reusable=True, is_default=True)
+        self.create_campaign()
+
+        data = self.search()
+        self.assertEqual(len(data['sponsored']), 1, data.get('sponsored'))
+        ad = data['sponsored'][0]
+        self.assertTrue(ad['sponsored'])
+        self.assertEqual(ad['product']['id'], self.products[0].pk)
+
+        shopper = APIClient()
+        shopper.force_authenticate(make_user(7))
+        self.assertEqual(shopper.post('/api/v1/ads/click/', {'token': ad['ad_token']}, format='json').status_code, 200)
+        self.assertEqual(AdDailyStat.objects.get().clicks, 1)
+        # A day's worth of clicks, billed the next night.
+        AdDailyStat.objects.update(date=timezone.localdate() - timedelta(days=1), spend=Decimal('5.00'))
+
+        ok = mock.Mock()
+        ok.json.return_value = {'data': {'status': 'success', 'id': 99}}
+        with mock.patch('requests.post', return_value=ok) as post:
+            self.assertEqual(services.bill_spend(), 1)
+        self.assertEqual(post.call_args.kwargs['json']['amount'], 500)      # GHS 5.00 in pesewas
+        from ads.billing import balance
+        self.assertEqual(balance(self.shops[0].pk), Decimal('0.00'), "card covered the spend")
+
+    def test_declined_card_pauses_ads(self):
+        from payments.models import PaystackAuthorization, PaystackCustomer
+        cust = PaystackCustomer.objects.create(vendor=self.shops[0], customer_code='CUS_y', email='ads-shop0@example.com') \
+            if 'vendor' in [f.name for f in PaystackCustomer._meta.fields] else None
+        PaystackAuthorization.objects.create(vendor=self.shops[0], paystack_customer=cust, authorization_code='AUTH_y',
+                                             card_type='visa', last4='0000', exp_month='12', exp_year='2030', is_reusable=True)
+        c = AdCampaign.objects.create(vendor=self.shops[0], name='C', bid=Decimal('1'), daily_budget=Decimal('20'),
+                                      start_date=timezone.localdate())
+        AdDailyStat.objects.create(campaign=c, product=self.products[0], date=timezone.localdate() - timedelta(days=1),
+                                   clicks=3, spend=Decimal('3.00'))
+        bad = mock.Mock()
+        bad.json.return_value = {'data': {'status': 'failed', 'gateway_response': 'Insufficient funds'}}
+        with mock.patch('requests.post', return_value=bad):
+            services.bill_spend()
+        self.assertNotIn(self.shops[0].pk, services.refresh_funded_vendors())

@@ -144,3 +144,22 @@ def recovery_left(user):
 def _security_event(user, what):
     import logging
     logging.getLogger('security').info("2fa %s for user %s", what, user.pk)
+
+
+@transaction.atomic
+def regenerate_recovery(user, code):
+    """New set of recovery codes (old ones stop working). Needs a current authenticator code."""
+    if not verify(user, code):
+        raise TwoFactorError("That code didn't match.")
+    device = TOTPDevice.objects.select_for_update().get(user=user)
+    codes = [f"{secrets.token_hex(2)}-{secrets.token_hex(2)}".upper() for _ in range(RECOVERY_CODES)]
+    device.recovery_hashes = [_hash(c) for c in codes]
+    device.save(update_fields=['recovery_hashes'])
+    _security_event(user, 'two_factor_recovery_regenerated')
+    return codes
+
+
+def reset(user):
+    """Remove the authenticator (support/lockout). The user sets it up again on next sign-in."""
+    TOTPDevice.objects.filter(user=user).delete()
+    _security_event(user, 'two_factor_reset')

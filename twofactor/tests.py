@@ -133,3 +133,36 @@ class TwoFactorTests(TestCase):
         shopper = APIClient()
         shopper.credentials(HTTP_AUTHORIZATION=f'Bearer {RefreshToken.for_user(self.user).access_token}')
         self.assertEqual(shopper.post('/api/v1/2fa/', {'action': 'disable', 'code': '123456'}, format='json').status_code, 403)
+
+
+@override_settings(**TEST_SETTINGS)
+class RecoveryAndResetTests(TestCase):
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.user = User.objects.create_user('Rec', 'Over', 'tf9@example.com', '+233257000009', 'Str0ng!Passw0rd')
+        User.objects.filter(pk=self.user.pk).update(is_active=True, is_staff=True, is_superuser=True)
+        self.user.refresh_from_db()
+        services.start_setup(self.user)
+        self.old = services.confirm(self.user, code_for(self.user))
+
+    def test_new_codes_replace_old(self):
+        new = services.regenerate_recovery(self.user, code_for(self.user, 30))
+        self.assertFalse(services.verify(self.user, self.old[0]))
+        self.assertTrue(services.verify(self.user, new[0]))
+
+    def test_admin_recovery_page(self):
+        self.client.force_login(self.user)
+        session = self.client.session
+        session['admin_2fa_ok'] = True
+        session.save()
+        page = self.client.get('/dashboard/negromart/2fa/recovery/')
+        self.assertContains(page, '10</b> unused')
+        res = self.client.post('/dashboard/negromart/2fa/recovery/', {'code': code_for(self.user, 30)})
+        self.assertContains(res, 'Save your recovery codes')
+
+    def test_reset_command(self):
+        from django.core.management import call_command
+        call_command('reset_2fa', 'tf9@example.com')
+        self.assertFalse(services.is_enabled(self.user))
