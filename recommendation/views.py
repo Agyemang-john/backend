@@ -407,3 +407,103 @@ class ModelHealthAPIView(APIView):
             },
             'notes': run.notes,
         })
+
+
+class FrequentlyBoughtTogetherAPIView(APIView):
+    """
+    GET /api/v1/recommendations/frequently-bought/<product_id>/
+
+    This product plus up to two complements and their combined price, for the
+    "Frequently bought together" box (serving.frequently_bought_together).
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        from decimal import Decimal
+
+        from .serializers import RecommendedProductSerializer, apply_currency
+
+        product = Product.published.filter(pk=pk).first()
+        if product is None:
+            return Response({'detail': 'Product not found.'}, status=status.HTTP_404_NOT_FOUND)
+        currency = request.headers.get('X-Currency', 'GHS')
+        picks = serving.frequently_bought_together(product.id)
+        if not picks:
+            return Response({'currency': currency, 'items': [], 'total': None})
+        cards = apply_currency(
+            RecommendedProductSerializer([product] + picks, many=True,
+                                         context={'request': request, 'reasons': {}}).data,
+            currency,
+        )
+        # Items sold in sizes/colours can't be added blind: the box links to them instead.
+        kinds = dict(Product.objects.filter(pk__in=[c['id'] for c in cards]).values_list('pk', 'variant'))
+        for c in cards:
+            c['needs_options'] = kinds.get(c['id'], 'None') != 'None'
+        total = sum((Decimal(str(c['price'])) for c in cards if c.get('price') is not None), Decimal('0'))
+        return Response({'currency': currency, 'items': cards, 'total': round(total, 2)})
+
+
+class SellerPinnedComplementsAPIView(APIView):
+    """GET/PUT {"others": [product ids]} — a seller's own "buy it with" picks for one of their products (max 3)."""
+
+    MAX = 3
+
+    def get_permissions(self):
+        from vendor.access import Capability, require_capability
+        return [IsAuthenticated(), require_capability(Capability.MANAGE_CATALOG)()]
+
+    def _product(self, request, pk):
+        from django.shortcuts import get_object_or_404
+
+        from vendor.access import get_current_vendor
+        return get_object_or_404(Product, pk=pk, vendor=get_current_vendor(request.user))
+
+    def get(self, request, pk):
+        from .models import PinnedComplement
+        product = self._product(request, pk)
+        rows = PinnedComplement.objects.filter(product=product).select_related('other')
+        return Response({'others': [{'id': r.other_id, 'title': r.other.title} for r in rows]})
+
+    def put(self, request, pk):
+        from django.core.cache import cache
+        from django.db import transaction
+
+        from .models import PinnedComplement
+        product = self._product(request, pk)
+        raw = request.data.get('others')
+        if not isinstance(raw, list) or len(raw) > self.MAX or not all(isinstance(i, int) for i in raw):
+            return Response({'detail': f'Send up to {self.MAX} product ids.'}, status=status.HTTP_400_BAD_REQUEST)
+        ids = [i for i in dict.fromkeys(raw) if i != product.pk]
+        own = set(Product.objects.filter(pk__in=ids, vendor_id=product.vendor_id).values_list('pk', flat=True))
+        if set(ids) - own:
+            return Response({'detail': 'Pick products from your own store.'}, status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            PinnedComplement.objects.filter(product=product).delete()
+            PinnedComplement.objects.bulk_create([PinnedComplement(product=product, other_id=i, position=n)
+                                                  for n, i in enumerate(ids)])
+        cache.delete(f"rec:fbt:{serving.current_model_version()}:{product.pk}:{serving.FBT_LIMIT}")
+        return self.get(request, pk)
+
+
+class BuyAgainAPIView(APIView):
+    """GET /api/v1/recommendations/buy-again/ — things this shopper bought before and can reorder."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .serializers import RecommendedProductSerializer, apply_currency
+
+        currency = request.headers.get('X-Currency', 'GHS')
+        rows = serving.buy_again(request.user.pk, _limit(request, 60))
+        cards = apply_currency(
+            RecommendedProductSerializer([p for p, _, _ in rows], many=True,
+                                         context={'request': request, 'reasons': {}}).data,
+            currency,
+        )
+        variants = dict(Product.objects.filter(pk__in=[c['id'] for c in cards]).values_list('pk', 'variant'))
+        for card, (_, times, last) in zip(cards, rows):
+            card['times_bought'] = times
+            card['last_bought'] = last
+            card['needs_options'] = variants.get(card['id'], 'None') != 'None'
+        return Response({'currency': currency, 'results': cards})

@@ -70,6 +70,10 @@ class Cart(models.Model):
 
     class Meta:
         ordering = ['-updated_at']
+        indexes = [
+            # Abandoned-cart sweep: signed-in carts idle for a while (engagement/cart_reminders.py).
+            models.Index(fields=['updated_at'], name='cart_updated_idx', condition=models.Q(user__isnull=False)),
+        ]
 
     def __str__(self):
         if self.user and self.user.email:

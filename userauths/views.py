@@ -310,7 +310,7 @@ def _vendor_login_state(request):
         return None, None
     if not user.is_active or getattr(user, 'is_suspended', False) or not user.is_vendor:
         return None, None
-    return user, (data.get('ch') if data.get('ch') in ('email', 'sms') else 'email')
+    return user, (data.get('ch') if data.get('ch') in ('email', 'sms', 'app') else 'email')
 
 
 def _clear_vendor_login_cookie(response):
@@ -341,13 +341,12 @@ class VendorTokenObtainPairView(TokenObtainPairView):
         channel = serializer.validated_data['channel']
 
         identifier = request.data.get('email', '')
-        response = Response(
-            {
-                "detail": "OTP sent. Please verify to continue.",
-                "masked_identifier": _mask_identifier(identifier),
-            },
-            status=200,
-        )
+        if channel == 'app':
+            body = {"detail": "Enter the code from your authenticator app.", "method": "app"}
+        else:
+            body = {"detail": "OTP sent. Please verify to continue.",
+                    "masked_identifier": _mask_identifier(identifier), "method": channel}
+        response = Response(body, status=200)
         _set_vendor_login_cookie(response, user, channel)
         return response
 
@@ -362,17 +361,30 @@ class VendorOTPVerifyView(APIView):
     def post(self, request, *args, **kwargs):
         from .models import OTPRecord
         from .verification import check_code
-        user, _channel = _vendor_login_state(request)
+        user, channel = _vendor_login_state(request)
         if user is None:
             return _session_expired()
         otp = request.data.get("otp")
         if not otp:
             return Response({'detail': 'Enter the code we sent you.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Capped at verification.MAX_ATTEMPTS wrong guesses per code and
-        # consumed atomically on success.
-        result = check_code(user, OTPRecord.PURPOSE_VENDOR_LOGIN, otp)
-        if not result.ok:
+        if channel == 'app':
+            # Authenticator app or a recovery code (twofactor/), throttled there.
+            from twofactor.services import TwoFactorError, verify as totp_verify
+            try:
+                ok = totp_verify(user, otp)
+            except TwoFactorError as exc:
+                return Response({'detail': str(exc), 'reason': 'locked'}, status=status.HTTP_400_BAD_REQUEST)
+            if not ok:
+                _otp_logger.warning("OTP verify: wrong authenticator code for user=%s", user.pk)
+                return Response({'detail': "That code didn't match.", 'reason': 'invalid'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            result = None
+        else:
+            # Capped at verification.MAX_ATTEMPTS wrong guesses per code and
+            # consumed atomically on success.
+            result = check_code(user, OTPRecord.PURPOSE_VENDOR_LOGIN, otp)
+        if result is not None and not result.ok:
             _otp_logger.warning("OTP verify: %s for user=%s", result.reason, user.pk)
             detail = 'Invalid or expired OTP.' if result.reason == 'invalid' else result.message
             return Response({'detail': detail, 'reason': result.reason}, status=status.HTTP_400_BAD_REQUEST)
@@ -484,6 +496,9 @@ class VendorOTPResendView(APIView):
         user, channel = _vendor_login_state(request)
         if user is None:
             return _session_expired()
+        if channel == 'app':
+            return Response({'detail': "Your sign-in code comes from your authenticator app. Lost your phone? "
+                                       "Use one of your recovery codes."}, status=status.HTTP_400_BAD_REQUEST)
 
         recent = _pending(user, OTPRecord.PURPOSE_VENDOR_LOGIN)
         if recent:
@@ -607,6 +622,15 @@ def _get_current_jti(request, cookie_name: str):
         return _RT(token_str).payload.get('jti')
     except Exception:
         return None
+
+
+def _customer_current_jti(request):
+    """The shopper session this request comes from: the web's refresh cookie, else the app token's sid."""
+    jti = _get_current_jti(request, 'refresh')
+    if jti:
+        return jti
+    auth = request.auth
+    return auth.get('sid') if auth is not None and hasattr(auth, 'get') else None
 
 
 def _session_to_dict(session, current_jti) -> dict:
@@ -854,7 +878,7 @@ class CustomerSessionListView(APIView):
 
     def get(self, request):
         from .models import UserSession
-        current_jti = _get_current_jti(request, 'refresh')
+        current_jti = _customer_current_jti(request)
         sessions = UserSession.objects.filter(
             user=request.user, is_vendor_session=False
         ).order_by('-last_activity')
@@ -867,7 +891,7 @@ class CustomerSessionRevokeView(APIView):
 
     def delete(self, request, session_id):
         from .models import UserSession
-        current_jti = _get_current_jti(request, 'refresh')
+        current_jti = _customer_current_jti(request)
         try:
             session = UserSession.objects.get(
                 id=session_id, user=request.user, is_vendor_session=False

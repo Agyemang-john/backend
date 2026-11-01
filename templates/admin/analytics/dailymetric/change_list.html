@@ -1,0 +1,9 @@
+{% extends "admin/change_list.html" %}
+{% block content_title %}
+  <h1>Funnel, last 30 days</h1>
+  <p style="color:#666">Daily unique visitors summed over the period (a visitor on two days counts twice). Step rate = share of the previous step.</p>
+  <table style="margin-bottom:24px">
+    <tr><th>Step</th><th>Visitors</th><th>From previous step</th></tr>
+    {% for s in funnel %}<tr><td>{{ s.name }}</td><td>{{ s.visitors }}</td><td>{{ s.rate }}</td></tr>{% endfor %}
+  </table>
+{% endblock %}

@@ -25,6 +25,7 @@ from .views import (
     CustomerSessionRevokeView,
     CustomerLogoutAllView,
 )
+from .mobile_views import MobileLoginView, MobileTokenRefreshView, MobileLogoutView
 from .seller_signup_views import (
     SellerSignupStartView,
     SellerSignupStateView,
@@ -57,6 +58,11 @@ urlpatterns = [
     path('jwt/refresh/', CustomTokenRefreshView.as_view()),
     path('jwt/verify/', CustomTokenVerifyView.as_view()),
     path('logout/', LogoutView.as_view()),
+
+    # Native app: tokens in the body, never cookies (mobile_views.py)
+    path('mobile/auth/login/', MobileLoginView.as_view(), name='mobile-login'),
+    path('mobile/auth/refresh/', MobileTokenRefreshView.as_view(), name='mobile-refresh'),
+    path('mobile/auth/logout/', MobileLogoutView.as_view(), name='mobile-logout'),
 
     # Customer session management
     path('sessions/', CustomerSessionListView.as_view(), name='customer-sessions'),

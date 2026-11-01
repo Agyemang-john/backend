@@ -1,6 +1,8 @@
 from product.sourcing import filter_fast_delivery
 from django.db import transaction
 from django.shortcuts import get_object_or_404
+from ads import services as ad_services
+from attributes import services as attr_services
 from rest_framework.response import Response
 from .models import *
 from order.models import *
@@ -145,6 +147,8 @@ def get_cached_product_data(sku: str, slug: str, request):
         ).data,
         "average_rating": product.avg_rating,
         "review_count": product.review_count,
+        # Structured specs (attributes/): [{name, slug, value}] for the specs table.
+        "specs": attr_services.specs_for([product.id]).get(product.id, []),
         "delivery_options": ProductDeliveryOptionSerializer(
             ProductDeliveryOption.objects.filter(product=product).select_related('delivery_option', 'product', 'variant'), many=True
         ).data,
@@ -472,7 +476,7 @@ class SearchSuggestionsAPIView(APIView):
         search_query = SearchQuery(query, search_type="plain", config=SEARCH_CONFIG)
 
         suggestions_qs = (
-            Product.published.all()
+            Product.published.filter(is_buybox_winner=True)
             .filter(search_vector=search_query)
             .annotate(rank=SearchRank(F("search_vector"), search_query))
             .select_related("sub_category")
@@ -557,8 +561,9 @@ class CategoryProductListView(APIView):
         max_price_unfiltered = unfiltered_price_range.get('max_price_unfiltered') or Decimal('0')
 
         # ── Base queryset (no annotations — uses stored avg_rating/review_count) ─
+        # One card per item: only each CatalogItem's featured offer (catalog/buybox.py).
         base_qs = Product.published.filter(
-            sub_category=category
+            sub_category=category, is_buybox_winner=True,
         ).select_related('brand', 'vendor', 'sub_category').prefetch_related(
             Prefetch(
                 'variants',
@@ -592,6 +597,12 @@ class CategoryProductListView(APIView):
         if active_ratings:
             filtered_qs = filtered_qs.filter(avg_rating__gte=min(active_ratings))
         filtered_qs = filter_fast_delivery(filtered_qs, request)
+
+        # ── Structured attributes (attributes/): ?a_<slug>=... filters + counts ─
+        attr_defs = attr_services.definitions_for(category)
+        attr_active = attr_services.parse_filters(request.GET, attr_defs)
+        pre_attr_qs = filtered_qs
+        filtered_qs = attr_services.apply_filters(filtered_qs, attr_active)
 
         # 'featured' and any unknown value → trending score (most engaging first)
         filtered_qs = filtered_qs.order_by(_sort_map.get(sort, '-trending_score'))
@@ -627,6 +638,16 @@ class CategoryProductListView(APIView):
                 'colors': list(color_map.values()),
             })
 
+        # Counts reflect the other filters too, so the cache key carries them
+        # (minus paging/sorting, which don't change counts).
+        facet_params = request.GET.copy()
+        for k in ('page', 'sort', 'page_size'):
+            facet_params.pop(k, None)
+        attribute_facets = attr_services.facets(
+            pre_attr_qs.select_related(None).prefetch_related(None), attr_defs, attr_active,
+            cache_key=f"{slug}:{hashlib.md5(facet_params.urlencode().encode()).hexdigest()}",
+        )
+
         # ── Sidebar filter options (cached 1 h, from unfiltered base) ──────────
         filter_cache_key = f"filters:{slug}"
         filter_options = cache.get(filter_cache_key)
@@ -649,8 +670,12 @@ class CategoryProductListView(APIView):
 
         return Response({
             **filter_options,
+            "attributes": attribute_facets,
             "category": SubCategorySerializer(category).data,
             "products_with_details": products_with_details,
+            # Sponsored products (ads/): first page only, shown above the results.
+            "sponsored": ad_services.sponsored(request, 'category', sub_category_id=category.id)
+                         if page == 1 else [],
             "min_price": round((price_range['min_price'] or min_price_unfiltered) * exchange_rate, 2),
             "max_price": round((price_range['max_price'] or max_price_unfiltered) * exchange_rate, 2),
             "min_price_unfiltered": round(min_price_unfiltered * exchange_rate, 2),
@@ -711,7 +736,7 @@ class BrandProductListView(APIView):
 
         # ── Base queryset (uses stored avg_rating — no Avg JOIN) ───────────────
         base_qs = Product.published.filter(
-            brand=brand
+            brand=brand, is_buybox_winner=True,
         ).select_related("vendor", "brand", "sub_category").prefetch_related(
             Prefetch(
                 'variants',
@@ -874,7 +899,7 @@ class ProductSearchAPIView(APIView):
         search_query = SearchQuery(query, config=SEARCH_CONFIG)
         base_qs = (
             Product.published
-            .filter(search_vector=search_query)
+            .filter(search_vector=search_query, is_buybox_winner=True)
             .annotate(rank=SearchRank('search_vector', search_query))
             .select_related("brand", "vendor", "sub_category")
             .prefetch_related(
@@ -996,6 +1021,7 @@ class ProductSearchAPIView(APIView):
             "brands":     facets["brands"],
             "categories": facets["categories"],
             "products_with_details": products_with_details,
+            "sponsored": ad_services.sponsored(request, 'search', query=query) if page == 1 else [],
             "min_price": round((price_range['min_price'] or min_price_unfiltered) * exchange_rate, 2),
             "max_price": round((price_range['max_price'] or max_price_unfiltered) * exchange_rate, 2),
             "min_price_unfiltered": round(min_price_unfiltered * exchange_rate, 2),

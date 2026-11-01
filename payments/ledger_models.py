@@ -23,6 +23,7 @@ class LedgerEntry(models.Model):
     COMMISSION_REFUND = 'commission_refund'
     PAYOUT = 'payout'
     ADJUSTMENT = 'adjustment'
+    AD_SPEND = 'ad_spend'
     TYPE_CHOICES = [
         (SALE, 'Sale'),
         (COMMISSION, 'Commission'),
@@ -31,6 +32,7 @@ class LedgerEntry(models.Model):
         (COMMISSION_REFUND, 'Commission returned'),
         (PAYOUT, 'Payout'),
         (ADJUSTMENT, 'Adjustment'),
+        (AD_SPEND, 'Sponsored products'),
     ]
     # Types tied to one order line, at most once per line (idempotent posting).
     PER_LINE_TYPES = (SALE, COMMISSION, DELIVERY_EARNING, REFUND, COMMISSION_REFUND)

@@ -283,13 +283,15 @@ class Product(models.Model):
         ('new','New'),
         ('used','Used'),
     )
-    slug = models.SlugField(max_length=150, unique=True)
+    # Not unique: several stores may sell the same item (URLs use sku + slug).
+    slug = models.SlugField(max_length=150, db_index=True)
     sub_category = models.ForeignKey('Sub_Category', on_delete=models.SET_NULL, null=True)
     vendor = models.ForeignKey(Vendor, on_delete=models.SET_NULL, null=True, related_name="product")
     variant = models.CharField(max_length=20, choices=VARIANTS, default='None')
     brand = models.ForeignKey(Brand, on_delete=models.SET_NULL, null=True)
     status = models.CharField(max_length=50, choices=STATUS, default='in_review')
-    title = models.CharField(max_length=150, unique=True, help_text="Don't add color or size type, make sure each word starts with a capital letter ")
+    # Unique per store (Meta.constraints), not platform-wide.
+    title = models.CharField(max_length=150, help_text="Don't add color or size type, make sure each word starts with a capital letter ")
     image = models.ImageField(upload_to=vendor_directory_path, help_text="Main image of the product", null=True, blank=True)
     video = models.FileField(upload_to="video/%y", null=True, blank=True)
     price = models.DecimalField(max_digits=10, decimal_places=2, default="1.99", help_text="Base currency in GHS (e.g 70)")
@@ -335,6 +337,15 @@ class Product(models.Model):
     avg_rating = models.FloatField(default=0.0, db_index=True)
     review_count = models.PositiveIntegerField(default=0)
 
+    # ── Multi-seller catalog (catalog/) ──
+    # Barcode (GTIN/EAN/UPC). Listings with the same GTIN are the same item.
+    gtin = models.CharField(max_length=14, blank=True, default='', db_index=True)
+    # Same item sold by several stores: each store's listing is an offer of one CatalogItem.
+    catalog_item = models.ForeignKey('CatalogItem', on_delete=models.SET_NULL, null=True, blank=True, related_name='offers')
+    # The featured offer of its CatalogItem ("buy box"). Listings show winners
+    # only, so one item appears once. Ungrouped products are always winners.
+    is_buybox_winner = models.BooleanField(default=True, db_index=True)
+
     objects  = models.Manager() # Default Manager
     published = PublishedManager() # Custom Manager
     
@@ -348,15 +359,10 @@ class Product(models.Model):
         self.slug = slugify(self.title, allow_unicode=True)
         super(Product, self).save(*args, **kwargs)
 
-        # Update search vector field in the database
-        Product.objects.filter(pk=self.pk).update(
-            search_vector=(
-                SearchVector(F('title'), weight='A', config=SEARCH_CONFIG) +
-                SearchVector(F('description'), weight='B', config=SEARCH_CONFIG) +
-                SearchVector(F('features'), weight='C', config=SEARCH_CONFIG) +
-                SearchVector(F('specifications'), weight='C', config=SEARCH_CONFIG)
-            )
-        )
+        # Update search vector field in the database (includes structured
+        # attribute values such as "8 GB" or "Cotton": attributes/services.py).
+        from attributes.services import refresh_search_vector
+        refresh_search_vector(self.pk)
 
     class Meta:
         ordering = ('-date',)
@@ -384,6 +390,7 @@ class Product(models.Model):
                 condition=~models.Q(seller_sku=""),
                 name="uniq_product_seller_sku_per_vendor",
             ),
+            models.UniqueConstraint(fields=["vendor", "title"], name="uniq_product_title_per_vendor"),
         ]
 
     def product_image(self):
@@ -1421,3 +1428,28 @@ class RecentlyViewedProduct(models.Model):
 
     def __str__(self):
         return f"{self.user_id} → {self.product_id}"
+
+class CatalogItem(models.Model):
+    """
+    One sellable item, independent of who sells it. Each store's listing of it
+    is an offer (Product.catalog_item). catalog/buybox.py picks the featured
+    offer; the rest show as "Other sellers" on the product page.
+    """
+    title = models.CharField(max_length=150)
+    gtin = models.CharField(max_length=14, blank=True, default='')
+    brand = models.ForeignKey(Brand, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    sub_category = models.ForeignKey(Sub_Category, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    # Denormalised by catalog/buybox.py so pages don't count/aggregate per view.
+    offer_count = models.PositiveIntegerField(default=0)
+    lowest_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    winner = models.ForeignKey(Product, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['gtin'], condition=~models.Q(gtin=''), name='uniq_catalog_item_gtin'),
+        ]
+
+    def __str__(self):
+        return self.title

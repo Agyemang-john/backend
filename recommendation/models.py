@@ -611,3 +611,18 @@ class NotInterested(models.Model):
 
     def __str__(self):
         return f"{self.user_id or self.visitor_key} ✕ {self.product_id}"
+
+
+class PinnedComplement(models.Model):
+    """
+    A seller's own "buy it with" pick for one of their products (e.g. a phone
+    and its case). Shown first in "Frequently bought together", before the
+    co-purchase model's picks. Both products belong to the same store.
+    """
+    product = models.ForeignKey('product.Product', on_delete=models.CASCADE, related_name='pinned_complements')
+    other = models.ForeignKey('product.Product', on_delete=models.CASCADE, related_name='+')
+    position = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        ordering = ('position',)
+        constraints = [models.UniqueConstraint(fields=['product', 'other'], name='uniq_pinned_complement')]

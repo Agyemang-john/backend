@@ -90,4 +90,11 @@ elasticsearch8==8.15.1
 pyotp==2.9.0
 reportlab==4.2.5
 user-agents==2.2.0
-
+# Web push (push/)
+pywebpush==2.0.3
+py-vapid==1.9.2
+http-ece==1.2.1
+# Error monitoring (core/observability.py)
+sentry-sdk==2.19.2
+# Two-factor QR codes (twofactor/)
+segno==1.6.1

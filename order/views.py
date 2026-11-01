@@ -646,189 +646,22 @@ def truncate(text, max_length=40):
 
 
 class OrderReceiptAPIView(APIView):
+    """
+    The shopper's receipt. Kept at this URL for existing links; the document
+    itself is the numbered, frozen receipt from invoices/ (with the VAT breakdown).
+    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request, order_id):
-        currency = request.GET.get('currency') or request.headers.get('X-Currency', 'GHS')
-        rates = get_exchange_rates()
-        exchange_rate = Decimal(str(rates.get(currency, 1)))
-        currency_symbol = None
-
-        if currency == 'USD':
-            currency_symbol = "$"
-        if currency == 'GHS':
-            currency_symbol = f"GHS"
-        
-        try:
-            order = Order.objects.get(id=order_id, user=request.user)
-        except Order.DoesNotExist:
+        from invoices.services import issue
+        from invoices.views import _pdf_response
+        order = Order.objects.filter(id=order_id, user=request.user, is_ordered=True).select_related('address', 'user').first()
+        if order is None:
             return Response({'detail': 'Order not found.'}, status=404)
-
-        user_profile = Profile.objects.filter(user=request.user).first()
-        if not user_profile:
-            return Response({'detail': 'User profile not found.'}, status=400)
-
-        buyer_country = order.address.country or 'GH'
-
-        response = HttpResponse(content_type='application/pdf')
-        response['Content-Disposition'] = f'attachment; filename="receipt_{order.order_number}.pdf"'
-
-        p = canvas.Canvas(response, pagesize=A4)
-        width, height = A4
-        margin = 50
-        y = height - margin
-
-        # === Logo ===
-        logo_path = os.path.join(settings.BASE_DIR, "static", "logo-1.png")
-        try:
-            if os.path.exists(logo_path):
-                logo_width = 120
-                logo_height = 60
-                x_pos = width - logo_width - margin
-                y_pos = y - (logo_height / 2) + 6
-                p.drawImage(logo_path, x_pos, y_pos, width=logo_width, height=logo_height, preserveAspectRatio=True)
-        except Exception as e:
-            logger.warning(f"Logo error: {e}")
-
-        # === Header ===
-        p.setFont("Helvetica-Bold", 18)
-        p.drawString(margin, y, "ORDER RECEIPT")
-        y -= 25
-        p.setFont("Helvetica", 12)
-        p.drawString(margin, y, f"Order Number: {order.order_number}")
-        y -= 15
-        p.drawString(margin, y, f"Order ID: {order.id}")
-        y -= 15
-        p.drawString(margin, y, f"Date: {order.date_created.strftime('%d %B %Y')}")
-        y -= 30
-
-        # === Customer Info ===
-        p.setFont("Helvetica-Bold", 13)
-        p.drawString(margin, y, "Customer Information")
-        y -= 15
-        p.setFont("Helvetica", 11)
-        p.drawString(margin, y, f"Name: {order.user.first_name} {order.user.last_name}")
-        y -= 15
-        p.drawString(margin, y, f"Email: {order.user.email}")
-        y -= 15
-        country_name = Country.objects.filter(code=buyer_country).first().name if Country.objects.filter(code=buyer_country).exists() else buyer_country
-        address_str = f"{order.address.address}, {order.address.town}, {order.address.region}, {country_name} ({buyer_country})"
-        p.drawString(margin, y, f"Address: {address_str}")
-        y -= 30
-
-        # === Payment Info ===
-        p.setFont("Helvetica-Bold", 13)
-        p.drawString(margin, y, "Payment Information")
-        y -= 15
-        p.setFont("Helvetica", 11)
-        p.drawString(margin, y, f"Payment Method: {order.payment_method.title().replace('_', ' ')}")
-        y -= 15
-        p.drawString(margin, y, f"Status: {order.status.title()}")
-        y -= 30
-
-        # === Table Header ===
-        p.setFont("Helvetica-Bold", 12)
-        p.drawString(margin, y, "Item")
-        p.drawString(margin + 250, y, "Qty")
-        p.drawString(margin + 300, y, "Unit Price")
-        p.drawString(margin + 400, y, "Subtotal")
-        y -= 10
-        p.line(margin, y, width - margin, y)
-        y -= 15
-
-        p.setFont("Helvetica", 10)
-        for item in order.order_products.all():
-            if y < 100:
-                p.showPage()
-                y = height - margin
-                p.setFont("Helvetica", 10)
-
-            p.drawString(margin, y, truncate(item.product.title))
-            p.drawString(margin + 250, y, str(item.quantity))
-            converted_price = Decimal(item.price) * exchange_rate
-            converted_amount = Decimal(item.amount) * exchange_rate
-            p.drawString(margin + 300, y, f"{currency_symbol} {converted_price:,.2f}")
-            p.drawString(margin + 400, y, f"{currency_symbol} {converted_amount:,.2f}")
-            y -= 15
-
-            details = []
-            if item.variant:
-                if item.variant.size:
-                    details.append(f"Size: {item.variant.size.name}")
-                if item.variant.color:
-                    details.append(f"Color: {item.variant.color.name}")
-            if item.selected_delivery_option:
-                delivery_option = item.selected_delivery_option
-                is_international = buyer_country != (item.product.vendor.shipping_from_country.name if item.product.vendor.shipping_from_country else 'GH')
-                delivery_str = delivery_option.name
-                if is_international and item.delivery_provider:
-                    delivery_str += f" (via {item.delivery_provider})"
-                details.append(f"Delivery: {delivery_str}")
-            if details:
-                p.setFont("Helvetica-Oblique", 8)
-                p.drawString(margin + 15, y, "(" + ", ".join(details) + ")")
-                y -= 13
-                p.setFont("Helvetica", 10)
-
-        y -= 10
-        p.line(margin, y, width - margin, y)
-        y -= 20
-
-        # === Vendor Breakdown ===
-        p.setFont("Helvetica-Bold", 12)
-        p.drawString(margin, y, "Vendor Details")
-        y -= 15
-        p.setFont("Helvetica", 10)
-
-        grand_delivery = Decimal(0)
-        for vendor in order.vendors.all():
-            if y < 100:
-                p.showPage()
-                y = height - margin
-                p.setFont("Helvetica", 10)
-
-            vendor_delivery = order.get_vendor_delivery_cost(vendor)
-            delivery_range = order.get_vendor_delivery_date_range(vendor)
-            vendor_country = vendor.shipping_from_country.name if vendor.shipping_from_country else 'GH'
-            is_international = buyer_country != vendor_country
-            provider = order.order_products.filter(product__vendor=vendor).first().delivery_provider if is_international else None
-
-            converted_delivery = Decimal(vendor_delivery) * exchange_rate
-            grand_delivery += converted_delivery
-
-            p.drawString(margin, y, f"Seller: {vendor.name}")
-            y -= 15
-            p.drawString(margin + 15, y, f"Email: {vendor.email}")
-            y -= 15
-            p.drawString(margin + 15, y, f"Contact: {vendor.contact}")
-            y -= 15
-            # delivery_label = f"Delivery ({provider if provider else 'Local'})"
-            p.drawString(margin + 15, y, f"Range(ETA): {delivery_range}")
-            y -= 25
-
-        # === Total Summary ===
-        p.setFont("Helvetica-Bold", 11)
-        subtotal = Decimal(order.total_price) * exchange_rate
-        grand_total = Decimal(order.calculate_grand_total()) * exchange_rate
-        delivery = order.calculate_total_delivery_fee().total * exchange_rate
-
-        p.drawString(margin + 320, y, "Subtotal:")
-        p.drawString(margin + 420, y, f"{currency_symbol} {subtotal:,.2f}")
-        y -= 15
-        p.drawString(margin + 320, y, "Delivery:")
-        p.drawString(margin + 420, y, f"{currency_symbol} {delivery:,.2f}")
-        y -= 15
-        p.drawString(margin + 320, y, "Grand Total:")
-        p.drawString(margin + 420, y, f"{currency_symbol} {grand_total:,.2f}")
-
-        # === Footer ===
-        y -= 40
-        p.setFont("Helvetica-Oblique", 10)
-        p.drawString(margin, y, "Thank you for your order! For questions, contact support@negromart.com")
-
-        p.showPage()
-        p.save()
-        return response
+        invoice = issue(order)
+        if invoice is None:
+            return Response({'detail': 'This order has no items yet.'}, status=404)
+        return _pdf_response(invoice, download=True)
 
 
 class OrderTrackingAPIView(APIView):

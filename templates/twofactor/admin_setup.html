@@ -1,0 +1,19 @@
+{% extends "twofactor/admin_base.html" %}
+{% block title %}Set up two-step verification{% endblock %}
+{% block card %}
+  <h2 style="margin-top:0">Protect your staff account</h2>
+  <p>Staff accounts need an authenticator app (Google Authenticator, Microsoft Authenticator, 1Password, Authy…).</p>
+  <ol>
+    <li>Scan this code with the app:</li>
+  </ol>
+  <div style="text-align:center">{{ qr|safe }}</div>
+  <p style="font-size:12px;color:#666">Can't scan? Enter this key: <code style="user-select:all">{{ secret }}</code></p>
+  <ol start="2"><li>Enter the 6-digit code the app shows:</li></ol>
+  {% if error %}<p style="color:#c62828">{{ error }}</p>{% endif %}
+  <form method="post">{% csrf_token %}
+    <input type="hidden" name="next" value="{{ next }}">
+    <input name="code" autocomplete="one-time-code" inputmode="numeric" required
+           style="font-size:22px;letter-spacing:4px;width:100%;padding:8px;margin:8px 0">
+    <button type="submit" class="button default" style="width:100%;padding:10px">Turn on</button>
+  </form>
+{% endblock %}

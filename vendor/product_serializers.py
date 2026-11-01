@@ -120,6 +120,7 @@ class ProductSerializer(serializers.ModelSerializer):
             'delivery_options', 'sku', 'seller_sku', 'review_note', 'date', 'updated', 'views',
             'p_images', 'variants',
             'fulfilment_type', 'sourcing_min_days', 'sourcing_max_days', 'sourced_from',
+            'gtin',
         ]
         # review_note is written by Negromart reviewers (e.g. why it was rejected).
         read_only_fields = ['vendor', 'sku', 'review_note', 'date', 'updated', 'views']
@@ -147,6 +148,30 @@ class ProductSerializer(serializers.ModelSerializer):
         if len(value) < 1:
             raise serializers.ValidationError("At least one region must be selected.")
         return value
+
+    def validate_title(self, value):
+        # Titles are unique within a store (several stores may sell the same
+        # item: catalog/ groups them as offers on one product page).
+        value = ' '.join((value or '').split())
+        request = self.context.get('request')
+        vendor = getattr(request.user, 'current_vendor', None) if request else None
+        if vendor is not None:
+            clash = Product.objects.filter(vendor=vendor, title__iexact=value)
+            if self.instance is not None:
+                clash = clash.exclude(pk=self.instance.pk)
+            if clash.exists():
+                raise serializers.ValidationError("You already have a product with this title.")
+        return value
+
+    def validate_gtin(self, value):
+        from catalog.services import clean_gtin
+        value = (value or '').strip()
+        if not value:
+            return ''
+        cleaned = clean_gtin(value)
+        if cleaned is None:
+            raise serializers.ValidationError("Enter a valid barcode (8, 12, 13 or 14 digits).")
+        return cleaned
 
     def validate_seller_sku(self, value):
         value = (value or '').strip()

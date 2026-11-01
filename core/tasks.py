@@ -1,6 +1,7 @@
 # tasks.py
 from celery import shared_task
 from .cleanup import cleanup_orphaned_files
+from .health import celery_heartbeat  # noqa: F401  (registered for the worker; scheduled in settings)
 import logging
 
 logger = logging.getLogger(__name__)

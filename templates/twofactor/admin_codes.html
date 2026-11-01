@@ -1,0 +1,9 @@
+{% extends "twofactor/admin_base.html" %}
+{% block title %}Recovery codes{% endblock %}
+{% block card %}
+  <h2 style="margin-top:0">Save your recovery codes</h2>
+  <p>If you lose your phone, each of these codes signs you in once. They won't be shown again.</p>
+  <pre style="font-size:16px;line-height:1.8;background:#f6f6f6;padding:12px;border-radius:6px;user-select:all">{% for c in codes %}{{ c }}
+{% endfor %}</pre>
+  <a class="button default" href="{{ next }}" style="display:block;text-align:center;padding:10px">I've saved them, continue</a>
+{% endblock %}

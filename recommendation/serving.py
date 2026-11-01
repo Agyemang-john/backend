@@ -698,3 +698,109 @@ def keep_shopping(request, limit: int = 12):
     """
     ids = _recent_product_ids(request, limit)
     return _ordered_by_ids(ids)
+
+
+# ── "Frequently bought together" (product page bundle box) ──────────────────
+
+FBT_LIMIT = 2
+
+
+def frequently_bought_together(product_id: int, limit: int = FBT_LIMIT):
+    """
+    Up to `limit` complements to buy with this product, in one box with an
+    "Add all to cart" button. Seller-pinned picks first (PinnedComplement),
+    then strict co-purchase neighbours (no fallback to look-alikes: a second
+    phone isn't something you buy *with* a phone). Each pick resolves to its
+    item's featured offer and must be in stock.
+    """
+    from django.db.models import Q
+
+    from product.models import Product
+
+    from .models import PinnedComplement
+
+    cache_key = f"rec:fbt:{current_model_version()}:{product_id}:{limit}"
+    ids = cache.get(cache_key)
+    if ids is None:
+        pinned = list(PinnedComplement.objects.filter(product_id=product_id).values_list('other_id', flat=True)[:limit])
+        co = list(ProductNeighbor.objects.filter(product_id=product_id, kind=KIND_CO_PURCHASE)
+                  .order_by('rank').values_list('neighbor_id', flat=True)[:10])
+        ids = list(dict.fromkeys(pinned + co))
+        cache.set(cache_key, ids, CACHE_TTL)
+    if not ids:
+        return []
+    me = Product.objects.filter(pk=product_id).values_list('catalog_item_id', flat=True).first()
+    rows = {p.pk: p for p in Product.published.filter(pk__in=ids).only('pk', 'catalog_item_id', 'is_buybox_winner')}
+    # Grouped items: show the featured offer instead of whichever listing was bought.
+    swap_items = {p.catalog_item_id for p in rows.values() if p.catalog_item_id and not p.is_buybox_winner}
+    winners = dict(Product.published.filter(catalog_item_id__in=swap_items, is_buybox_winner=True)
+                   .values_list('catalog_item_id', 'pk')) if swap_items else {}
+    chosen, seen_items = [], {me} if me else set()
+    for pid in ids:
+        p = rows.get(pid)
+        if p is None:
+            continue
+        if p.catalog_item_id:
+            if p.catalog_item_id in seen_items:
+                continue
+            seen_items.add(p.catalog_item_id)
+            pid = pid if p.is_buybox_winner else winners.get(p.catalog_item_id, pid)
+        if pid != product_id and pid not in chosen:
+            chosen.append(pid)
+    in_stock = set(Product.published.filter(pk__in=chosen)
+                   .filter(Q(variant='None', total_quantity__gt=0) | ~Q(variant='None'))
+                   .values_list('pk', flat=True))
+    return _ordered_by_ids([pid for pid in chosen if pid in in_stock][:limit])
+
+
+# ── "Buy again" ─────────────────────────────────────────────────────────────
+
+def buy_again(user_id: int, limit: int = 60):
+    """
+    What this shopper received before and can buy again now, most likely first:
+    bought more than once and recently ranks highest (re-stock items: food,
+    toiletries, ink). One row per item: a listing that's part of a multi-seller
+    item resolves to its current featured offer. Returns [(product, times, last_bought)].
+    """
+    from collections import defaultdict
+
+    from django.db.models import Count, Max, Q
+    from django.utils import timezone
+
+    from order.models import OrderProduct
+    from product.models import Product
+
+    rows = (OrderProduct.objects.filter(order__user_id=user_id, order__is_ordered=True, product__isnull=False)
+            .exclude(status='canceled').exclude(order__status='canceled')
+            .values('product_id', 'product__catalog_item_id')
+            .annotate(times=Count('order_id', distinct=True), last=Max('order__date_created'))
+            .order_by('-last')[:500])
+    by_key = defaultdict(lambda: {'times': 0, 'last': None, 'product_id': None})
+    for r in rows:
+        key = ('item', r['product__catalog_item_id']) if r['product__catalog_item_id'] else ('p', r['product_id'])
+        entry = by_key[key]
+        entry['times'] += r['times']
+        if entry['last'] is None or r['last'] > entry['last']:
+            entry['last'], entry['product_id'] = r['last'], r['product_id']
+    if not by_key:
+        return []
+
+    item_ids = [k[1] for k in by_key if k[0] == 'item']
+    winners = dict(Product.published.filter(catalog_item_id__in=item_ids, is_buybox_winner=True)
+                   .values_list('catalog_item_id', 'pk')) if item_ids else {}
+    wanted = {}
+    for key, e in by_key.items():
+        pid = winners.get(key[1], e['product_id']) if key[0] == 'item' else e['product_id']
+        wanted[pid] = e
+    available = {p.pk: p for p in Product.published.filter(pk__in=wanted)
+                 .filter(Q(variant='None', total_quantity__gt=0) | ~Q(variant='None')).only(*CARD_ONLY_FIELDS)}
+
+    now = timezone.now()
+
+    def rank(pid):
+        e = wanted[pid]
+        days = max((now - e['last']).days, 0)
+        return e['times'] / (1 + days / 30)     # repeat purchases, decayed by a month-ish half-life
+
+    ordered = sorted(available, key=rank, reverse=True)[:limit]
+    return [(available[pid], wanted[pid]['times'], wanted[pid]['last']) for pid in ordered]

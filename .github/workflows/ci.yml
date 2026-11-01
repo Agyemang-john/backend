@@ -1,0 +1,81 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: negromart
+          POSTGRES_USER: negromart
+          POSTGRES_PASSWORD: negromart
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U negromart"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+
+    # Dummy values: tests mock every outside service. Real secrets never belong here.
+    env:
+      DEBUG: "True"
+      DEVELOPMENT_MODE: "True"
+      SECRET_KEY: ci-only-not-secret
+      FERNET_KEY: Xb9Jm4oQp7ZzG5s8Kf2R1wYtA3cVnL6eHdU0iBqMrPk=
+      DB_NAME: negromart
+      DB_USER: negromart
+      DB_PASSWORD: negromart
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DATABASE_POOL_URL: postgres://negromart:negromart@localhost:5432/negromart
+      REDIS_URL: redis://localhost:6379/0
+      DOMAIN: localhost
+      FRONTEND_BASE_URL: http://localhost:3000
+      FRONTEND_LOGIN_URL: http://localhost:3000/auth/login
+      SELLER_SITE_URL: http://localhost:3001
+      AWS_ACCESS_KEY_ID: ci
+      AWS_SECRET_ACCESS_KEY: ci
+      ARKESEL_API_KEY: ci
+      SENDGRID_API_KEY: ci
+      PAYSTACK_PUBLIC_KEY: pk_test_ci
+      PAYSTACK_SECRET_KEY: sk_test_ci
+      EXCHANGE_RATE_API_KEY: ci
+      LOCATIONIQ_API_KEY: ci
+      DHL_API_KEY: ci
+      DHL_API_SECRET: ci
+      DHL_API_URL: http://localhost
+      DHL_ACCOUNT_NUMBER: ci
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"      # matches the Dockerfile
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Django system checks
+        run: python manage.py check
+
+      - name: Migrations are committed
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Tests
+        run: python manage.py test --noinput --parallel 4

@@ -155,9 +155,11 @@ def balance_summary(vendor):
     """
     now = timezone.now()
     unsettled = LedgerEntry.objects.filter(vendor=vendor, payout__isnull=True)
+    hold = on_hold_q()
     agg = unsettled.aggregate(
-        available=Sum('amount', filter=Q(available_at__lte=now)),
-        pending=Sum('amount', filter=Q(available_at__gt=now)),
+        available=Sum('amount', filter=Q(available_at__lte=now) & ~hold),
+        pending=Sum('amount', filter=Q(available_at__gt=now) & ~hold),
+        on_hold=Sum('amount', filter=hold),
         next_release=Min('available_at', filter=Q(available_at__gt=now)),
     )
     payouts = Payout.objects.filter(vendor=vendor).aggregate(
@@ -171,9 +173,18 @@ def balance_summary(vendor):
         'pending': agg['pending'] or zero,
         'processing': payouts['processing'] or zero,
         'paid_total': payouts['paid_total'] or zero,
+        # Earnings for order lines with an open buyer-protection claim.
+        'on_hold': agg['on_hold'] or zero,
         'next_release_at': agg['next_release'],
         'minimum_payout': MIN_PAYOUT_AMOUNT,
     }
+
+
+def on_hold_q():
+    """Entries held back from payouts: their order line has an active claim (protection/)."""
+    from django.db.models import Exists, OuterRef
+    from protection.models import Claim
+    return Q(Exists(Claim.objects.filter(order_product_id=OuterRef('order_product_id'), status__in=Claim.ACTIVE)))
 
 
 # ── Payouts ───────────────────────────────────────────────────────────────────
@@ -190,7 +201,7 @@ def reserve_payout(vendor):
         Vendor.objects.select_for_update().filter(pk=vendor.pk).first()  # one payout at a time per store
         entries = LedgerEntry.objects.select_for_update().filter(
             vendor=vendor, payout__isnull=True, available_at__lte=now,
-        )
+        ).exclude(on_hold_q())
         totals = entries.aggregate(
             total=Sum('amount'),
             sales=Sum('amount', filter=Q(entry_type=LedgerEntry.SALE)),

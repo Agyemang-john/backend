@@ -93,6 +93,12 @@ class VendorLoginSerializer(serializers.Serializer):
         user.lockout_until = None
         user.save(update_fields=["failed_login_attempts", "lockout_until"])
 
+        # Authenticator app set up (twofactor/): the second step is the app's
+        # code, so nothing is sent by email/SMS (no SIM-swap or inbox risk).
+        from twofactor.services import is_enabled as totp_enabled
+        if totp_enabled(user):
+            return {"user": user, "channel": "app"}
+
         # OTP generation — stored in DB so Redis failures never break login
         otp = otp_token_generator.generate_otp()
         from .models import OTPRecord

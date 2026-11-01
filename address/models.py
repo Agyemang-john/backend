@@ -72,6 +72,8 @@ class Address(models.Model):
     status = models.BooleanField(default=False)
     latitude = models.FloatField(null=True, blank=True, default=5.5600)
     longitude = models.FloatField(null=True, blank=True, default=-0.2050)
+    # Set when this address is a pickup station the shopper collects from (pickup/).
+    pickup_point = models.ForeignKey('pickup.PickupPoint', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     modified_at = models.DateTimeField(auto_now=True)
     date_added = models.DateTimeField(default=timezone.now)
 

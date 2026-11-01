@@ -70,6 +70,13 @@ class PlaceOrderCODAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Pay-on-delivery abuse gate (risk/): repeated refusals lose the option.
+        from risk.services import cod_allowed
+        allowed, why = cod_allowed(user)
+        if not allowed:
+            return Response({"status": "failed", "code": "cod_unavailable", "message": why},
+                            status=status.HTTP_403_FORBIDDEN)
+
         address = Address.objects.filter(user=user, status=True).first()
         if not address:
             return Response(
@@ -92,7 +99,7 @@ class PlaceOrderCODAPIView(APIView):
                     payment_id=None,
                     status="pending",
                     address=address,
-                    ip=request.META.get("REMOTE_ADDR", ""),
+                    ip=client_ip(request)[:20],
                     is_ordered=True,
                 )
 

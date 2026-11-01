@@ -61,15 +61,38 @@ INSTALLED_APPS = [
     'django_celery_beat',
     'notification',
     'recommendation',
+    'engagement',
+    'qa',
+    'attributes',
+    'tax',
+    'invoices',
+    'catalog',
+    'protection',
+    'ads',
+    'risk',
+    'verification',
+    'push',
+    'pickup',
+    'analytics',
+    'audit',
+    'twofactor',
 ]
 
 MIDDLEWARE = [
+    # First, so every log line and error for the request carries its ID (core/observability.py).
+    'core.observability.RequestIdMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    # Answers in the shopper's language (Accept-Language from the storefront's `language` cookie)
+    # wherever a translation exists; English otherwise.
+    'django.middleware.locale.LocaleMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'audit.services.AuditContextMiddleware',
+    # Staff must pass an authenticator code before any admin page (twofactor/).
+    'twofactor.admin_views.AdminTwoFactorMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'vendor.middleware.VendorActivityMiddleware',
@@ -673,6 +696,54 @@ CELERY_BEAT_SCHEDULE = {
         "task": "vendor.tasks.check_inactive_vendors",
         "schedule": crontab(hour=1, minute=0),
     },
+    # Price-drop / back-in-stock alerts (engagement/alerts.py).
+    "sweep-product-alerts": {
+        "task": "engagement.tasks.sweep_product_alerts",
+        "schedule": 900,
+        "options": {"expires": 840},
+    },
+    # Abandoned-cart reminders (engagement/cart_reminders.py).
+    "sweep-cart-reminders": {
+        "task": "engagement.tasks.sweep_cart_reminders",
+        "schedule": 900,
+        "options": {"expires": 840},
+    },
+    # Multi-seller featured offers; signals cover most changes (catalog/buybox.py).
+    # Sponsored products (ads/services.py).
+    "flush-ad-impressions": {
+        "task": "ads.tasks.flush_ad_impressions",
+        "schedule": 300,
+    },
+    "nightly-ads": {
+        "task": "ads.tasks.nightly_ads",
+        "schedule": crontab(hour=0, minute=40),
+    },
+    # Liveness signal for /api/health/ (core/health.py).
+    "celery-heartbeat": {
+        "task": "core.health.celery_heartbeat",
+        "schedule": 60,
+    },
+    "prune-audit-log": {
+        "task": "audit.tasks.prune_audit_log",
+        "schedule": crontab(day_of_week="sunday", hour=4, minute=0),
+    },
+    "flush-analytics": {
+        "task": "analytics.tasks.flush_metrics",
+        "schedule": 300,
+    },
+    "pickup-expiry": {
+        "task": "pickup.tasks.expire_parcels",
+        "schedule": crontab(hour=7, minute=0),
+    },
+    "claim-deadlines": {
+        "task": "protection.tasks.claim_deadlines",
+        "schedule": 3600,
+    },
+    "recompute-buyboxes": {
+        "task": "catalog.tasks.recompute_all_buyboxes",
+        "schedule": 600,
+        "options": {"expires": 540},
+    },
 }
 
 #SIMPLE JWT CONFIGURATION
@@ -803,6 +874,55 @@ HYPERVERGE_WORKFLOW_ID = 'kyc_full'  # Optional; e.g., for full ID + liveness wo
 # CKEDITOR CONFIGURATION
 
 ELASTICSEARCH_URL = config("ELASTICSEARCH_URL", default="http://elasticsearch:9200")
+
+# ── Error monitoring & logging (core/observability.py) ──────────────────────
+# Sentry is off unless SENTRY_DSN is set. No personal data is sent.
+SENTRY_DSN = config("SENTRY_DSN", default="")
+from core.observability import init_sentry  # noqa: E402
+init_sentry(
+    SENTRY_DSN,
+    environment=config("SENTRY_ENVIRONMENT", default="development" if DEBUG else "production"),
+    release=config("GIT_SHA", default=""),
+    traces_sample_rate=config("SENTRY_TRACES_SAMPLE_RATE", default=0.05, cast=float),
+)
+
+LOG_LEVEL = config("LOG_LEVEL", default="INFO")
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {"request_id": {"()": "core.observability.RequestIdFilter"}},
+    "formatters": {
+        "line": {"format": "%(asctime)s %(levelname)s [%(request_id)s] %(name)s: %(message)s"},
+    },
+    "handlers": {
+        "console": {"class": "logging.StreamHandler", "formatter": "line", "filters": ["request_id"]},
+    },
+    "root": {"handlers": ["console"], "level": LOG_LEVEL},
+    "loggers": {
+        "django": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "django.request": {"handlers": ["console"], "level": "WARNING", "propagate": False},
+        "django.db.backends": {"handlers": ["console"], "level": "WARNING", "propagate": False},
+        "celery": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "payouts": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "slow_requests": {"handlers": ["console"], "level": "WARNING", "propagate": False},
+    },
+}
+
+# Languages the API can answer in. Add a language here and in the storefront
+# (frontend/lib/i18n) together; run makemessages/compilemessages for our own strings.
+from django.utils.translation import gettext_lazy as _  # noqa: E402
+LANGUAGES = [("en", _("English")), ("fr", _("French"))]
+LOCALE_PATHS = [BASE_DIR / "locale"]
+
+# Authenticator-app 2FA for the Django admin (twofactor/). On whenever DEBUG is off.
+ADMIN_2FA_REQUIRED = config("ADMIN_2FA_REQUIRED", default=not DEBUG, cast=bool)
+
+# Push notifications (push/). Generate keys: python manage.py generate_vapid_keys
+WEBPUSH_VAPID_PUBLIC_KEY = config("WEBPUSH_VAPID_PUBLIC_KEY", default="")
+WEBPUSH_VAPID_PRIVATE_KEY = config("WEBPUSH_VAPID_PRIVATE_KEY", default="")
+WEBPUSH_SUBJECT = config("WEBPUSH_SUBJECT", default="mailto:support@negromart.com")
+FCM_PROJECT_ID = config("FCM_PROJECT_ID", default="")
+FCM_SERVICE_ACCOUNT_FILE = config("FCM_SERVICE_ACCOUNT_FILE", default="")
 # ELASTICSEARCH_USER = config("ELASTICSEARCH_USER", default="")
 # ELASTICSEARCH_PASSWORD = config("ELASTICSEARCH_PASSWORD", default="")
 

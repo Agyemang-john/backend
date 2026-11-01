@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Items you're watching</title>
+</head>
+<body style="margin:0; padding:0; background:#f4f4f4; font-family:Arial, Helvetica, sans-serif; color:#111111;">
+  <div style="display:none; max-height:0; overflow:hidden;">
+    {% if price_items %}A price you've been waiting for.{% else %}Something you wanted is back.{% endif %}
+  </div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f4;">
+    <tr><td align="center" style="padding:24px 12px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px; background:#ffffff; border:1px solid #e3e3e3;">
+        <tr><td style="padding:20px 28px; border-bottom:2px solid #111111;">
+          <a href="{{ site_url }}" style="text-decoration:none;"><img src="{{ site_logo_url }}" alt="{{ site_name }}" height="36" style="display:block; border:0; height:36px;"></a>
+        </td></tr>
+        <tr><td style="padding:28px 28px 8px;">
+          <p style="margin:0 0 6px; font-size:20px; line-height:28px; font-weight:bold;">Hi {{ first_name }}, good news</p>
+          <p style="margin:0; font-size:15px; line-height:22px; color:#444444;">
+            {% if price_items and stock_items %}Prices dropped and items came back on items you're watching.
+            {% elif price_items %}The price dropped on {% if price_items|length == 1 %}an item{% else %}items{% endif %} you're watching.
+            {% else %}{% if stock_items|length == 1 %}An item{% else %}Items{% endif %} you asked about {% if stock_items|length == 1 %}is{% else %}are{% endif %} back in stock. Stock can go quickly.{% endif %}
+          </p>
+        </td></tr>
+
+        {% for item in price_items %}
+        <tr><td style="padding:16px 28px 0;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e3e3e3;"><tr>
+            {% if item.image_url %}<td width="96" valign="top" style="padding:14px;"><a href="{{ item.url }}"><img src="{{ item.image_url }}" alt="" width="96" height="96" style="display:block; width:96px; height:96px; object-fit:cover; border:1px solid #eeeeee;"></a></td>{% endif %}
+            <td valign="top" style="padding:14px;">
+              <div style="font-size:12px; text-transform:uppercase; letter-spacing:0.6px; color:#00695C; font-weight:bold;">Price drop</div>
+              <a href="{{ item.url }}" style="display:block; margin-top:4px; font-size:15px; line-height:21px; font-weight:bold; color:#111111; text-decoration:none;">{{ item.title }}</a>
+              {% if item.option %}<div style="font-size:13px; color:#555555;">{{ item.option }}</div>{% endif %}
+              <div style="margin-top:6px; font-size:18px; font-weight:bold;">GHS {{ item.price|floatformat:2 }}
+                {% if item.was %}<span style="font-size:13px; font-weight:normal; color:#777777; text-decoration:line-through; padding-left:6px;">GHS {{ item.was|floatformat:2 }}</span>{% endif %}
+              </div>
+              <a href="{{ item.url }}" style="display:inline-block; margin-top:10px; background:#111111; color:#ffffff; font-size:14px; font-weight:bold; text-decoration:none; padding:10px 16px;">View item</a>
+            </td>
+          </tr></table>
+        </td></tr>
+        {% endfor %}
+
+        {% for item in stock_items %}
+        <tr><td style="padding:16px 28px 0;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e3e3e3;"><tr>
+            {% if item.image_url %}<td width="96" valign="top" style="padding:14px;"><a href="{{ item.url }}"><img src="{{ item.image_url }}" alt="" width="96" height="96" style="display:block; width:96px; height:96px; object-fit:cover; border:1px solid #eeeeee;"></a></td>{% endif %}
+            <td valign="top" style="padding:14px;">
+              <div style="font-size:12px; text-transform:uppercase; letter-spacing:0.6px; color:#1565C0; font-weight:bold;">Back in stock</div>
+              <a href="{{ item.url }}" style="display:block; margin-top:4px; font-size:15px; line-height:21px; font-weight:bold; color:#111111; text-decoration:none;">{{ item.title }}</a>
+              {% if item.option %}<div style="font-size:13px; color:#555555;">{{ item.option }}</div>{% endif %}
+              <div style="margin-top:6px; font-size:16px; font-weight:bold;">GHS {{ item.price|floatformat:2 }}</div>
+              <a href="{{ item.url }}" style="display:inline-block; margin-top:10px; background:#111111; color:#ffffff; font-size:14px; font-weight:bold; text-decoration:none; padding:10px 16px;">Buy now</a>
+            </td>
+          </tr></table>
+        </td></tr>
+        {% endfor %}
+
+        <tr><td style="padding:24px 28px; font-size:12px; line-height:18px; color:#777777;">
+          You're getting this because you're watching these items on {{ site_name }}.
+          <a href="{{ alerts_url }}" style="color:#0b57d0;">Manage alerts</a> ·
+          <a href="{{ opt_out_url }}" style="color:#0b57d0;">Stop price and stock emails</a>
+          <br>&copy; {{ year }} {{ site_name }}
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

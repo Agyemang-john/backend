@@ -1581,6 +1581,12 @@ class ShipmentAPIView(APIView):
     def post(self, request, id):
         vendor, order = self._get_vendor_order(request, id)
 
+        # Orders flagged by the fraud check wait for Negromart (risk/).
+        from risk.services import is_held
+        if is_held(order.pk):
+            return Response({"error": "This order is being checked by Negromart. Please don't ship it yet; "
+                                      "we'll notify you when it's cleared."}, status=status.HTTP_409_CONFLICT)
+
         # Prevent duplicate — each vendor can only have one shipment per order
         existing = Shipment.objects.filter(order=order, vendor=vendor).first()
         if existing:

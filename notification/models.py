@@ -125,6 +125,17 @@ class Notification(models.Model):
         ("customer_review_published", "Review Published"),
         ("customer_review_pending",   "Review Awaiting Moderation"),
         ("customer_review_rejected",  "Review Not Published"),
+
+        # ── Questions & answers (qa/) ──
+        ("vendor_new_question",        "New Product Question"),
+        ("customer_question_answered", "Your Question Was Answered"),
+
+        # ── Re-engagement (engagement/) ──
+        ("customer_cart_reminder",     "Items Left in Cart"),
+
+        # ── Buyer protection (protection/) ──
+        ("customer_claim_update",      "Claim Update"),
+        ("vendor_claim_update",        "Claim Update"),
     ]
 
     recipient = models.ForeignKey(
