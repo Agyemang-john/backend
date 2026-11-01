@@ -200,7 +200,7 @@ class ShipmentAdmin(admin.ModelAdmin):
     order_link.short_description = 'Order'
 
     def vendor_name(self, obj):
-        return obj.vendor.name
+        return obj.vendor.name if obj.vendor_id else '—'
     vendor_name.short_description = 'Vendor'
     vendor_name.admin_order_field = 'vendor__name'
 
@@ -604,7 +604,7 @@ class OrderProductAdmin(admin.ModelAdmin):
     order_link.short_description = 'Order'
 
     def product_title(self, obj):
-        return obj.product.title
+        return obj.product.title if obj.product_id else '(deleted product)'
     product_title.short_description = 'Product'
     product_title.admin_order_field = 'product__title'
 

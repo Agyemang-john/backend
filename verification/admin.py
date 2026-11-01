@@ -46,6 +46,16 @@ class VerificationProfileAdmin(admin.ModelAdmin):
     readonly_fields = ('vendor', 'documents_preview', 'payout_match', 'history', 'submitted_at', 'reviewed_at', 'reviewed_by')
     ordering = ('-needs_recheck', '-submitted_at')
 
+    def has_add_permission(self, request):
+        # Profiles are created when a seller submits documents; there's nothing to review on a blank one.
+        return False
+
+    def get_form(self, request, obj=None, **kwargs):
+        # The fieldsets list the per-document decision fields, which ReviewForm adds itself.
+        # Left to the admin, they'd be handed to modelform_factory as model fields -> FieldError (500).
+        kwargs['fields'] = ReviewForm.Meta.fields
+        return super().get_form(request, obj, **kwargs)
+
     def get_fieldsets(self, request, obj=None):
         decisions = []
         for field in services.DOC_LABELS:

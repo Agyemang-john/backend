@@ -99,5 +99,6 @@ class Address(models.Model):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.full_name} - {self.user.email} ({'Default' if self.status else 'Secondary'})"
+        email = self.user.email if self.user_id else (self.email or 'guest')
+        return f"{self.full_name} - {email} ({'Default' if self.status else 'Secondary'})"
 

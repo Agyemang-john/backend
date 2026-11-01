@@ -68,7 +68,8 @@ class ProductDealScoreAdmin(admin.ModelAdmin):
         colour = '#2e7d32' if obj.price_percentile >= 0.6 else (
             '#ef6c00' if obj.price_percentile >= 0.3 else '#c62828'
         )
-        return format_html('<b style="color:{}">{:.0%}</b>', colour, obj.price_percentile)
+        # format_html escapes args to strings first, so format the number before passing it.
+        return format_html('<b style="color:{}">{}</b>', colour, f"{obj.price_percentile:.0%}")
 
     def has_add_permission(self, request):
         return False

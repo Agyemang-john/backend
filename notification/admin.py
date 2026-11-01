@@ -25,7 +25,6 @@ class NotificationAdmin(admin.ModelAdmin):
     show_full_result_count = False
     search_fields = [
         "recipient__email",
-        "recipient__username",
         "data__order_number",
         "data__message",
     ]

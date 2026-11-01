@@ -5,7 +5,8 @@ Serving (per listing request, results cached briefly per context):
   1. candidates  – keyword match: the query's 1-4 word n-grams looked up by
                    index (AdKeyword.phrase IN ...); auto targeting: advertised
                    products whose search vector matches; categories: same
-                   sub-category. Only live campaigns of funded stores, products
+                   sub-category; brand / collection / deals pages: advertised
+                   products inside that page's own product set (`scope`). Only live campaigns of funded stores, products
                    that are published, featured and in stock.
   2. rank        – bid × quality (smoothed CTR vs. baseline, clipped 0.5-2).
   3. price       – second price: just enough to beat the next ad, at least
@@ -145,8 +146,12 @@ def _quality(pairs):
     return out
 
 
-def _candidates(placement, query=None, sub_category_id=None):
-    """[(campaign, product_id, bid)] eligible for this placement."""
+def _candidates(placement, query=None, sub_category_id=None, scope=None):
+    """
+    [(campaign, product_id, bid)] eligible for this placement. `scope` (a Q on
+    Product, or an iterable of product ids) limits browse placements to the
+    page's own products: a brand page only advertises that brand.
+    """
     from product.models import Product
 
     live = _live_campaigns().filter(vendor_id__in=funded_vendor_ids())
@@ -172,8 +177,16 @@ def _candidates(placement, query=None, sub_category_id=None):
             for cid, pid, bid in matches:
                 found.setdefault((cid, pid), bid)
     else:
-        for cid, pid, bid in (AdCampaignProduct.objects.filter(campaign__in=live, product__sub_category_id=sub_category_id)
-                              .values_list('campaign_id', 'product_id', 'campaign__bid')[:200]):
+        items = AdCampaignProduct.objects.filter(campaign__in=live)
+        if placement == 'category':
+            items = items.filter(product__sub_category_id=sub_category_id)
+        elif isinstance(scope, Q):
+            items = items.filter(product__in=Product.objects.filter(scope))
+        elif scope is not None:
+            items = items.filter(product_id__in=list(scope)[:5000])
+        else:
+            return []
+        for cid, pid, bid in items.values_list('campaign_id', 'product_id', 'campaign__bid')[:200]:
             found.setdefault((cid, pid), bid)
     if not found:
         return []
@@ -206,35 +219,52 @@ def auction(candidates, slots=SLOTS):
     return winners
 
 
-def sponsored(request, placement, query=None, sub_category_id=None, exclude_ids=()):
-    """Sponsored product payloads (same shape as listing rows + 'ad' token). Never raises."""
+def sponsored_products(placement, query=None, sub_category_id=None, exclude_ids=(), scope=None, scope_key=''):
+    """
+    [(product, ad_token)] winning this placement, impressions recorded. Never raises.
+
+    Placements: 'search' (query), 'category' (sub_category_id), and 'brand',
+    'collection', 'deals', which pass `scope` (see _candidates) plus a short
+    `scope_key` naming it (brand id, collection slug) for the serve cache.
+    """
     from product.models import Product
-    from product.serializers import ProductListSerializer
     try:
-        key = f"ads:serve:{placement}:{hashlib.md5(normalise(query or '').encode()).hexdigest()}:{sub_category_id}"
+        key = (f"ads:serve:{placement}:{hashlib.md5(normalise(query or '').encode()).hexdigest()}"
+               f":{sub_category_id}:{scope_key}")
         winners = cache.get(key)
         if winners is None:
-            winners = auction(_candidates(placement, query, sub_category_id))
+            winners = auction(_candidates(placement, query, sub_category_id, scope))
             cache.set(key, winners, SERVE_CACHE_SECONDS)
         winners = [w for w in winners if w['product_id'] not in set(exclude_ids)]
         if not winners:
             return []
         products = {p.pk: p for p in Product.objects.filter(pk__in=[w['product_id'] for w in winners])
                     .select_related('brand', 'vendor', 'sub_category')}
-        rows = []
+        out = []
         for w in winners:
             p = products.get(w['product_id'])
             if p is None:
                 continue
             token = signing.dumps({'c': w['campaign_id'], 'p': p.pk, 'k': str(w['cost']), 'pl': placement},
                                   salt=TOKEN_SALT, compress=True)
-            rows.append({'product': ProductListSerializer(p, context={'request': request}).data,
-                         'average_rating': p.avg_rating, 'review_count': p.review_count, 'colors': [],
-                         'sponsored': True, 'ad_token': token})
+            out.append((p, token))
             record_impression(w['campaign_id'], p.pk)
-        return rows
+        return out
     except Exception:  # noqa: BLE001 - ads must never break a listing
         logger.exception("sponsored products failed for %s", placement)
+        return []
+
+
+def sponsored(request, placement, **kwargs):
+    """Sponsored rows in the listing-grid shape (products_with_details + 'sponsored' and 'ad_token')."""
+    from product.serializers import ProductListSerializer
+    try:
+        return [{'product': ProductListSerializer(p, context={'request': request}).data,
+                 'average_rating': p.avg_rating, 'review_count': p.review_count, 'colors': [],
+                 'sponsored': True, 'ad_token': token}
+                for p, token in sponsored_products(placement, **kwargs)]
+    except Exception:  # noqa: BLE001
+        logger.exception("sponsored rows failed for %s", placement)
         return []
 
 

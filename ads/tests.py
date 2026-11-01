@@ -49,7 +49,7 @@ class AdsTests(TestCase):
             self.addCleanup(p.stop)
         main = Main_Category.objects.create(title='Ads Main')
         self.sub = Sub_Category.objects.create(title='Ads Phones', category=Category.objects.create(title='Ads Cat', main_category=main))
-        brand = Brand.objects.create(title='Ads Brand')
+        self.brand = brand = Brand.objects.create(title='Ads Brand')
         self.owners, self.shops, self.products = [], [], []
         for i in range(3):
             owner = make_user(i + 1)
@@ -100,6 +100,34 @@ class AdsTests(TestCase):
         stat = AdDailyStat.objects.get()
         self.assertEqual((stat.impressions, stat.clicks, stat.spend), (1, 1, services.RESERVE_CPC))
         self.assertEqual(APIClient().post('/api/v1/ads/click/', {'token': 'forged'}, format='json').status_code, 400)
+
+    def test_brand_collection_and_deals_pages_carry_sponsored(self):
+        from product.models import Collection
+        self.campaign(0, '2.00')
+        other = Brand.objects.create(title='Ads Other Brand')
+
+        res = APIClient().get(f'/api/v1/product/brand/{self.brand.slug}/')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual([r['product']['id'] for r in res.data['sponsored']], [self.products[0].pk])
+        self.assertTrue(res.data['sponsored'][0]['ad_token'])
+        res = APIClient().get(f'/api/v1/product/brand/{other.slug}/')
+        self.assertEqual(res.data['sponsored'], [], "only that brand's ads")
+
+        coll = Collection.objects.create(title='Ads Picks', slug='ads-picks', is_active=True, filter_type='sub_category',
+                                         sub_category=self.sub)
+        res = APIClient().get(f'/api/v1/product/collection/{coll.slug}/')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual([r['product']['id'] for r in res.data['sponsored']], [self.products[0].pk])
+
+        from recommendation.models import ProductDealScore
+        for p in self.products[:2]:     # both on a deal; only product 0 advertises
+            ProductDealScore.objects.create(product=p, discount_percent=20, best_price=Decimal('400'),
+                                            compare_at_price=Decimal('500'), score=1, is_eligible=True)
+        res = APIClient().get('/api/v1/recommendations/deals/')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual([c['id'] for c in res.data['sponsored']], [self.products[0].pk])
+        self.assertTrue(res.data['sponsored'][0]['sponsored'])
+        self.assertEqual(services._candidates('deals', scope=[]), [], "not on a deal, not a deals ad")
 
     def test_budget_stops_serving(self):
         c = self.campaign(0, '2.00', budget='5')

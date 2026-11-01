@@ -79,6 +79,25 @@ class TodaysDealsAPIView(APIView):
         )
 
 
+def _sponsored_deals(request, currency, flash_end):
+    """Advertised products on a live deal, as deal cards marked sponsored (ads/)."""
+    from ads import services as ad_services
+
+    from .deals_page import _deal_rows
+    won = ad_services.sponsored_products('deals', scope=[row['id'] for row in _deal_rows()], scope_key='all')
+    if not won:
+        return []
+    products = [p for p, _ in won]
+    deal_scores = {d.product_id: d for d in ProductDealScore.objects.filter(product_id__in=[p.pk for p in products])}
+    cards = DealCardSerializer(products, many=True, context={
+        'request': request, 'reasons': {}, 'deal_scores': deal_scores,
+        'flash_end': flash_end, 'include_debug': False,
+    }).data
+    for card, (_, token) in zip(cards, won):
+        card['sponsored'], card['ad_token'] = True, token
+    return apply_currency(cards, currency)
+
+
 class DealsPageAPIView(APIView):
     """
     GET /api/v1/recommendations/deals/
@@ -123,6 +142,8 @@ class DealsPageAPIView(APIView):
                           if collection else None,
             'currency': currency,
             'results': apply_currency(cards, currency),
+            # Sponsored deals (ads/): advertised products that are on a live deal, first page only.
+            'sponsored': _sponsored_deals(request, currency, data['flash_end']) if data['page'] == 1 else [],
             'total': data['total'],
             'page': data['page'],
             'pages': data['pages'],

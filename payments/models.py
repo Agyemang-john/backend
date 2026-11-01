@@ -411,7 +411,8 @@ class PaymentTransaction(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"{self.vendor.name} - {self.amount} {self.currency} ({self.status})"
+        who = self.vendor.name if self.vendor_id else 'Deleted store'
+        return f"{who} - {self.amount} {self.currency} ({self.status})"
 
 from .email_models import EmailTemplate, SubscriptionEmailConfig
 

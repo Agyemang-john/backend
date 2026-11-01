@@ -518,7 +518,7 @@ class VariantImage(models.Model):
     updated = models.DateTimeField(auto_now=True)
     
     def __str__(self):
-        return self.variant.title
+        return self.variant.title if self.variant_id else f"Variant image {self.pk}"
     
     class Meta:
         ordering = ('position', 'id')

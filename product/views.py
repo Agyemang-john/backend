@@ -839,6 +839,9 @@ class BrandProductListView(APIView):
             **brand_filter_options,
             "brand": BrandSerializer(brand).data,
             "products_with_details": products_with_details,
+            # Sponsored products from this brand (ads/), first page only, above the results.
+            "sponsored": ad_services.sponsored(request, 'brand', scope=Q(brand_id=brand.id), scope_key=str(brand.id))
+                         if page == 1 else [],
             "min_price": round((filtered_bounds["min_price"] or min_price_unfiltered) * exchange_rate, 2),
             "max_price": round((filtered_bounds["max_price"] or max_price_unfiltered) * exchange_rate, 2),
             "min_price_unfiltered": round(min_price_unfiltered * exchange_rate, 2),
@@ -1303,6 +1306,9 @@ class CollectionAPIView(APIView):
         return Response({
             'collection': CollectionSerializer(collection, context={'request': request}).data,
             'products_with_details': products_with_details,
+            # Sponsored products from this collection (ads/), first page only, above the results.
+            'sponsored': ad_services.sponsored(request, 'collection', scope=Q(pk__in=collection.get_products_qs().order_by().values('pk')),
+                                               scope_key=collection.slug) if page == 1 else [],
             'next': next_url,
             'previous': prev_url,
             'total': total_items,
