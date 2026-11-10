@@ -38,6 +38,25 @@ class RegisterView(generics.CreateAPIView):
         ip = get_client_ip(request)
         if not verify_turnstile(token, ip):
             return Response({'detail': 'CAPTCHA verification failed. Please try again.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Email already taken: say how that account signs in, so someone who
+        # forgot they used Google isn't pushed into a second account.
+        email = (request.data.get('email') or '').strip()
+        existing = User.objects.filter(email__iexact=email).first() if email else None
+        if existing is not None:
+            from .google_auth import google_link
+            if google_link(existing) is not None and not existing.has_usable_password():
+                return Response({
+                    'code': 'email_google',
+                    'detail': 'You already have an account with this email, and it signs in with Google. '
+                              'Continue with Google, or choose "Forgot password?" to add a password to it.',
+                    'email': ['An account with this email already exists (signs in with Google).'],
+                }, status=status.HTTP_409_CONFLICT)
+            return Response({
+                'code': 'email_exists',
+                'detail': 'An account with this email already exists. Sign in, or reset your password.',
+                'email': ['An account with this email already exists. Login or reset password'],
+            }, status=status.HTTP_409_CONFLICT)
         return super().post(request, *args, **kwargs)
 
 

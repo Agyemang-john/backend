@@ -25,6 +25,16 @@ from .views import (
     CustomerSessionRevokeView,
     CustomerLogoutAllView,
 )
+from .google_auth import (
+    GoogleSignInView,
+    GoogleCompleteSignupView,
+    GoogleLinkView,
+    SignInMethodsView,
+    ConnectGoogleView,
+    DisconnectGoogleView,
+    RemovePasswordView,
+    SendPasswordSetupLinkView,
+)
 from .mobile_views import MobileLoginView, MobileTokenRefreshView, MobileLogoutView
 from .seller_signup_views import (
     SellerSignupStartView,
@@ -58,6 +68,16 @@ urlpatterns = [
     path('jwt/refresh/', CustomTokenRefreshView.as_view()),
     path('jwt/verify/', CustomTokenVerifyView.as_view()),
     path('logout/', LogoutView.as_view()),
+
+    # Continue with Google (shoppers) + switching sign-in methods
+    path('auth/google/', GoogleSignInView.as_view(), name='google-sign-in'),
+    path('auth/google/complete/', GoogleCompleteSignupView.as_view(), name='google-complete'),
+    path('auth/google/link/', GoogleLinkView.as_view(), name='google-link'),
+    path('auth/sign-in-methods/', SignInMethodsView.as_view(), name='sign-in-methods'),
+    path('auth/sign-in-methods/google/connect/', ConnectGoogleView.as_view(), name='sign-in-methods-google-connect'),
+    path('auth/sign-in-methods/google/disconnect/', DisconnectGoogleView.as_view(), name='sign-in-methods-google-disconnect'),
+    path('auth/sign-in-methods/password/remove/', RemovePasswordView.as_view(), name='sign-in-methods-password-remove'),
+    path('auth/sign-in-methods/password/setup-link/', SendPasswordSetupLinkView.as_view(), name='sign-in-methods-password-link'),
 
     # Native app: tokens in the body, never cookies (mobile_views.py)
     path('mobile/auth/login/', MobileLoginView.as_view(), name='mobile-login'),

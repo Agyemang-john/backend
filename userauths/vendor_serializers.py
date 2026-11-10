@@ -66,6 +66,18 @@ class VendorLoginSerializer(serializers.Serializer):
         # check_password on the account found above: authenticate() would
         # also refuse inactive accounts, hiding the "not activated" message.
         authenticated_user = user if user.check_password(password) else None
+        if authenticated_user is None and not user.has_usable_password():
+            # Shopper account created with Google: the dashboard needs a
+            # password (+ code), so point them at adding one.
+            from .google_auth import google_link
+            if google_link(user) is not None:
+                raise serializers.ValidationError({
+                    "non_field_errors": [
+                        "This account signs in with Google, and the seller dashboard needs a password. "
+                        "Add one with \"Forgot password?\" (we'll email you a link), then sign in here."
+                    ],
+                    "code": "google_account",
+                })
         if authenticated_user is None:
             User.objects.filter(pk=user.pk).update(
                 failed_login_attempts=F("failed_login_attempts") + 1

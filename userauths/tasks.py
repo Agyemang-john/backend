@@ -185,3 +185,31 @@ def send_new_sign_in_alert(self, event_id):
         msg.send(fail_silently=False)
     except Exception as exc:
         return self.retry(exc=exc)
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def send_sign_in_method_email(self, user_id, subject, line):
+    """Tell a shopper that a way of signing in was added or removed (google_auth.py)."""
+    from .models import User
+    user = User.objects.filter(pk=user_id).first()
+    if user is None:
+        return
+    site = getattr(settings, 'SITE_URL', 'https://negromart.com').rstrip('/')
+    context = {
+        'first_name': user.first_name,
+        'subject': subject,
+        'line': line,
+        'methods_url': f'{site}/dashboard/password-management',
+    }
+    html = render_to_string('email/sign-in-method-changed.html', context)
+    text = (
+        f"Hello {user.first_name},\n\n{line}\n\n"
+        "If this was you, there's nothing to do.\n"
+        f"If it wasn't, reset your password straight away and review your sign-in methods: {context['methods_url']}"
+    )
+    try:
+        msg = EmailMultiAlternatives(f'Negromart: {subject}', text, settings.DEFAULT_FROM_EMAIL, [user.email])
+        msg.attach_alternative(html, 'text/html')
+        msg.send(fail_silently=False)
+    except Exception as exc:
+        return self.retry(exc=exc)

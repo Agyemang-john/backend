@@ -447,6 +447,12 @@ class SecurityEvent(models.Model):
     OTHERS_SIGNED_OUT = 'others_signed_out'
     SIGNED_OUT_EVERYWHERE = 'signed_out_everywhere'
     PASSWORD_CHANGED = 'password_changed'
+    # Shopper sign-in methods (userauths/google_auth.py)
+    ACCOUNT_CREATED_GOOGLE = 'account_created_google'
+    GOOGLE_CONNECTED = 'google_connected'
+    GOOGLE_DISCONNECTED = 'google_disconnected'
+    PASSWORD_REMOVED = 'password_removed'
+    PASSWORD_ADDED = 'password_added'
     EVENT_CHOICES = [
         (SIGN_IN, 'Signed in'),
         (SIGN_OUT, 'Signed out'),
@@ -454,6 +460,11 @@ class SecurityEvent(models.Model):
         (OTHERS_SIGNED_OUT, 'Signed out other devices'),
         (SIGNED_OUT_EVERYWHERE, 'Signed out everywhere'),
         (PASSWORD_CHANGED, 'Password changed'),
+        (ACCOUNT_CREATED_GOOGLE, 'Account created with Google'),
+        (GOOGLE_CONNECTED, 'Google sign-in connected'),
+        (GOOGLE_DISCONNECTED, 'Google sign-in disconnected'),
+        (PASSWORD_REMOVED, 'Password removed (Google only)'),
+        (PASSWORD_ADDED, 'Password added'),
     ]
 
     user = models.ForeignKey(User, related_name='security_events', on_delete=models.CASCADE)

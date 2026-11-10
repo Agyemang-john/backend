@@ -55,6 +55,15 @@ class NotificationCountConsumer(AsyncWebsocketConsumer):
         if hasattr(self, "group_name"):
             await self.channel_layer.group_discard(self.group_name, self.channel_name)
 
+    async def receive(self, text_data=None, bytes_data=None):
+        # Keepalive only: the client pings and drops the socket if no pong comes.
+        try:
+            data = json.loads(text_data or "")
+        except (json.JSONDecodeError, TypeError):
+            return
+        if isinstance(data, dict) and data.get("action") == "ping":
+            await self.send(text_data='{"type": "pong"}')
+
     # ── Group event handlers ──────────────────────────────────────────────────
 
     async def new_notification(self, event):

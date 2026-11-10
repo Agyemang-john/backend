@@ -299,6 +299,11 @@ SITE_NAME = "Negromart"
 DOMAIN = config('DOMAIN')
 FRONTEND_LOGIN_URL = config("FRONTEND_LOGIN_URL")
 
+# "Continue with Google" (userauths/google_auth.py): the OAuth *web* client ID
+# from Google Cloud Console. ID tokens must be issued for exactly this client.
+# Blank = Google sign-in switched off (endpoints answer 503).
+GOOGLE_OAUTH_CLIENT_ID = config('GOOGLE_OAUTH_CLIENT_ID', default='')
+
 # Emailing settings
 SITE_URL = config('FRONTEND_BASE_URL')   # set correctly in each environment
 # Public URL of this API; makes local /media/ paths absolute in emails (blank: S3 URLs already are).

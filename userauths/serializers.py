@@ -80,6 +80,10 @@ otp_token_generator = OTPTokenGenerator()
 
 MAX_FAILED_ATTEMPTS = 5      # Max failed login attempts before lockout
 LOCKOUT_TIME = timedelta(minutes=15)  # Duration of lockout
+GOOGLE_ONLY_MESSAGE = (
+    "This account signs in with Google. Use \"Continue with Google\", "
+    "or choose \"Forgot password?\" to add a password."
+)
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     email = serializers.CharField()  # can be email or phone
@@ -125,6 +129,16 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         # 4. Authenticate credentials first, then reveal account-specific state
         authenticated_user = authenticate(email_or_phone=identifier, password=password)
         if authenticated_user is None:
+            # Created with Google and no password set: say so instead of
+            # "invalid credentials" (there is no password to guess, so this
+            # isn't counted as a failed attempt).
+            if not user.has_usable_password():
+                from .google_auth import google_link
+                if google_link(user) is not None:
+                    raise serializers.ValidationError({
+                        "non_field_errors": [GOOGLE_ONLY_MESSAGE],
+                        "code": "google_account",
+                    })
             User.objects.filter(pk=user.pk).update(
                 failed_login_attempts=F("failed_login_attempts") + 1
             )
