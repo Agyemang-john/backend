@@ -35,6 +35,9 @@ urlpatterns = [
     path('checkout/', views.CheckoutAPIView.as_view(), name='checkout'),
     path('update-delivery/', views.UpdateDeliveryOptionAPIView.as_view(), name='update-delivery'),
     path('summary/', views.CartSummaryAPIView.as_view(), name='summary'),
+    path('coupon/', views.CartCouponView.as_view(), name='cart-coupon'),
+    path('coupons/offers/', views.CouponOffersView.as_view(), name='coupon-offers'),
+    path('coupons/<int:pk>/clip/', views.CouponClipView.as_view(), name='coupon-clip'),
     path('address/default/', views.DefaultAddressAPIView.as_view(), name='default-address'),
     path('receipt/<int:order_id>/', views.OrderReceiptAPIView.as_view(), name='order-receipt'),
 ]

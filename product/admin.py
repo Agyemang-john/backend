@@ -304,13 +304,42 @@ class ProductDeliveryOptionModelAdmin(admin.ModelAdmin):
             'product', 'variant__product', 'variant__size', 'variant__color', 'delivery_option')
 
 
+class CouponRedemptionInline(admin.TabularInline):
+    model = CouponRedemption
+    extra = 0
+    can_delete = False
+    fields = ['order', 'user', 'amount', 'created_at']
+    readonly_fields = fields
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
 class CouponAdmin(admin.ModelAdmin):
-    search_fields = ['code']
-    autocomplete_fields = ['applicable_products', 'applicable_categories']
+    """Store empty = a Negromart coupon (Negromart pays); store set = the store pays (order/coupons.py)."""
+    list_display = ['code', 'funded_by', 'discount', 'clippable', 'valid_from', 'valid_to', 'used_count', 'max_uses',
+                    'budget', 'discount_spent', 'active']
+    list_filter = ['active', 'clippable', ('vendor', admin.EmptyFieldListFilter)]
+    list_select_related = ['vendor']
+    search_fields = ['code', 'vendor__name']
+    autocomplete_fields = ['vendor', 'applicable_products', 'applicable_categories']
+    readonly_fields = ['used_count', 'discount_spent', 'created_at', 'updated_at']
+    inlines = [CouponRedemptionInline]
+
+    @admin.display(description='Paid by')
+    def funded_by(self, obj):
+        return obj.vendor.name if obj.vendor_id else 'Negromart'
+
+    @admin.display(description='Discount')
+    def discount(self, obj):
+        if obj.is_percentage:
+            cap = f" (max GHS {obj.max_discount_amount})" if obj.max_discount_amount else ''
+            return f"{obj.discount_percentage:g}%{cap}"
+        return f"GHS {obj.discount_amount}"
 
 
 class ClippedCouponAdmin(admin.ModelAdmin):
-    list_display = ['user', 'coupon']
+    list_display = ['user', 'coupon', 'clipped_at']
     autocomplete_fields = ['user', 'coupon']
 
 class VariantImageAdmin(admin.ModelAdmin):

@@ -82,7 +82,7 @@ def check_eligibility(line, customer, reason, now=None):
 
 def _unit_price(line):
     if line.quantity:
-        return (Decimal(line.amount) / line.quantity).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        return (line.paid_amount / line.quantity).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
     return Decimal(line.price)
 
 

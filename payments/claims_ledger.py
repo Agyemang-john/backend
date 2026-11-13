@@ -11,7 +11,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 
-from .ledger import _money, _post_once, _title, post_shipment_earnings
+from .ledger import _money, _post_once, _title, post_shipment_earnings, seller_refund_debit
 from .ledger_models import LedgerEntry
 
 
@@ -23,7 +23,7 @@ def post_claim_refund(claim):
     for shipment in line.shipments.filter(status='delivered', ledger_posted_at__isnull=True):
         post_shipment_earnings(shipment.pk)
 
-    refund = _money(claim.resolution_amount or 0)
+    refund, base = seller_refund_debit(line, claim.resolution_amount)
     if refund <= 0:
         return
     with transaction.atomic():
@@ -35,8 +35,8 @@ def post_claim_refund(claim):
         now = timezone.now()
         _post_once(vendor, LedgerEntry.REFUND, -refund, line, now, f"Claim {claim.reference}: refund for {_title(line)}")
         commission = LedgerEntry.objects.filter(order_product=line, entry_type=LedgerEntry.COMMISSION).first()
-        if commission and line.amount:
-            share = _money(-commission.amount * refund / Decimal(line.amount))
+        if commission and base:
+            share = _money(-commission.amount * refund / base)
             if share > 0:
                 _post_once(vendor, LedgerEntry.COMMISSION_REFUND, share, line, now,
                            f"Commission returned for claim {claim.reference}", rate=commission.rate)

@@ -103,13 +103,17 @@ def render(invoice: Invoice) -> bytes:
     story += [table, Spacer(1, 4 * mm)]
 
     totals = [['Items subtotal', d['subtotal']]]
+    # Invoices issued before coupons worked have no 'discount' key.
+    if d.get('discount', '0.00') != '0.00':
+        label = f"Coupon {d['coupon_code']}" if d.get('coupon_code') else 'Coupon'
+        totals.append([label, f"-{d['discount']}"])
     if d['charges'] != '0.00':
         totals.append(['Delivery & handling', d['charges']])
+    total_row = len(totals)
     totals.append([f'Total ({cur})', d['total']])
     for c in d['tax_components']:
         totals.append([f"Includes {c['name']}", c['amount']])
     tt = Table(totals, colWidths=[50 * mm, 30 * mm], hAlign='RIGHT')
-    total_row = 2 if d['charges'] != '0.00' else 1
     tt.setStyle(TableStyle([
         ('FONTSIZE', (0, 0), (-1, -1), 9),
         ('ALIGN', (1, 0), (1, -1), 'RIGHT'),

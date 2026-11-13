@@ -129,6 +129,53 @@ class AdsTests(TestCase):
         self.assertTrue(res.data['sponsored'][0]['sponsored'])
         self.assertEqual(services._candidates('deals', scope=[]), [], "not on a deal, not a deals ad")
 
+    def test_sponsored_respect_shopper_filters(self):
+        """A GHS 2,000 ad never shows on a GHS 50-1,000 page; its slot goes to an ad that fits."""
+        from product.models import Collection
+        from recommendation.models import ProductDealScore
+        Product.objects.filter(pk=self.products[0].pk).update(price=Decimal('2000'))
+        self.campaign(0, '3.00')          # top bidder, but too dear for the filter
+        self.campaign(1, '1.00')          # GHS 500, fits
+        pricey, fits = self.products[0].pk, self.products[1].pk
+
+        def ads(url):
+            res = APIClient().get(url)
+            self.assertEqual(res.status_code, 200, url)
+            return [r['product']['id'] if 'product' in r else r['id'] for r in res.data['sponsored']]
+
+        cat = f'/api/v1/product/category/{self.sub.slug}/'
+        self.assertEqual(ads(cat), [pricey, fits], "no filter: both")
+        self.assertEqual(ads(cat + '?from=50&to=1000'), [fits])
+        self.assertEqual(ads(cat + '?from=1500'), [pricey])
+        self.assertEqual(ads(cat + '?to=100'), [], "nothing fits, nothing shown")
+        self.assertEqual(ads(cat + f'?vendor={self.shops[1].pk}'), [fits], "store filter too")
+        self.assertEqual(ads(cat + '?rating=4'), [], "rating filter too")
+
+        brand = f'/api/v1/product/brand/{self.brand.slug}/'
+        self.assertEqual(ads(brand + '?from=50&to=1000'), [fits])
+
+        # Search: keyword ads needn't match the text, but must match the filters.
+        AdKeyword.objects.create(campaign=AdCampaign.objects.get(vendor=self.shops[0]), phrase='galaxy')
+        self.assertIn(pricey, ads('/api/v1/product/search/?q=galaxy'))
+        self.assertNotIn(pricey, ads('/api/v1/product/search/?q=galaxy&from=50&to=1000'))
+        other = Brand.objects.create(title='Ads Filter Brand')
+        self.assertEqual(ads(f'/api/v1/product/search/?q=galaxy&brand={other.pk}'), [])
+
+        coll = Collection.objects.create(title='Ads Filter Picks', slug='ads-filter-picks', is_active=True,
+                                         filter_type='sub_category', sub_category=self.sub)
+        self.assertEqual(ads(f'/api/v1/product/collection/{coll.slug}/?from=50&to=1000'), [fits])
+
+        seller = f'/api/v1/vendor/seller-detail/{self.shops[0].slug}/products/'
+        self.assertEqual(ads(seller), [pricey])
+        self.assertEqual(ads(seller + '?min_price=50&max_price=1000'), [])
+
+        for p, price in ((self.products[0], '1800'), (self.products[1], '400')):
+            ProductDealScore.objects.create(product=p, discount_percent=20, best_price=Decimal(price),
+                                            compare_at_price=Decimal(price) * 2, score=1, is_eligible=True)
+        self.assertEqual(sorted(ads('/api/v1/recommendations/deals/')), sorted([pricey, fits]))
+        self.assertEqual(ads('/api/v1/recommendations/deals/?from=50&to=1000'), [fits])
+        self.assertEqual(ads(f'/api/v1/recommendations/deals/?brand={other.pk}'), [])
+
     def test_budget_stops_serving(self):
         c = self.campaign(0, '2.00', budget='5')
         AdDailyStat.objects.create(campaign=c, product=self.products[0], date=timezone.localdate(), spend=Decimal('4.00'))

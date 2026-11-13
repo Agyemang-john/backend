@@ -295,6 +295,111 @@ class GoogleAuthTests(TestCase):
             res = self.client.post('/api/auth/google/', {'credential': 'x'}, format='json')
         self.assertEqual(res.status_code, 503)
 
+    # ── Seller registration with Google ──────────────────────────────────────
+
+    def unthrottle(self):
+        # These walk several steps in a row; the 5/min sign-in limit isn't under test.
+        for cls in ('LoginThrottle', 'AnonLoginThrottle'):
+            p = mock.patch(f'userauths.custom_throttles.{cls}.allow_request', return_value=True)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_seller_google_signup_requires_a_strong_password(self):
+        self.unthrottle()
+        res = self.client.post('/api/auth/google/', {'credential': 'x', 'seller': True}, format='json')
+        self.assertEqual(res.data['status'], 'needs_profile')
+        self.assertTrue(res.data['password_required'])
+        ticket = res.data['ticket']
+        body = {'ticket': ticket, 'first_name': 'Ama', 'last_name': 'Mensah', 'phone': '+233240000009'}
+
+        res = self.client.post('/api/auth/google/complete/', body, format='json')
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('password', res.data)
+        res = self.client.post('/api/auth/google/complete/', {**body, 'password': 'weakpass'}, format='json')
+        self.assertEqual(res.status_code, 400)
+        self.assertFalse(User.objects.filter(email='ama@gmail.com').exists())
+
+        res = self.client.post('/api/auth/google/complete/', {**body, 'password': PASSWORD}, format='json')
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertIn('access', res.cookies)
+        user = User.objects.get(email='ama@gmail.com')
+        self.assertTrue(user.check_password(PASSWORD))
+        self.assertTrue(user.is_email_verified)
+        self.assertFalse(user.is_phone_verified)  # the seller page texts a code next
+        self.assertTrue(UserSocialAuth.objects.filter(user=user, uid='g-123').exists())
+
+        # Both ways in work, and the store application knows it has a password.
+        self.client.cookies.clear()
+        self.sign_in_as(user)
+        self.assertTrue(self.client.get('/api/v1/vendor/check/').data['has_password'])
+
+    def test_shopper_google_signup_ignores_a_password(self):
+        res = self.client.post('/api/auth/google/', {'credential': 'x'}, format='json')
+        self.assertFalse(res.data['password_required'])
+        res = self.client.post('/api/auth/google/complete/', {
+            'ticket': res.data['ticket'], 'first_name': 'Ama', 'last_name': 'Mensah',
+            'phone': '+233240000009', 'password': PASSWORD,
+        }, format='json')
+        self.assertEqual(res.status_code, 201)
+        self.assertFalse(User.objects.get(email='ama@gmail.com').has_usable_password())
+
+    def test_google_only_shopper_adds_password_when_registering_as_seller(self):
+        self.unthrottle()
+        user = self.google_user()
+        self.assertFalse(user.has_usable_password())
+
+        # Shopper sign-in is unchanged...
+        res = self.client.post('/api/auth/google/', {'credential': 'x'}, format='json')
+        self.assertEqual(res.data['status'], 'signed_in')
+        self.client.cookies.clear()
+
+        # ...but on the seller page a password comes first, with no session yet.
+        res = self.client.post('/api/auth/google/', {'credential': 'x', 'seller': True}, format='json')
+        self.assertEqual(res.data['status'], 'needs_password')
+        self.assertNotIn('access', res.cookies)
+        ticket = res.data['ticket']
+
+        res = self.client.post('/api/auth/google/seller-password/', {'ticket': ticket, 'password': 'short'}, format='json')
+        self.assertEqual(res.status_code, 400)
+        mail.outbox.clear()
+        res = self.client.post('/api/auth/google/seller-password/', {'ticket': ticket, 'password': PASSWORD}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertIn('access', res.cookies)
+        user.refresh_from_db()
+        self.assertTrue(user.check_password(PASSWORD))
+        self.assertEqual(len(mail.outbox), 1)  # "a password was added" notice
+
+        # Next time on the seller page they go straight in.
+        res = self.client.post('/api/auth/google/', {'credential': 'x', 'seller': True}, format='json')
+        self.assertEqual(res.data['status'], 'signed_in')
+
+    def test_seller_password_ticket_cannot_be_forged_or_reused_for_signup(self):
+        self.unthrottle()
+        user = self.google_user()
+        res = self.client.post('/api/auth/google/', {'credential': 'x', 'seller': True}, format='json')
+        ticket = res.data['ticket']
+        # A signup ticket is not a password ticket, and vice versa.
+        res = self.client.post('/api/auth/google/complete/', {
+            'ticket': ticket, 'first_name': 'A', 'last_name': 'B', 'phone': '+233240000010'}, format='json')
+        self.assertEqual(res.data['code'], 'ticket_invalid')
+        res = self.client.post('/api/auth/google/seller-password/', {'ticket': ticket + 'x', 'password': PASSWORD}, format='json')
+        self.assertEqual(res.data['code'], 'ticket_invalid')
+        # Google disconnected meanwhile: the ticket no longer matches a link.
+        UserSocialAuth.objects.filter(user=user).delete()
+        res = self.client.post('/api/auth/google/seller-password/', {'ticket': ticket, 'password': PASSWORD}, format='json')
+        self.assertEqual(res.data['code'], 'ticket_invalid')
+
+    def test_store_application_needs_a_password(self):
+        self.unthrottle()
+        user = self.google_user()
+        user.phone_verified_at = user.email_verified_at
+        user.save()
+        self.sign_in_as(user)
+        self.assertFalse(self.client.get('/api/v1/vendor/check/').data['has_password'])
+        res = self.client.post('/api/v1/vendor/register/', {}, format='multipart')
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data['code'], 'password_needed')
+
 
 class VerifyCredentialTests(TestCase):
     """The real token check: only verified emails, only Google's issuers."""

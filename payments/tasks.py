@@ -25,9 +25,13 @@ def create_order_from_payment_task(
     cart_items_data,
     address_id,
     ip,
-    reference
+    reference,
+    coupon=None,
+    coupons=None,
+    code_id=None,
 ):
     from django.db import transaction
+    from order.coupons import redeem
     from order.pricing import order_unit_price, reserve_flash_units
     from order.stock import deduct_stock
 
@@ -83,6 +87,9 @@ def create_order_from_payment_task(
                     quantity=quantity,
                     price=order_unit_price(amount, quantity),
                     amount=amount,
+                    # Coupon share, fixed at payment time (order/coupons.py)
+                    discount=Decimal(item_data.get("discount") or 0),
+                    seller_discount=Decimal(item_data.get("seller_discount") or 0),
                     selected_delivery_option_id=item_data["delivery_option_id"],
                     **sourcing_snapshot(product, variant, delivery_option_id=item_data["delivery_option_id"]),
                 ))
@@ -93,6 +100,9 @@ def create_order_from_payment_task(
             # Bulk create order products
             OrderProduct.objects.bulk_create(order_products)
             order.vendors.set(unique_vendors)
+            if coupon and not coupons:      # task queued before clip coupons existed
+                coupons, code_id = [coupon], coupon.get("id")
+            redeem(order, coupons, code_id=code_id)
 
             # Generate unique order number
             while True:

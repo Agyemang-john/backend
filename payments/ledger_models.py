@@ -24,6 +24,9 @@ class LedgerEntry(models.Model):
     PAYOUT = 'payout'
     ADJUSTMENT = 'adjustment'
     AD_SPEND = 'ad_spend'
+    # The store's own coupon on a sold line (order/coupons.py). Negromart
+    # coupons never touch the seller's earnings.
+    SELLER_DISCOUNT = 'seller_discount'
     TYPE_CHOICES = [
         (SALE, 'Sale'),
         (COMMISSION, 'Commission'),
@@ -33,9 +36,10 @@ class LedgerEntry(models.Model):
         (PAYOUT, 'Payout'),
         (ADJUSTMENT, 'Adjustment'),
         (AD_SPEND, 'Sponsored products'),
+        (SELLER_DISCOUNT, 'Your coupon'),
     ]
     # Types tied to one order line, at most once per line (idempotent posting).
-    PER_LINE_TYPES = (SALE, COMMISSION, DELIVERY_EARNING, REFUND, COMMISSION_REFUND)
+    PER_LINE_TYPES = (SALE, COMMISSION, DELIVERY_EARNING, REFUND, COMMISSION_REFUND, SELLER_DISCOUNT)
 
     vendor = models.ForeignKey('vendor.Vendor', on_delete=models.PROTECT, related_name='ledger_entries')
     entry_type = models.CharField(max_length=30, choices=TYPE_CHOICES)
@@ -72,7 +76,7 @@ class LedgerEntry(models.Model):
             models.UniqueConstraint(
                 fields=['order_product', 'entry_type'],
                 condition=Q(entry_type__in=('sale', 'commission', 'delivery_earning',
-                                            'refund', 'commission_refund')),
+                                            'refund', 'commission_refund', 'seller_discount')),
                 name='uniq_ledger_entry_per_line_and_type',
             ),
         ]

@@ -5,6 +5,9 @@ The extra facts a storefront product card shows under the price, Walmart-style:
     "arrives tomorrow" (fastest delivery option, plus sourcing days),
     and one badge: the live flash-sale label ("Clearance", "Lightning Deal"),
     "Best seller", "Only 3 left" or "New".
+    Plus `coupon`: the clip-coupon offer ("Save 10% with coupon"), from
+    order/coupons.py offers_for_products. Not cached per product, so a new or
+    ended coupon shows within a minute.
 
 Shared by every listing (category, brand, search, collection, deals, seller
 storefront, sponsored rows) so cards look the same everywhere.
@@ -134,7 +137,12 @@ def card_extras(products):
             cache.set_many({keys[pid]: card for pid, card in built.items()}, CACHE_TTL)
         except Exception:  # noqa: BLE001
             pass
-    return out
+    from order.coupons import offers_for_products
+    try:
+        offers = offers_for_products(ids)
+    except Exception:  # noqa: BLE001 - a badge must never break a listing
+        offers = {}
+    return {pid: {**card, 'coupon': offers.get(pid)} for pid, card in out.items()}
 
 
 def forget(product_id):

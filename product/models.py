@@ -897,31 +897,123 @@ class ProductDeliveryOption(models.Model):
         )
     
 class Coupon(models.Model):
+    """
+    A discount code (rules and maths in order/coupons.py).
+
+    vendor empty  → a Negromart coupon: any store's items, Negromart pays the
+                    discount and sellers are paid the full price.
+    vendor set    → that store's coupon: only its items, and the discount comes
+                    out of the store's earnings (LedgerEntry.SELLER_DISCOUNT).
+
+    clippable     → shown as a "Save 10% with coupon" badge on the products it
+                    covers; the shopper clips it and it applies by itself at
+                    checkout (no code to type). Otherwise it's a private code.
+    budget        → stop once this much discount has been given (GHS).
+    """
     code = models.CharField(max_length=50, unique=True)
-    discount_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    vendor = models.ForeignKey(
+        Vendor, on_delete=models.CASCADE, null=True, blank=True, related_name='coupons',
+        help_text="Leave empty for a Negromart coupon (Negromart pays the discount).",
+    )
+    # Exactly one of the two: a fixed amount off, or a percentage off.
+    discount_amount = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True,
+        help_text="Fixed amount off (GHS). Leave empty for a percentage coupon.",
+    )
     discount_percentage = models.FloatField(null=True, blank=True)
+    max_discount_amount = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True,
+        help_text="Cap for a percentage coupon (GHS). Empty = no cap.",
+    )
     valid_from = models.DateTimeField()
     valid_to = models.DateTimeField()
     active = models.BooleanField(default=True)
-    max_uses = models.IntegerField(null=True, blank=True)
+    max_uses = models.IntegerField(null=True, blank=True, help_text="Total orders. Empty = unlimited.")
+    per_user_limit = models.PositiveIntegerField(
+        null=True, blank=True, default=1, help_text="Orders per shopper. Empty = unlimited.",
+    )
     used_count = models.IntegerField(default=0)
-    min_purchase_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    min_purchase_amount = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True,
+        help_text="Minimum spend on the items the coupon applies to.",
+    )
     applicable_products = models.ManyToManyField(Product, blank=True)
     applicable_categories = models.ManyToManyField(Category, blank=True)
+    clippable = models.BooleanField(
+        default=False,
+        help_text="Show a clip-coupon badge on the products it covers; applies at checkout once clipped.",
+    )
+    budget = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+        help_text="Stop once this much discount has been given (GHS). Empty = no budget.",
+    )
+    discount_spent = models.DecimalField(max_digits=12, decimal_places=2, default=0, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return self.code
 
+    def save(self, *args, **kwargs):
+        # Codes are typed by shoppers: store them one way so lookups are exact.
+        self.code = (self.code or '').strip().upper()
+        super().save(*args, **kwargs)
+        from order.coupons import forget_offers   # badges show the change straight away
+        forget_offers()
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        has_amount = self.discount_amount not in (None, 0)
+        has_percent = self.discount_percentage not in (None, 0)
+        if has_amount == has_percent:
+            raise ValidationError("Set either a fixed amount off or a percentage off (not both).")
+        if has_percent and not 0 < self.discount_percentage <= 100:
+            raise ValidationError({'discount_percentage': "Between 0 and 100."})
+        if has_amount and self.discount_amount < 0:
+            raise ValidationError({'discount_amount': "Must be positive."})
+        if self.valid_from and self.valid_to and self.valid_to <= self.valid_from:
+            raise ValidationError({'valid_to': "Must be after the start."})
+
+    @property
+    def is_percentage(self):
+        return self.discount_amount in (None, 0) and bool(self.discount_percentage)
+
+    @property
+    def budget_left(self):
+        if self.budget is None:
+            return None
+        return max(self.budget - (self.discount_spent or 0), 0)
+
     def is_valid(self):
         now = timezone.now()
-        return self.active and self.valid_from <= now <= self.valid_to and (self.max_uses is None or self.used_count < self.max_uses)
+        return (self.active and self.valid_from <= now <= self.valid_to
+                and (self.max_uses is None or self.used_count < self.max_uses)
+                and (self.budget is None or self.budget_left > 0))
+
+
+class CouponRedemption(models.Model):
+    """One coupon used on one order (an order can carry clipped coupons plus one code)."""
+    coupon = models.ForeignKey(Coupon, on_delete=models.PROTECT, related_name='redemptions')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='+')
+    order = models.ForeignKey('order.Order', on_delete=models.CASCADE, related_name='coupon_redemptions')
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['coupon', 'user'], name='coupon_redemption_user_idx')]
+        constraints = [models.UniqueConstraint(fields=['coupon', 'order'], name='uniq_coupon_per_order')]
+
+    def __str__(self):
+        return f"{self.coupon.code} on order {self.order_id} ({self.amount})"
 
 class ClippedCoupon(models.Model):
+    """A shopper clipped a coupon badge; it applies by itself at checkout (order/coupons.py)."""
     user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='clipped_coupons', on_delete=models.CASCADE)
-    coupon = models.ForeignKey(Coupon, on_delete=models.CASCADE)
+    coupon = models.ForeignKey(Coupon, on_delete=models.CASCADE, related_name='clips')
     clipped_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['user', 'coupon'], name='uniq_clip_per_user')]
 
     def __str__(self):
         return f"{self.user.email} clipped {self.coupon.code}"

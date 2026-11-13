@@ -79,9 +79,9 @@ def open_claim(user, line, reason, details, amount=None):
     details = (details or '').strip()
     if len(details) < 20:
         raise ClaimError("Tell us what happened in at least 20 characters.")
-    amount = Decimal(line.amount) if amount in (None, '') else Decimal(str(amount))
-    if amount <= 0 or amount > Decimal(line.amount):
-        raise ClaimError(f"Claim between GHS 0.01 and GHS {line.amount}.")
+    amount = line.paid_amount if amount in (None, '') else Decimal(str(amount))
+    if amount <= 0 or amount > line.paid_amount:
+        raise ClaimError(f"Claim between GHS 0.01 and GHS {line.paid_amount}.")
     try:
         with transaction.atomic():
             claim = Claim.objects.create(
@@ -111,8 +111,8 @@ def seller_offer(claim, user, amount, note=''):
     if claim.status != Claim.OPEN:
         raise ClaimError("You can only respond while the claim is waiting for you.")
     amount = Decimal(str(amount))
-    if amount <= 0 or amount > Decimal(claim.order_product.amount):
-        raise ClaimError(f"Offer between GHS 0.01 and GHS {claim.order_product.amount}.")
+    if amount <= 0 or amount > claim.order_product.paid_amount:
+        raise ClaimError(f"Offer between GHS 0.01 and GHS {claim.order_product.paid_amount}.")
     claim.status, claim.seller_offer_amount, claim.seller_offered_at = Claim.SELLER_OFFERED, amount, timezone.now()
     claim.save(update_fields=['status', 'seller_offer_amount', 'seller_offered_at', 'updated_at'])
     _say(claim, ClaimMessage.SELLER, note or f"I'm offering a refund of GHS {amount}.", author=user)
@@ -160,7 +160,7 @@ def resolve_for_buyer(claim, amount, staff_user, note):
     claim = Claim.objects.select_for_update().get(pk=claim.pk)
     if not claim.is_active:
         raise ClaimError("This claim is already closed.")
-    amount = min(Decimal(str(amount)), Decimal(claim.order_product.amount))
+    amount = min(Decimal(str(amount)), claim.order_product.paid_amount)
     claim.status, claim.resolution_amount = Claim.RESOLVED_BUYER, amount
     claim.resolution_note, claim.resolved_by, claim.resolved_at = note[:2000], staff_user, timezone.now()
     claim.save()

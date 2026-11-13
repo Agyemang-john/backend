@@ -48,7 +48,7 @@ def _claim_json(c, viewer, with_messages=False):
         'seller_respond_by': c.seller_respond_by, 'created_at': c.created_at, 'resolved_at': c.resolved_at,
         'refund_sent_at': c.refund_sent_at,
         'order': {'id': c.order_id, 'number': c.order.order_number},
-        'item': {'title': p.title if p else 'Item', 'image': image, 'quantity': line.quantity, 'amount': line.amount},
+        'item': {'title': p.title if p else 'Item', 'image': image, 'quantity': line.quantity, 'amount': line.paid_amount},
         'seller': c.vendor.name if c.vendor else '',
     }
     if with_messages:
@@ -83,7 +83,7 @@ class EligibilityView(APIView):
         check = services.eligibility(line, request.user)
         return Response({'can_claim': check.ok, 'message': check.message,
                          'reasons': [{'value': r, 'label': dict(Claim.REASON_CHOICES)[r]} for r in check.reasons],
-                         'max_amount': line.amount})
+                         'max_amount': line.paid_amount})
 
 
 class MyClaimsView(APIView):

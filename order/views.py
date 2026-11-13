@@ -402,20 +402,12 @@ class CheckoutAPIView(APIView):
 
             delivery_date_ranges[product.id] = date_range
 
-        clipped_coupons = ClippedCoupon.objects.filter(user=user).select_related('coupon')
-        applied_coupon = None
-        discount_amount = Decimal(0)
-
-        if 'applied_coupon' in request.session:
-            try:
-                coupon = Coupon.objects.get(id=request.session['applied_coupon'])
-                if coupon.is_valid() and clipped_coupons.filter(coupon=coupon).exists():
-                    applied_coupon = coupon
-                    discount_amount = coupon.discount_amount or (
-                        cart.total_price * Decimal(coupon.discount_percentage / 100)
-                    ).quantize(Decimal('0.01'))
-            except Coupon.DoesNotExist:
-                del request.session['applied_coupon']
+        # Coupon entered at checkout (order/coupons.py; the shopper applies it
+        # with CartCouponView). Same maths as the summary and the charge.
+        clipped_coupons = Coupon.objects.filter(clips__user=user)
+        quote = cart.coupon_quote()
+        applied_coupon = quote.code.coupon if quote.code.ok else None
+        discount_amount = quote.discount
 
         response_data = {
             # Some items are imported or made to order: checkout asks the
@@ -426,7 +418,7 @@ class CheckoutAPIView(APIView):
             'total_delivery_fee': total_delivery_fee,
             'product_delivery_options': all_product_delivery_options,
             'total_packaging_fee': cart.calculate_packaging_fees(),
-            'grand_total': cart.calculate_grand_total() - discount_amount,
+            'grand_total': cart.calculate_grand_total(quote=quote),
             'delivery_date_ranges': delivery_date_ranges,
             'buyer_country': buyer_country,
             'invalid_items': invalid_items,
@@ -595,9 +587,24 @@ class CartSummaryAPIView(APIView):
             total_delivery_fee = Decimal(0)
             invalid_items = []
 
+        # Coupon entered at checkout (order/coupons.py): worked out once, so the
+        # discount shown and the total charged always match.
+        # Clipped coupons apply by themselves; a typed code goes on top.
+        from .coupons import describe_deal
+        quote = cart.coupon_quote()
+        discount = quote.discount
+        grand_total_cedis = cart.calculate_grand_total(quote=quote)
+        coupons_info = describe_deal(quote, cart)
+        for block in [coupons_info['coupon'], *coupons_info['clipped_coupons']]:
+            if block:   # amounts in the shopper's currency, like the rest of the summary
+                block['discount_display'] = str(round(Decimal(block['discount']) * exchange_rate, 2))
+
         summary = {
-            "grand_total": round(cart.calculate_grand_total() * exchange_rate, 2) or 0.00,
-            "grand_total_cedis": round(cart.calculate_grand_total(), 2) or 0.00,
+            "grand_total": round(grand_total_cedis * exchange_rate, 2) or 0.00,
+            "grand_total_cedis": round(grand_total_cedis, 2) or 0.00,
+            "discount": round(discount * exchange_rate, 2),
+            "discount_cedis": round(discount, 2),
+            **coupons_info,
             "delivery_fee": round(total_delivery_fee * exchange_rate, 2) or 0.00,
             "packaging_fee": round(Decimal(cart.calculate_packaging_fees()) * exchange_rate, 2) or 0.00,
             "total_price": round(Decimal(cart.total_price) * exchange_rate, 2) or 0.00,
@@ -615,6 +622,75 @@ class CartSummaryAPIView(APIView):
             ],
         }
         return Response(summary, status=status.HTTP_200_OK)
+
+
+class CouponOffersView(APIView):
+    """
+    GET ?products=1,2,3  the clip-coupon badge for each product (public), plus
+    `clipped`: the ids this shopper has clipped (empty when signed out).
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from .coupons import clipped_ids, offers_for_products
+        raw = str(request.query_params.get('products') or '')
+        ids = [int(x) for x in raw.split(',') if x.strip().isdigit()][:100]
+        offers = offers_for_products(ids)
+        user = request.user if request.user.is_authenticated else None
+        return Response({
+            'offers': {str(pid): offer for pid, offer in offers.items()},
+            'clipped': clipped_ids(user) if user else [],
+        })
+
+
+class CouponClipView(APIView):
+    """POST clips a coupon badge for the signed-in shopper; DELETE unclips it."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        from .coupons import CouponError, clip
+        try:
+            coupon = clip(request.user, pk)
+        except CouponError as exc:
+            return Response({'code': exc.code, 'message': exc.message, 'params': exc.params},
+                            status=status.HTTP_400_BAD_REQUEST)
+        return Response({'id': coupon.pk, 'clipped': True}, status=status.HTTP_201_CREATED)
+
+    def delete(self, request, pk):
+        from .coupons import unclip
+        unclip(request.user, pk)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class CartCouponView(APIView):
+    """
+    POST   {code}  apply a coupon to the signed-in shopper's cart
+    DELETE         take it off
+    The checkout summary then shows the discount and charges the lower total.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .coupons import CouponError, apply_to_cart
+        cart, _ = Cart.objects.get_or_create(user=request.user)
+        code = str(request.data.get('code') or '')[:50]
+        try:
+            quote = apply_to_cart(cart, code)
+        except CouponError as exc:
+            return Response({'code': exc.code, 'message': exc.message, 'params': exc.params},
+                            status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            'message': f"Coupon {quote.coupon.code} applied: GHS {quote.discount:,.2f} off.",
+            'code': quote.coupon.code,
+            'discount': str(quote.discount),
+        })
+
+    def delete(self, request):
+        from .coupons import remove_from_cart
+        cart = Cart.objects.filter(user=request.user).first()
+        if cart:
+            remove_from_cart(cart)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 

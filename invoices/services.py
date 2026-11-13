@@ -75,12 +75,15 @@ def build_snapshot(order, vendor=None):
         })
     components, tax_total = summarise(taxes)
     subtotal = sum((Decimal(r['amount']) for r in rows), Decimal('0'))
+    # Coupon (order/coupons.py): line prices stay as listed, the discount is
+    # its own row so the invoice adds up to what the shopper paid.
+    discount = sum((Decimal(l.discount or 0) for l in lines), Decimal('0'))
     if vendor is None:
         total = Decimal(order.total)
-        charges = max(total - subtotal, Decimal('0'))   # delivery + packaging, as paid
+        charges = max(total - (subtotal - discount), Decimal('0'))   # delivery + packaging, as paid
     else:
         charges = Decimal('0')
-        total = subtotal
+        total = subtotal - discount
 
     a = order.address
     return {
@@ -98,6 +101,9 @@ def build_snapshot(order, vendor=None):
         'sellers': {str(k): v for k, v in sellers.items()},
         'lines': rows,
         'subtotal': _money(subtotal),
+        'discount': _money(discount),
+        'coupon_code': ', '.join(order.coupon_redemptions.values_list('coupon__code', flat=True)
+                                 .order_by('coupon__code')),
         'charges': _money(charges),
         'total': _money(total),
         'tax_total': _money(tax_total),

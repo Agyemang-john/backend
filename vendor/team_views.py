@@ -504,6 +504,12 @@ class TeamInvitationAcceptView(APIView):
         if not user.is_email_verified:
             return Response({'detail': 'Please verify your email address first.', 'code': 'email_unverified'},
                             status=status.HTTP_403_FORBIDDEN)
+        if not user.has_usable_password():
+            # Google-only account: Seller Centre signs in with password + code.
+            return Response({'detail': 'Add a password to your Negromart account first (use "Forgot password?" '
+                                       'on the sign-in page): Seller Centre signs in with a password and a code.',
+                             'code': 'password_needed'},
+                            status=status.HTTP_403_FORBIDDEN)
 
         current = get_membership(user)
         if current is not None:

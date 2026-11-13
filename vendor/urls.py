@@ -50,6 +50,7 @@ from vendor.bulk_upload_views import (
     BulkUploadMetaAPIView,
     BulkUploadJobStatusAPIView,
 )
+from vendor.coupon_views import SellerCouponDetailView, SellerCouponListView
 from vendor.flash_sale_views import (
     SellerFlashSaleDetailView, SellerFlashSaleListView, SellerFlashSaleProductsView,
 )
@@ -115,6 +116,9 @@ urlpatterns = [
     path('flash-sales/', SellerFlashSaleListView.as_view(), name='vendor-flash-sales'),
     path('flash-sales/products/', SellerFlashSaleProductsView.as_view(), name='vendor-flash-sale-products'),
     path('flash-sales/<int:pk>/', SellerFlashSaleDetailView.as_view(), name='vendor-flash-sale-detail'),
+    # Coupon codes for the store's own products (vendor/coupon_views.py)
+    path('coupons/', SellerCouponListView.as_view(), name='vendor-coupons'),
+    path('coupons/<int:pk>/', SellerCouponDetailView.as_view(), name='vendor-coupon-detail'),
     path('product-related-data/', ProductRelatedDataAPIView.as_view(), name='product-related-data'),
 
     # Product Routes

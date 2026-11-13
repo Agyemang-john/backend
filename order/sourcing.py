@@ -113,7 +113,7 @@ def cancel_line(line, user):
         _restock(line)
         if order.payment_method != 'cash_on_delivery':
             # Refunds are paid by Negromart staff (admin → Refunds).
-            Refund.objects.create(order_product=line, amount=float(line.amount), reason=line.refund_reason)
+            Refund.objects.create(order_product=line, amount=float(line.paid_amount), reason=line.refund_reason)
         order.status = status_from_lines(order)
         order.save(update_fields=['status', 'date_updated'])
 
@@ -140,7 +140,7 @@ def _notify_cancelled(line):
             data={
                 'order_number': order.order_number,
                 'message': f"{title} was cancelled."
-                           + (f" Your refund of GHS {line.amount:,.2f} is on its way." if paid else ""),
+                           + (f" Your refund of GHS {line.paid_amount:,.2f} is on its way." if paid else ""),
                 'url': f"/dashboard/order-history/{order.id}/",
             },
         )

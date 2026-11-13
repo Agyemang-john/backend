@@ -66,6 +66,9 @@ class Cart(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # The coupon the shopper entered at checkout (order/coupons.py).
+    coupon = models.ForeignKey(Coupon, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+
     objects = CartManager()
 
     class Meta:
@@ -115,9 +118,21 @@ class Cart(models.Model):
         fee_result = FeeCalculator.calculate_total_delivery_fee(self.cart_items.all(), address, buyer_country_code=buyer_country)
         return fee_result.total
 
-    def calculate_grand_total(self):
-        return Decimal(self.total_price) + self.calculate_total_delivery_fee()
-    
+    def calculate_grand_total(self, quote=None):
+        # What the shopper pays: items + delivery − coupons. Every charge path
+        # (summary, pay on delivery, Paystack check) goes through here. Pass
+        # the CartDeal when you already have one (e.g. locked at payment).
+        discount = (quote if quote is not None else self.coupon_quote()).discount
+        return Decimal(self.total_price) + self.calculate_total_delivery_fee() - discount
+
+    def coupon_quote(self, strict=True, lock=False):
+        """Clipped coupons + the typed code on the current items (order/coupons.py CartDeal)."""
+        from .coupons import quote_cart
+        return quote_cart(self, strict=strict, lock=lock)
+
+    def coupon_discount(self):
+        return self.coupon_quote().discount
+
     def calculate_packaging_fees(self):
         """Calculate total packaging fees."""
         return Decimal(sum(item.packaging_fee() for item in self.cart_items.all()))
@@ -268,6 +283,9 @@ class Order(models.Model):
     address = models.ForeignKey(Address, on_delete=models.SET_NULL, null=True, blank=True)
     payment_method = models.CharField(max_length=30, choices=PAYMENT_METHOD, default='paystack')
     total = models.DecimalField(max_digits=10, decimal_places=2)
+    # Coupon used on this order; `total` is already after the discount.
+    coupon = models.ForeignKey(Coupon, on_delete=models.SET_NULL, null=True, blank=True, related_name='orders')
+    discount_total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
     ip = models.CharField(blank=True, max_length=20)
     adminnote = models.CharField(blank=True, max_length=100)
@@ -470,6 +488,11 @@ class OrderProduct(models.Model):
     quantity = models.PositiveIntegerField()
     price = models.DecimalField(max_digits=10, decimal_places=2)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
+    # Coupon share on this line (order/coupons.py). `amount` stays the price
+    # before the coupon; the shopper paid amount − discount. seller_discount is
+    # the part the store pays (its own coupon); Negromart pays the rest.
+    discount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    seller_discount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     tracking_number = models.CharField(max_length=100, null=True, blank=True, editable=False)
     status = models.CharField(max_length=20, choices=[
         ('pending', 'Pending'),
@@ -528,6 +551,16 @@ class OrderProduct(models.Model):
         if not self.product:
             return Decimal(0)
         return calculate_packaging_fee(self.product.weight, self.product.volume) * self.quantity
+
+    @property
+    def paid_amount(self):
+        """What the shopper paid for this line (after its coupon share)."""
+        return Decimal(self.amount) - Decimal(self.discount or 0)
+
+    @property
+    def seller_amount(self):
+        """What the store earns before commission: the price less its own coupon."""
+        return Decimal(self.amount) - Decimal(self.seller_discount or 0)
 
     def save(self, *args, **kwargs):
         self.amount = Decimal(self.quantity) * self.price

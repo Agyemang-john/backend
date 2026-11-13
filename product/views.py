@@ -649,9 +649,10 @@ class CategoryProductListView(APIView):
             "attributes": attribute_facets,
             "category": SubCategorySerializer(category).data,
             "products_with_details": products_with_details,
-            # Sponsored products (ads/): first page only, shown above the results.
-            "sponsored": ad_services.sponsored(request, 'category', sub_category_id=category.id)
-                         if page == 1 else [],
+            # Sponsored products (ads/): first page only, shown above the results, and
+            # only ones the shopper's filters would show (price, brand, colour...).
+            "sponsored": ad_services.sponsored(request, 'category', sub_category_id=category.id,
+                                               within=filtered_qs) if page == 1 else [],
             "min_price": round((price_range['min_price'] or min_price_unfiltered) * exchange_rate, 2),
             "max_price": round((price_range['max_price'] or max_price_unfiltered) * exchange_rate, 2),
             "min_price_unfiltered": round(min_price_unfiltered * exchange_rate, 2),
@@ -791,8 +792,9 @@ class BrandProductListView(APIView):
             "brand": BrandSerializer(brand).data,
             "products_with_details": products_with_details,
             # Sponsored products from this brand (ads/), first page only, above the results.
-            "sponsored": ad_services.sponsored(request, 'brand', scope=Q(brand_id=brand.id), scope_key=str(brand.id))
-                         if page == 1 else [],
+            # Only ones the shopper's filters would show.
+            "sponsored": ad_services.sponsored(request, 'brand', scope=Q(brand_id=brand.id), scope_key=str(brand.id),
+                                               within=filtered_qs) if page == 1 else [],
             "min_price": round((filtered_bounds["min_price"] or min_price_unfiltered) * exchange_rate, 2),
             "max_price": round((filtered_bounds["max_price"] or max_price_unfiltered) * exchange_rate, 2),
             "min_price_unfiltered": round(min_price_unfiltered * exchange_rate, 2),
@@ -884,27 +886,24 @@ class ProductSearchAPIView(APIView):
         max_price_unfiltered = unfiltered_pr['max_price_unfiltered'] or Decimal('0')
 
         # ── Apply filters (subquery for variants — no JOIN/DISTINCT) ───────────
-        filtered_qs = base_qs
+        def apply_filters(qs):
+            if active_colors:
+                qs = qs.filter(id__in=Variants.objects.filter(color_id__in=active_colors).values('product_id'))
+            if active_sizes:
+                qs = qs.filter(id__in=Variants.objects.filter(size_id__in=active_sizes).values('product_id'))
+            if active_brands:
+                qs = qs.filter(brand_id__in=active_brands)
+            if active_vendors:
+                qs = qs.filter(vendor_id__in=active_vendors)
+            if min_price is not None:
+                qs = qs.filter(price__gte=min_price / exchange_rate)
+            if max_price is not None:
+                qs = qs.filter(price__lte=max_price / exchange_rate)
+            if active_ratings:
+                qs = qs.filter(avg_rating__gte=min(active_ratings))
+            return filter_fast_delivery(qs, request)
 
-        if active_colors:
-            filtered_qs = filtered_qs.filter(
-                id__in=Variants.objects.filter(color_id__in=active_colors).values('product_id')
-            )
-        if active_sizes:
-            filtered_qs = filtered_qs.filter(
-                id__in=Variants.objects.filter(size_id__in=active_sizes).values('product_id')
-            )
-        if active_brands:
-            filtered_qs = filtered_qs.filter(brand_id__in=active_brands)
-        if active_vendors:
-            filtered_qs = filtered_qs.filter(vendor_id__in=active_vendors)
-        if min_price is not None:
-            filtered_qs = filtered_qs.filter(price__gte=min_price / exchange_rate)
-        if max_price is not None:
-            filtered_qs = filtered_qs.filter(price__lte=max_price / exchange_rate)
-        if active_ratings:
-            filtered_qs = filtered_qs.filter(avg_rating__gte=min(active_ratings))
-        filtered_qs = filter_fast_delivery(filtered_qs, request)
+        filtered_qs = apply_filters(base_qs)
 
         # ── Sort ───────────────────────────────────────────────────────────────
         _sort_map = {
@@ -950,7 +949,11 @@ class ProductSearchAPIView(APIView):
             "brands":     facets["brands"],
             "categories": facets["categories"],
             "products_with_details": products_with_details,
-            "sponsored": ad_services.sponsored(request, 'search', query=query) if page == 1 else [],
+            # Keyword ads needn't match the text search, but must fit the shopper's
+            # filters (price, brand, colour...): the same filters, minus the text match.
+            "sponsored": ad_services.sponsored(request, 'search', query=query,
+                                               within=apply_filters(Product.objects.all()))
+                         if page == 1 else [],
             "min_price": round((price_range['min_price'] or min_price_unfiltered) * exchange_rate, 2),
             "max_price": round((price_range['max_price'] or max_price_unfiltered) * exchange_rate, 2),
             "min_price_unfiltered": round(min_price_unfiltered * exchange_rate, 2),
@@ -1206,8 +1209,9 @@ class CollectionAPIView(APIView):
             'collection': CollectionSerializer(collection, context={'request': request}).data,
             'products_with_details': products_with_details,
             # Sponsored products from this collection (ads/), first page only, above the results.
+            # Only ones the shopper's filters would show.
             'sponsored': ad_services.sponsored(request, 'collection', scope=Q(pk__in=collection.get_products_qs().order_by().values('pk')),
-                                               scope_key=collection.slug) if page == 1 else [],
+                                               scope_key=collection.slug, within=filtered) if page == 1 else [],
             'next': next_url,
             'previous': prev_url,
             'total': total_items,

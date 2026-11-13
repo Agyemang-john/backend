@@ -8,6 +8,8 @@ Serving (per listing request, results cached briefly per context):
                    sub-category; brand / collection / deals pages: advertised
                    products inside that page's own product set (`scope`). Only live campaigns of funded stores, products
                    that are published, featured and in stock.
+  1b. narrow     – only ads the shopper's filters would show (`within`): an ad
+                   for a GHS 2,000 item never sits on a GHS 50-1,000 page.
   2. rank        – bid × quality (smoothed CTR vs. baseline, clipped 0.5-2).
   3. price       – second price: just enough to beat the next ad, at least
                    RESERVE_CPC, never above the bid. Signed into the click token.
@@ -24,7 +26,7 @@ from django.conf import settings
 from django.core import signing
 from django.core.cache import cache
 from django.db import IntegrityError, transaction
-from django.db.models import F, Q, Sum
+from django.db.models import F, Q, QuerySet, Sum
 from django.utils import timezone
 
 from .models import AdCampaign, AdCampaignProduct, AdClick, AdDailyStat, AdKeyword
@@ -219,21 +221,51 @@ def auction(candidates, slots=SLOTS):
     return winners
 
 
-def sponsored_products(placement, query=None, sub_category_id=None, exclude_ids=(), scope=None, scope_key=''):
+def narrow(candidates, within):
+    """
+    Keep the candidates the shopper's filters allow. `within` is the page's
+    filtered Product queryset, or an iterable of allowed product ids; None
+    keeps everything.
+    """
+    if within is None or not candidates:
+        return candidates
+    pids = {p for _, p, _ in candidates}
+    if isinstance(within, QuerySet):
+        allowed = set(within.order_by().filter(pk__in=pids).values_list('pk', flat=True))
+    else:
+        allowed = pids & set(within)
+    return [c for c in candidates if c[1] in allowed]
+
+
+def sponsored_products(placement, query=None, sub_category_id=None, exclude_ids=(), scope=None, scope_key='',
+                       within=None):
     """
     [(product, ad_token)] winning this placement, impressions recorded. Never raises.
 
     Placements: 'search' (query), 'category' (sub_category_id), and 'brand',
-    'collection', 'deals', which pass `scope` (see _candidates) plus a short
-    `scope_key` naming it (brand id, collection slug) for the serve cache.
+    'collection', 'deals', 'seller', which pass `scope` (see _candidates) plus a
+    short `scope_key` naming it (brand id, collection slug) for the serve cache.
+
+    `within` is what the shopper filtered to (price, brand, colour, rating...):
+    see narrow(). The auction runs among the ads left, so a filtered-out ad
+    frees its slot for one that fits rather than leaving a gap.
     """
     from product.models import Product
     try:
-        key = (f"ads:serve:{placement}:{hashlib.md5(normalise(query or '').encode()).hexdigest()}"
-               f":{sub_category_id}:{scope_key}")
+        base = (f"ads:serve:{placement}:{hashlib.md5(normalise(query or '').encode()).hexdigest()}"
+                f":{sub_category_id}:{scope_key}")
+        candidates = cache.get(base + ':cand')
+        if candidates is None:
+            candidates = _candidates(placement, query, sub_category_id, scope)
+            cache.set(base + ':cand', candidates, SERVE_CACHE_SECONDS)
+        candidates = narrow(candidates, within)
+        if not candidates:
+            return []
+        # Same ads left over → same auction, whichever filters got us here.
+        key = base + ':win:' + hashlib.md5(repr(sorted((c, p) for c, p, _ in candidates)).encode()).hexdigest()
         winners = cache.get(key)
         if winners is None:
-            winners = auction(_candidates(placement, query, sub_category_id, scope))
+            winners = auction(candidates)
             cache.set(key, winners, SERVE_CACHE_SECONDS)
         winners = [w for w in winners if w['product_id'] not in set(exclude_ids)]
         if not winners:

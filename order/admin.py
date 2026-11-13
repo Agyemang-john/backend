@@ -393,8 +393,8 @@ class TrackingEventAdmin(admin.ModelAdmin):
 class OrderProductInline(admin.TabularInline):
     model = OrderProduct
     extra = 0
-    fields = ('product', 'variant', 'quantity', 'price', 'amount', 'status', 'tracking_number', 'shipped_date', 'delivered_date')
-    readonly_fields = ('product', 'variant', 'quantity', 'price', 'amount', 'tracking_number')
+    fields = ('product', 'variant', 'quantity', 'price', 'amount', 'discount', 'seller_discount', 'status', 'tracking_number', 'shipped_date', 'delivered_date')
+    readonly_fields = ('product', 'variant', 'quantity', 'price', 'amount', 'discount', 'seller_discount', 'tracking_number')
     show_change_link = True
     can_delete = False
 
@@ -419,7 +419,8 @@ class OrderAdmin(admin.ModelAdmin):
     ordering      = ('-date_created',)
     date_hierarchy = 'date_created'
     list_per_page  = 30
-    readonly_fields = ('order_number', 'payment_id', 'date_created', 'date_updated', 'tracking_overview')
+    readonly_fields = ('order_number', 'payment_id', 'date_created', 'date_updated', 'tracking_overview',
+                       'coupon', 'discount_total')
 
     inlines = (OrderProductInline, ShipmentInline)
     autocomplete_fields = ('user', 'vendors', 'address')
@@ -435,7 +436,7 @@ class OrderAdmin(admin.ModelAdmin):
             'fields': ('order_number', 'user', 'vendors', 'address'),
         }),
         ('Payment', {
-            'fields': ('payment_method', 'payment_id', 'total', 'status', 'is_ordered'),
+            'fields': ('payment_method', 'payment_id', 'total', 'coupon', 'discount_total', 'status', 'is_ordered'),
         }),
         ('Tracking Overview', {
             'fields': ('tracking_overview',),

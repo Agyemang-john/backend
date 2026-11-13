@@ -283,6 +283,7 @@ def deals_page(request, rate: Decimal) -> dict:
 
     return {
         'page_ids': page_ids,
+        'matched_ids': [row['id'] for row in matched],   # every deal the filters allow (sponsored use it)
         'flash_end': {row['id']: row['flash_end'] for row in matched if row['id'] in set(page_ids)},
         'total': total,
         'page': page,

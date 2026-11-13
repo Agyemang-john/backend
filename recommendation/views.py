@@ -80,12 +80,16 @@ class TodaysDealsAPIView(APIView):
         )
 
 
-def _sponsored_deals(request, currency, flash_end):
-    """Advertised products on a live deal, as deal cards marked sponsored (ads/)."""
+def _sponsored_deals(request, currency, flash_end, within=None):
+    """
+    Advertised products on a live deal, as deal cards marked sponsored (ads/).
+    `within`: ids the shopper's filters allow, so a filtered-out ad doesn't show.
+    """
     from ads import services as ad_services
 
     from .deals_page import _deal_rows
-    won = ad_services.sponsored_products('deals', scope=[row['id'] for row in _deal_rows()], scope_key='all')
+    won = ad_services.sponsored_products('deals', scope=[row['id'] for row in _deal_rows()], scope_key='all',
+                                         within=within)
     if not won:
         return []
     products = [p for p, _ in won]
@@ -150,7 +154,8 @@ class DealsPageAPIView(APIView):
             'currency': currency,
             'results': apply_currency(cards, currency),
             # Sponsored deals (ads/): advertised products that are on a live deal, first page only.
-            'sponsored': _sponsored_deals(request, currency, data['flash_end']) if data['page'] == 1 else [],
+            'sponsored': _sponsored_deals(request, currency, data['flash_end'], within=data['matched_ids'])
+                         if data['page'] == 1 else [],
             'total': data['total'],
             'page': data['page'],
             'pages': data['pages'],

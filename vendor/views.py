@@ -724,6 +724,9 @@ class CheckCustomerAuth(APIView):
             "email_verified": user.is_email_verified,
             "phone_verified": user.is_phone_verified,
             "masked_phone": mask_phone(user.phone),
+            # Google-only shoppers add a password before applying: the seller
+            # dashboard signs in with password + code.
+            "has_password": user.has_usable_password(),
         })
 
 class VendorStatusAPIView(APIView):
@@ -794,6 +797,12 @@ class VendorSignupAPIView(APIView):
             return Response({
                 'detail': 'Please verify your phone number before applying.',
                 'code': 'phone_unverified',
+            }, status=status.HTTP_403_FORBIDDEN)
+        if not user.has_usable_password():
+            return Response({
+                'detail': 'Add a password to your account before applying: '
+                          'Seller Centre signs in with a password and a code.',
+                'code': 'password_needed',
             }, status=status.HTTP_403_FORBIDDEN)
 
         # Early guard: the user already owns a store application (any status)
@@ -990,16 +999,7 @@ class VendorProductsView(APIView):
         ghs_min = (min_price / rate).quantize(Decimal('0.01')) if min_price is not None else None
         ghs_max = (max_price / rate).quantize(Decimal('0.01')) if max_price is not None else None
 
-        cache_key = 'vendor_products:{}:{}'.format(slug, '|'.join(map(str, (
-            page, page_size, sort, category, ghs_min, ghs_max, min_rating, on_sale,
-        ))))
-        payload = cache.get(cache_key)
-
-        if payload is None:
-            vendor_id = Vendor.objects.filter(slug=slug).values_list('id', flat=True).first()
-            if vendor_id is None:
-                raise Http404
-
+        def filtered(vendor_id):
             products = Product.published.filter(vendor_id=vendor_id)
             if category:
                 products = products.filter(sub_category__slug=category)
@@ -1011,7 +1011,19 @@ class VendorProductsView(APIView):
                 products = products.filter(avg_rating__gte=float(min_rating))
             if on_sale:
                 products = products.filter(old_price__gt=F('price'))
+            return products
 
+        cache_key = 'vendor_products:{}:{}'.format(slug, '|'.join(map(str, (
+            page, page_size, sort, category, ghs_min, ghs_max, min_rating, on_sale,
+        ))))
+        payload = cache.get(cache_key)
+
+        if payload is None:
+            vendor_id = Vendor.objects.filter(slug=slug).values_list('id', flat=True).first()
+            if vendor_id is None:
+                raise Http404
+
+            products = filtered(vendor_id)
             total = products.count()
             total_pages = max(1, -(-total // page_size))
             page = min(page, total_pages)
@@ -1060,8 +1072,10 @@ class VendorProductsView(APIView):
             results.append(row)
 
         vendor_id = payload.get('vendor_id')
-        # This store's own sponsored products, first page only (ads/).
-        sponsored = ad_services.sponsored(request, 'seller', scope=Q(vendor_id=vendor_id), scope_key=str(vendor_id))             if vendor_id and payload['page'] == 1 else []
+        # This store's own sponsored products, first page only (ads/), and only
+        # ones the shopper's filters would show (category, price, rating, on sale).
+        sponsored = ad_services.sponsored(request, 'seller', scope=Q(vendor_id=vendor_id), scope_key=str(vendor_id),
+                                          within=filtered(vendor_id)) if vendor_id and payload['page'] == 1 else []
         public = {k: v for k, v in payload.items() if k != 'vendor_id'}
         return Response({**public, 'currency': currency, 'results': results, 'sponsored': sponsored})
 

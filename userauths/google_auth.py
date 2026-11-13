@@ -207,8 +207,14 @@ def notify_method_change(user, kind, request=None, google_email=''):
 
 class GoogleSignInView(APIView):
     """
-    POST /api/auth/google/  {credential}
+    POST /api/auth/google/  {credential, seller?}
     → {status: signed_in} (cookies set) | needs_profile | link_required
+      | needs_password (seller registration only)
+
+    `seller: true` is sent by the seller registration page. Sellers sign in
+    to the dashboard with a password + code, so in that mode every path ends
+    with the account having a password: a new account picks one at sign-up,
+    and a Google-only account sets one before continuing.
     """
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -221,6 +227,7 @@ class GoogleSignInView(APIView):
             google = verify_google_credential(request.data.get('credential'))
         except GoogleTokenError as exc:
             return _token_error(exc)
+        seller = request.data.get('seller') in (True, 'true', '1', 1)
 
         link = _link_for_sub(google['sub'])
         if link is not None:
@@ -228,6 +235,12 @@ class GoogleSignInView(APIView):
             blocked = _account_state_error(user)
             if blocked:
                 return blocked
+            if seller and not user.has_usable_password():
+                return Response({
+                    'status': 'needs_password',
+                    'ticket': _ticket(google, 'seller_password', user.pk),
+                    'email': user.email,
+                })
             return sign_in_response(user, request)
 
         existing = User.objects.filter(email__iexact=google['email']).first()
@@ -253,13 +266,27 @@ class GoogleSignInView(APIView):
         # Brand-new address (or a sign-up that was never activated).
         return Response({
             'status': 'needs_profile',
-            'ticket': _ticket(google, 'signup'),
+            'ticket': _ticket({**google, 'seller': seller}, 'signup'),
+            'password_required': seller,
             'profile': {
                 'email': google['email'],
                 'first_name': google['first_name'] or (existing.first_name if existing else ''),
                 'last_name': google['last_name'] or (existing.last_name if existing else ''),
             },
         })
+
+
+def _password_errors(password):
+    """The email sign-up's password rules, as a field error dict, or None."""
+    from rest_framework import serializers
+    from .serializers import RegisterSerializer
+    if not password:
+        return {'password': ['Choose a password.']}
+    try:
+        RegisterSerializer().validate_password(password)
+    except serializers.ValidationError as exc:
+        return {'password': [str(m) for m in exc.detail]}
+    return None
 
 
 class GoogleCompleteSignupView(APIView):
@@ -284,6 +311,12 @@ class GoogleCompleteSignupView(APIView):
             errors['last_name'] = ['Enter your last name.']
         if not phone:
             errors['phone'] = ['Enter a valid phone number, e.g. +233241234567.']
+        # Seller registration: the dashboard signs in with a password, so one
+        # is chosen now (the account then works with Google *and* password).
+        seller = bool(google.get('seller'))
+        password = request.data.get('password') or ''
+        if seller:
+            errors.update(_password_errors(password) or {})
         if errors:
             return Response(errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -313,7 +346,10 @@ class GoogleCompleteSignupView(APIView):
                     # can no longer use it.
                     user.token_version = F('token_version') + 1
                 user.first_name, user.last_name, user.phone = first, last, phone
-                user.set_unusable_password()
+                if seller:
+                    user.set_password(password)
+                else:
+                    user.set_unusable_password()
                 user.is_active = True
                 user.email_verified_at = now
                 user.auth_provider = 'google'
@@ -367,6 +403,44 @@ class GoogleLinkView(APIView):
                               status.HTTP_409_CONFLICT)
             notify_method_change(user, 'google_connected', request, google['email'])
         return sign_in_response(user, request, {'linked': True})
+
+
+class GoogleSellerPasswordView(APIView):
+    """
+    POST /api/auth/google/seller-password/  {ticket, password}
+
+    Seller registration, Google-only account: the seller dashboard signs in
+    with a password + code, so one is added here. The ticket comes from a
+    Google sign-in made seconds ago with the linked Google account, which is
+    the proof of ownership (a stolen session cookie alone can't do this).
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [LoginThrottle, AnonLoginThrottle]
+
+    def post(self, request):
+        google, err = _read_ticket(request.data.get('ticket'), 'seller_password')
+        if err:
+            return _error(err, 'That took too long. Please continue with Google again.')
+        link = _link_for_sub(google['sub'])
+        if link is None or link.user_id != google.get('uid'):
+            return _error('ticket_invalid', 'Please continue with Google again.')
+        user = link.user
+        blocked = _account_state_error(user)
+        if blocked:
+            return blocked
+        if user.has_usable_password():
+            # Already done (double submit, second tab): just continue.
+            return sign_in_response(user, request)
+
+        password = request.data.get('password') or ''
+        errors = _password_errors(password)
+        if errors:
+            return Response(errors, status=status.HTTP_400_BAD_REQUEST)
+        user.set_password(password)
+        user.save()
+        notify_method_change(user, 'password_added', request, google['email'])
+        return sign_in_response(user, request, {'password_added': True})
 
 
 # ── Signed-in: sign-in methods ───────────────────────────────────────────────

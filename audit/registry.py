@@ -17,7 +17,9 @@ from django.db.models.signals import post_delete, post_save, pre_save
 TRACKED = {
     'product.Product': ['title', 'price', 'old_price', 'status', 'total_quantity', 'vendor_id', 'review_note'],
     'product.Variants': ['price', 'quantity'],
-    'product.Coupon': ['code', 'discount_amount', 'discount_percentage', 'valid_from', 'valid_to', 'active'],
+    'product.Coupon': ['code', 'vendor', 'discount_amount', 'discount_percentage', 'max_discount_amount',
+                       'valid_from', 'valid_to', 'max_uses', 'per_user_limit', 'min_purchase_amount', 'active',
+                       'clippable', 'budget'],
     'product.FlashSale': ['sale_price', 'start_time', 'end_time', 'max_quantity', 'is_active'],
     'order.Order': ['status', 'total', 'payment_method', 'adminnote'],
     'order.OrderProduct': ['status', 'price', 'amount', 'quantity', 'refund_reason'],

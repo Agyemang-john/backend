@@ -63,7 +63,7 @@ def cancel_as_fraud(risk, staff_user, note=''):
         line.save(update_fields=['status', 'refund_reason'])
         _restock(line)
         if order.payment_method != 'cash_on_delivery':
-            Refund.objects.create(order_product=line, amount=float(line.amount), reason=line.refund_reason)
+            Refund.objects.create(order_product=line, amount=float(line.paid_amount), reason=line.refund_reason)
     order.status = 'canceled'
     order.save(update_fields=['status'])
     risk.status, risk.reviewed_by, risk.reviewed_at, risk.note = OrderRisk.CANCELLED, staff_user, timezone.now(), note[:255]

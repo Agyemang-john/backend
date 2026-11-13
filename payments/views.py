@@ -90,7 +90,23 @@ class PlaceOrderCODAPIView(APIView):
                     "product__vendor", "variant", "delivery_option"
                 ).all()
 
-                total_amount = float(cart.calculate_grand_total())
+                # Coupon (order/coupons.py), row-locked so its use limit holds
+                # when several orders land at once. If it stopped working since
+                # the shopper saw the total, say so rather than charge more.
+                from order.coupons import redeem
+                quote = cart.coupon_quote(lock=True)
+                if quote.code_broken:
+                    code = quote.code
+                    return Response(
+                        {"status": "failed", "code": "coupon_invalid",
+                         "coupon": code.coupon.code, "reason": code.error.code,
+                         "params": code.error.params,
+                         "message": f"Coupon {code.coupon.code}: {code.error.message} "
+                                    "Remove it or try another code, then place your order."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                total_amount = float(cart.calculate_grand_total(quote=quote))
 
                 order = Order.objects.create(
                     user=user,
@@ -124,6 +140,8 @@ class PlaceOrderCODAPIView(APIView):
                             quantity=item.quantity,
                             price=price,
                             amount=amount,
+                            discount=quote.share(item.pk),
+                            seller_discount=quote.seller_share(item.pk),
                             selected_delivery_option_id=item.delivery_option.id if item.delivery_option else None,
                             **sourcing_snapshot(product, variant, item.delivery_option),
                         )
@@ -133,6 +151,10 @@ class PlaceOrderCODAPIView(APIView):
 
                 OrderProduct.objects.bulk_create(order_products)
                 order.vendors.set(unique_vendors)
+                redeem(order, quote.redemptions(), code_id=cart.coupon_id)
+                if cart.coupon_id:
+                    cart.coupon = None
+                    cart.save(update_fields=["coupon"])
 
                 while True:
                     order_number = f"INVOICE_NO-{get_random_string(8).upper()}"
@@ -285,8 +307,12 @@ class VerifyPaymentAPIView(APIView):
                 })
 
             # The amount was chosen in the browser, so check it against what
-            # the cart costs now, in the currency the cart is priced in.
-            expected = _pesewas(cart.calculate_grand_total())
+            # the cart costs now, in the currency the cart is priced in. The
+            # coupons are checked leniently (order/coupons.py strict=False): the
+            # shopper already paid the discounted price, so a coupon that hit
+            # its end date, budget or use limit mid-payment is still honoured.
+            quote = cart.coupon_quote(strict=False)
+            expected = _pesewas(cart.calculate_grand_total(quote=quote))
             paid = int(payment_data.get("amount") or 0)
             currency = (payment_data.get("currency") or "").upper()
             if currency != ORDER_CURRENCY or expected <= 0 or paid + AMOUNT_TOLERANCE_PESEWAS < expected:
@@ -323,7 +349,14 @@ class VerifyPaymentAPIView(APIView):
                 "amount": str(pricing['amount']),
                 "flash_sale_id": pricing['flash_sale'].id if pricing['flash_sale'] else None,
                 "flash_units": pricing['flash_units'],
+                "discount": str(quote.share(item.pk)),
+                "seller_discount": str(quote.seller_share(item.pk)),
             })
+        coupons_data = quote.redemptions()
+        code_id = cart.coupon_id
+        if cart.coupon_id:
+            # The cart outlives the order; don't carry the code to the next one.
+            Cart.objects.filter(pk=cart.pk).update(coupon=None)
 
         # Offload heavy work to Celery
         create_order_from_payment_task.delay(
@@ -334,6 +367,8 @@ class VerifyPaymentAPIView(APIView):
             address_id=address.id,
             ip=client_ip(request),
             reference=reference,
+            coupons=coupons_data,
+            code_id=code_id,
         )
 
         # Immediate success response to user

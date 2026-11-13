@@ -4,10 +4,13 @@ Posting rules for the seller ledger (payments/ledger_models.py) and payouts.
 
 When                                   Entries (+ owed to seller, − owed by seller)
 ─────────────────────────────────────  ────────────────────────────────────────────
-Shipment delivered                     + SALE per line, − COMMISSION per line,
+Shipment delivered                     + SALE per line, − SELLER_DISCOUNT (the
+                                       store's own coupon), − COMMISSION per line
+                                       (on the price less the store's coupon),
                                        + DELIVERY_EARNING if the seller delivered it
                                        (held until delivered + plan payout delay)
-Return refunded                        − REFUND, + COMMISSION_REFUND (pro rata)
+Return refunded                        − REFUND, + COMMISSION_REFUND (pro rata;
+                                       see seller_refund_debit for coupons)
 Payout sent                            − PAYOUT (settles everything it covered)
 Staff adjustment                       ± ADJUSTMENT
 
@@ -63,11 +66,23 @@ def post_shipment_earnings(shipment_id):
         rate = commission_rate(vendor)
 
         lines = list(shipment.items.exclude(status='canceled').select_related('product'))
+        # This store's coupon codes on the order (clipped or typed), for the entry text.
+        from product.models import CouponRedemption
+        own_codes = ', '.join(CouponRedemption.objects.filter(
+            order_id=shipment.order_id, coupon__vendor_id=vendor.pk,
+        ).values_list('coupon__code', flat=True).order_by('coupon__code'))
         for line in lines:
             sale = _money(line.amount)
             _post_once(vendor, LedgerEntry.SALE, sale, line, available_at,
                        f"Sale of {line.quantity} × {_title(line)}")
-            _post_once(vendor, LedgerEntry.COMMISSION, -_money(sale * rate / 100), line, available_at,
+            # The store's own coupon comes off its earnings; a Negromart coupon
+            # doesn't (Negromart pays it), so the seller still earns the full price.
+            own_coupon = _money(line.seller_discount or 0)
+            if own_coupon > 0:
+                _post_once(vendor, LedgerEntry.SELLER_DISCOUNT, -own_coupon, line, available_at,
+                           f"Your coupon {own_codes} on {_title(line)}".replace('  ', ' '))
+            earned = sale - own_coupon
+            _post_once(vendor, LedgerEntry.COMMISSION, -_money(earned * rate / 100), line, available_at,
                        f"Commission {rate}% on {_title(line)}", rate=rate)
 
         # Delivery fees belong to whoever made the delivery. Only when the
@@ -96,7 +111,7 @@ def post_refund(return_request):
     for shipment in line.shipments.filter(status='delivered', ledger_posted_at__isnull=True):
         post_shipment_earnings(shipment.pk)
 
-    refund = _money(return_request.refund_amount)
+    refund, base = seller_refund_debit(line, return_request.refund_amount)
     now = timezone.now()
     with transaction.atomic():
         _post_once(vendor, LedgerEntry.REFUND, -refund, line, now,
@@ -104,12 +119,31 @@ def post_refund(return_request):
                    return_request=return_request)
 
         commission = LedgerEntry.objects.filter(order_product=line, entry_type=LedgerEntry.COMMISSION).first()
-        if commission and line.amount:
-            share = _money(-commission.amount * refund / Decimal(line.amount))
+        if commission and base:
+            share = _money(-commission.amount * refund / base)
             if share > 0:
                 _post_once(vendor, LedgerEntry.COMMISSION_REFUND, share, line, now,
                            f"Commission returned for refund {return_request.reference}",
                            rate=commission.rate, return_request=return_request)
+
+
+def seller_refund_debit(line, refunded_to_shopper):
+    """
+    (amount to take back from the seller, the line's commission base) for a
+    refund of `refunded_to_shopper` on `line`.
+
+    The shopper is refunded what they paid (after any coupon); the seller gives
+    back the same share of what they earned. Without a coupon the two match.
+    With a Negromart coupon the seller earned more than the shopper paid
+    (Negromart covered the gap), so they return more: Negromart gets its
+    subsidy back. With the store's own coupon they earned what was paid.
+    """
+    refunded = _money(refunded_to_shopper or 0)
+    earned = Decimal(line.amount) - Decimal(line.seller_discount or 0)
+    paid = Decimal(line.amount) - Decimal(line.discount or 0)
+    if paid > 0 and earned != paid:
+        return min(_money(refunded * earned / paid), _money(earned)), earned
+    return refunded, earned
 
 
 def post_adjustment(vendor, amount, description, staff_user):
