@@ -14,7 +14,8 @@ logger = logging.getLogger(__name__)
 class AddressSerializer(serializers.ModelSerializer):
     class Meta:
         model = Address
-        fields = ['full_name', 'country', 'region', 'town', 'address', 'gps_address', 'email', 'mobile']
+        fields = ['full_name', 'country', 'country_code', 'region', 'town', 'address', 'address_line2', 'landmark',
+                  'gps_address', 'delivery_instructions', 'latitude', 'longitude', 'location_source', 'email', 'mobile']
 
 class DeliveryOptionSerializer(serializers.ModelSerializer):
     delivery_range = serializers.CharField(source='get_delivery_date_range', read_only=True)

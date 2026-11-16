@@ -634,3 +634,31 @@ class ReviewReminderOptOutAdmin(admin.ModelAdmin):
     list_display = ('user', 'created_at')
     search_fields = ('user__email',)
     raw_id_fields = ('user',)
+
+
+@admin.register(SearchTermDaily)
+class SearchTermDailyAdmin(admin.ModelAdmin):
+    """What shoppers searched (product/search_trends.py) — feeds "Trending" in the search bar.
+    Hide a term from shoppers with Blocked search terms."""
+    list_display = ('term', 'date', 'searchers')
+    list_filter = ('date',)
+    search_fields = ('term',)
+    date_hierarchy = 'date'
+    ordering = ('-date', '-searchers')
+    readonly_fields = ('term', 'date', 'searchers')
+
+    def has_add_permission(self, request):
+        return False
+
+
+@admin.register(BlockedSearchTerm)
+class BlockedSearchTermAdmin(admin.ModelAdmin):
+    """Any trending/suggested search containing one of these words is hidden."""
+    list_display = ('term', 'created_at')
+    search_fields = ('term',)
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        from django.core.cache import cache
+        from product.search_trends import POOL_CACHE_KEY, TRENDING_CACHE_KEY
+        cache.delete_many([TRENDING_CACHE_KEY, POOL_CACHE_KEY])

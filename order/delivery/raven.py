@@ -141,15 +141,16 @@ class RavenDeliveryProvider(DeliveryProvider):
         if address is None:
             raise DeliveryProviderError("This order has no delivery address.")
         return {
-            'country': _iso2(address.country),
-            'line1': (address.address or '')[:200],
+            'country': _iso2(address.country_code or address.country),
+            'line1': ', '.join(address.street_lines)[:200],
             'locality': address.town or '',
             'admin_area': address.region or '',
             'digital_address': address.gps_address or '',
             'contact_name': (address.full_name or '')[:150],
             'contact_phone': address.mobile or '',
             'contact_email': address.email or '',
-            **_coords(address.latitude, address.longitude),
+            # A stand-in point (nothing matched the typed address) would send the rider astray.
+            **(_coords(address.latitude, address.longitude) if address.location_source != 'approx' else {}),
         }
 
     def _parcel(self, items):

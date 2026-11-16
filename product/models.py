@@ -1545,3 +1545,44 @@ class CatalogItem(models.Model):
 
     def __str__(self):
         return self.title
+
+
+############################################################
+################ SEARCH TRENDS (search bar) ################
+############################################################
+
+class SearchTermDaily(models.Model):
+    """How many different shoppers searched a term on a day (product/search_trends.py).
+
+    One row per normalised term per day; `searchers` counts each visitor at most
+    once a day, and only searches that found products. Feeds the search bar's
+    "Trending" chips and the "popular searches" shown while typing.
+    """
+    term      = models.CharField(max_length=80)
+    date      = models.DateField(default=timezone.localdate)
+    searchers = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        unique_together = ('term', 'date')
+        indexes = [models.Index(fields=['date', '-searchers'])]
+        verbose_name = 'Search term (daily)'
+        verbose_name_plural = 'Search terms (daily)'
+
+    def __str__(self):
+        return f"{self.term} — {self.date} ({self.searchers})"
+
+
+class BlockedSearchTerm(models.Model):
+    """Terms that never show as trending or as a suggestion (any term containing it)."""
+    term       = models.CharField(max_length=80, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['term']
+
+    def save(self, *args, **kwargs):
+        self.term = ' '.join((self.term or '').lower().split())
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.term

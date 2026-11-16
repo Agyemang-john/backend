@@ -49,33 +49,41 @@ def nearby(lat=None, lon=None, q='', limit=30):
 @transaction.atomic
 def select_point(user, point):
     """Make this station the shopper's delivery address. Returns the Address."""
+    from address import services as address_book
+    from address.formats import resolve_country
     from address.models import Address
-    from userauths.models import Profile
 
     if not point.is_active:
         raise PickupError("This pickup point isn't taking parcels right now.")
-    current = Address.objects.filter(user=user, status=True).first()
-    contact = current or Address.objects.filter(user=user).order_by('-modified_at').first()
+    active = Address.objects.active().filter(user=user)
+    current = active.filter(status=True).first()
+    contact = current or active.order_by('-modified_at').first()
     full_name = (getattr(contact, 'full_name', '') or f"{user.first_name} {user.last_name}").strip()
     mobile = getattr(contact, 'mobile', '') or getattr(user, 'phone', '') or ''
     if not mobile:
         raise PickupError("Add a phone number first, so the station can reach you.")
-    addr = Address.objects.filter(user=user, pickup_point=point).first() or Address(user=user, pickup_point=point)
-    addr.full_name = full_name[:50]
-    addr.mobile = mobile
-    addr.email = getattr(contact, 'email', '') or user.email
-    addr.country = point.country
-    addr.region = point.region[:30]
-    addr.town = point.town[:30]
-    addr.address = f"Pickup: {point.name}, {point.address}"[:300]
-    addr.latitude, addr.longitude = point.latitude, point.longitude
-    Address.objects.filter(user=user, status=True).exclude(pk=addr.pk).update(status=False)
-    addr.status = True
-    addr.save()
-    profile, _ = Profile.objects.get_or_create(user=user)
-    profile.address, profile.country, profile.mobile = addr.address, addr.country, addr.mobile
-    profile.latitude, profile.longitude = addr.latitude, addr.longitude
-    profile.save()
+    country, code = resolve_country(point.country)
+    fields = {
+        'full_name': full_name[:100],
+        'mobile': mobile,
+        'email': getattr(contact, 'email', '') or user.email,
+        'country': country or point.country,
+        'country_code': code or '',
+        'region': point.region[:80],
+        'town': point.town[:80],
+        'address': f"Pickup: {point.name}, {point.address}"[:300],
+        'latitude': point.latitude,
+        'longitude': point.longitude,
+        'location_source': Address.SOURCE_PIN,
+    }
+    addr = active.filter(pickup_point=point).first()
+    if addr is None:
+        addr = Address(user=user, pickup_point=point, **fields)
+        addr.save()
+    else:
+        # A station an order already went to gets a new row (address/services.py).
+        addr = address_book.update(user, addr, fields)
+    address_book.set_default(user, addr)
     return addr
 
 

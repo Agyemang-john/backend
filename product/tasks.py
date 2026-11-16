@@ -705,3 +705,11 @@ def curate_collections(force=False, occasion_slug=None):
     """Nightly occasion/collection curator — see product/curation.py."""
     from .curation import run
     return run(force=force, occasion_slug=occasion_slug)
+
+
+@shared_task(ignore_result=True)
+def purge_old_search_terms():
+    """Drop daily search-term counts older than search_trends.KEEP_DAYS."""
+    from .search_trends import purge_old_terms
+    deleted = purge_old_terms()
+    logger.info("purge_old_search_terms: deleted %d rows", deleted)

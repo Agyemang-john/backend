@@ -8,7 +8,6 @@ API views for the homepage and supporting data:
 - TopEngagedCategoryView: highest-engagement category
 - MainAPIView: combined homepage payload (products, brands, subcategories)
 - SearchedProducts: persists search history in cookies
-- MakeDefaultAddressView: set/get default address for a user
 
 Recommendation rails (deals, recommended-for-you, similar items, cart add-ons)
 moved to the `recommendation` app, which serves them from trained models.
@@ -314,52 +313,6 @@ class SearchHistoryView(APIView):
         return Response({'status': 'ok'})
 
 
-class MakeDefaultAddressView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def put(self, request):
-        # Get the address ID from the request data
-        address_id = request.data.get('id')
-
-        if not address_id:
-            return Response({"error": "Address ID is required"}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            # Set all addresses for the current user to not be default
-            Address.objects.filter(user=request.user).update(status=False)
-
-            # Set the selected address as the default
-            Address.objects.filter(id=address_id, user=request.user).update(status=True)
-
-            new = Address.objects.filter(status=True, user=request.user).first()
-
-            profile = Profile.objects.select_related('user').get(user=request.user)
-            profile.address = new.address
-            profile.country = new.country
-            profile.mobile = new.mobile
-            profile.latitude = new.latitude
-            profile.longitude = new.longitude
-            profile.save()
-
-            return Response({"success": True, "message": "Address set as default"}, status=status.HTTP_200_OK)
-
-        except Address.DoesNotExist:
-            return Response({"error": "Address not found"}, status=status.HTTP_404_NOT_FOUND)
-    
-    def get(self, request):
-        try:
-            # Fetch the default address for the authenticated user
-            default_address = Address.objects.filter(user=request.user, status=True).first()
-
-            if default_address:
-                # Use the serializer to return the default address
-                serializer = AddressSerializer(default_address)
-                return Response(serializer.data, status=status.HTTP_200_OK)
-            else:
-                return Response({"message": "No default address found"}, status=status.HTTP_404_NOT_FOUND)
-
-        except Address.DoesNotExist:
-            return Response({"error": "Error retrieving default address"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 #############################CUSTOMER DASHBOARD############################
 
 

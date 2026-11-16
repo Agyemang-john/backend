@@ -43,14 +43,20 @@ def country_code(value):
     """ISO code for an Address.country value, which may hold a name or a code."""
     if not value:
         return None
-    return _country_codes().get(value.strip().lower())
+    code = _country_codes().get(value.strip().lower())
+    if code is None:
+        from .formats import resolve_country
+        code = resolve_country(value)[1]
+    return code
 
 
 def default_country(user):
     """ISO code of the user's default address, or None if they have none."""
-    value = (Address.objects.filter(user=user, status=True)
-             .values_list('country', flat=True).first())
-    return country_code(value)
+    row = (Address.objects.filter(user=user, status=True)
+           .values_list('country_code', 'country').first())
+    if not row:
+        return None
+    return (row[0] or '').upper() or country_code(row[1])
 
 
 def set_cookie(response, request, code):

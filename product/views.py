@@ -27,6 +27,7 @@ from .utils import (
 )
 from .listing import listing_page_size
 from .cards import listing_rows
+from .search_trends import MAX_TERM_LEN, complete_query, record_search, trending_searches
 from address import delivery
 
 from .review_serializers import PublicReviewSerializer  # noqa: E402
@@ -457,6 +458,22 @@ class ProductAuthStateAPIView(APIView):
                 'is_following':     False,
                 'follower_count':   product.vendor.followers.count(),
             })
+
+
+class TrendingSearchesAPIView(APIView):
+    """GET → {"trending": [...]} — what shoppers are searching for this week."""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return Response({"trending": trending_searches(12)})
+
+
+class SearchCompletionsAPIView(APIView):
+    """GET ?q= → {"queries": [...]} — popular searches matching what's typed."""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return Response({"queries": complete_query(request.GET.get("q", "")[:MAX_TERM_LEN], 5)})
 
 
 class SearchSuggestionsAPIView(APIView):
@@ -934,6 +951,11 @@ class ProductSearchAPIView(APIView):
 
         # ── Serialize (lightweight) ────────────────────────────────────────────
         products_with_details = listing_rows(paged_products, request)
+
+        # Feeds the search bar's trending / popular searches. Page 1 only;
+        # counted once per shopper per term per day, and only if it found anything.
+        if page == 1:
+            record_search(request, query, total_items or len(facets["vendors"]))
 
         def build_url(page_num):
             if page_num < 1 or page_num > total_pages or total_items == 0:

@@ -479,6 +479,9 @@ class OrderTrackingSerializer(serializers.ModelSerializer):
         return {
             'full_name': addr.full_name,
             'address': addr.address,
+            'address_line2': addr.address_line2,
+            'landmark': addr.landmark,
+            'one_line': addr.one_line,
             'town': addr.town,
             'region': addr.region,
             'country': addr.country,

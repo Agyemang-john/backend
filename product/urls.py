@@ -34,6 +34,8 @@ urlpatterns = [
     path('brand/<slug>/', views.BrandProductListView.as_view(), name='brand'),
     path('search/', views.ProductSearchAPIView.as_view(), name='product-search'),
     path('search-suggestions/', views.SearchSuggestionsAPIView.as_view(), name='search-suggestions'),
+    path('trending-searches/', views.TrendingSearchesAPIView.as_view(), name='trending-searches'),
+    path('search-completions/', views.SearchCompletionsAPIView.as_view(), name='search-completions'),
 
     # Detailed product-related views
     # path('cart/<sku>/<slug>/', CartDataView.as_view(), name='cart-data'),

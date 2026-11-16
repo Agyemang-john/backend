@@ -111,7 +111,8 @@ class DeliveryCountryTestCase(TestCase):
         addr = self.address('Ghana')
         self.client.cookies[delivery.COOKIE] = 'GH'
         res = self.client.delete(f'/api/v1/address/addresses/{addr.id}/')
-        self.assertEqual(res.status_code, 204)
+        self.assertEqual(res.status_code, 200)
+        self.assertIsNone(res.data['default_id'])
         self.assertEqual(res.cookies[delivery.COOKIE].value, '')
         self.assertEqual(res.cookies[delivery.COOKIE]['max-age'], 0)
 

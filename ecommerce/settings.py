@@ -304,6 +304,13 @@ FRONTEND_LOGIN_URL = config("FRONTEND_LOGIN_URL")
 # Blank = Google sign-in switched off (endpoints answer 503).
 GOOGLE_OAUTH_CLIENT_ID = config('GOOGLE_OAUTH_CLIENT_ID', default='')
 
+# Address search behind the address form (address/geo.py). With a Google Maps
+# key (Places API (New) + Geocoding API enabled) it uses Google; otherwise
+# Photon (OpenStreetMap). PHOTON_URL can point at a self-hosted Photon.
+GOOGLE_MAPS_API_KEY = config('GOOGLE_MAPS_API_KEY', default='')
+ADDRESS_GEO_PROVIDER = config('ADDRESS_GEO_PROVIDER', default='')
+PHOTON_URL = config('PHOTON_URL', default='https://photon.komoot.io')
+
 # Emailing settings
 SITE_URL = config('FRONTEND_BASE_URL')   # set correctly in each environment
 # Public URL of this API; makes local /media/ paths absolute in emails (blank: S3 URLs already are).
@@ -629,6 +636,11 @@ CELERY_BEAT_SCHEDULE = {
         "options": {"expires": 3 * 3600},
     },
     # Delete review photos/videos uploaded but never attached to a review.
+    # Search-bar trending data only needs a few weeks of history.
+    "purge-old-search-terms": {
+        "task": "product.tasks.purge_old_search_terms",
+        "schedule": crontab(hour=4, minute=25),
+    },
     "cleanup-orphan-review-media": {
         "task": "product.tasks.cleanup_orphan_review_media",
         "schedule": crontab(hour=4, minute=15),

@@ -1,15 +1,33 @@
-from django.contrib import admin
-from .models import Address, Country, Region, Town, Location
-# Register your models here.
-from .tasks import seed_countries
-from django.contrib import messages
+from django.contrib import admin, messages
 import logging
+
+from .models import Address, Country, Region, Town, Location
+from .tasks import seed_countries
+
 logger = logging.getLogger(__name__)
 
+
+class ArchivedFilter(admin.SimpleListFilter):
+    title = 'in address book'
+    parameter_name = 'archived'
+
+    def lookups(self, request, model_admin):
+        return (('no', 'Active'), ('yes', 'Archived (kept for orders)'))
+
+    def queryset(self, request, queryset):
+        if self.value() == 'no':
+            return queryset.filter(archived_at__isnull=True)
+        if self.value() == 'yes':
+            return queryset.filter(archived_at__isnull=False)
+        return queryset
+
+
 class AddressAdmin(admin.ModelAdmin):
-    list_display = ['user', 'address', 'status']
-    search_fields = ['user__email', 'full_name', 'address', 'town']
-    raw_id_fields = ['user']
+    list_display = ['user', 'label', 'address', 'town', 'country_code', 'location_source', 'status', 'archived_at']
+    list_filter = [ArchivedFilter, 'location_source', 'label', 'country_code']
+    search_fields = ['user__email', 'full_name', 'address', 'town', 'gps_address', 'mobile']
+    raw_id_fields = ['user', 'replaced_by', 'pickup_point']
+    readonly_fields = ['archived_at', 'replaced_by', 'last_used_at', 'date_added', 'modified_at']
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related('user')  # __str__ uses user.email
