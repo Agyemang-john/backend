@@ -58,6 +58,54 @@ def _send_sms(phone: str | None, message: str) -> None:
         logger.warning('_send_sms: could not send to %s: %s', phone, exc)
 
 
+# ── Built-in wording (used only when the admin hasn't created a template) ─────
+DEFAULT_EMAILS = {
+    'confirmation': (
+        'Your {{ plan_name }} plan is active',
+        'Hi {{ vendor_name }},\n\nYour Negromart {{ plan_name }} plan is now active. '
+        'It renews on {{ end_date }}.\n\nManage your plan: {{ frontend_url }}/billing',
+    ),
+    'renewal_success': (
+        'Your {{ plan_name }} plan has renewed',
+        'Hi {{ vendor_name }},\n\nWe received {{ amount }} and your {{ plan_name }} plan has renewed. '
+        'Next renewal: {{ end_date }}.\n\nBilling: {{ frontend_url }}/billing',
+    ),
+    'expiring_soon': (
+        '{% if auto_renew %}Your {{ plan_name }} plan renews on {{ end_date }}'
+        '{% else %}Your {{ plan_name }} plan ends in {{ days_left }} day{{ days_left|pluralize }}{% endif %}',
+        'Hi {{ vendor_name }},\n\n{% if auto_renew %}Your {{ plan_name }} plan renews on {{ end_date }}. '
+        'We will charge {{ amount }} to your saved payment method.'
+        '{% else %}Your {{ plan_name }} plan ends on {{ end_date }} and will not renew. '
+        'After that your store moves to the Free plan. Renew: {{ subscribe_url }}{% endif %}',
+    ),
+    'payment_failed': (
+        '{% if upcoming %}Add a payment method to keep {{ plan_name }}'
+        '{% else %}Action needed: we couldn\'t renew your {{ plan_name }} plan{% endif %}',
+        'Hi {{ vendor_name }},\n\n{% if reason %}{{ reason }}\n\n{% endif %}'
+        '{% if access_until %}Your {{ plan_name }} plan stays on until {{ access_until }}. '
+        'If we can\'t collect payment by then, your store moves to the Free plan.\n\n{% endif %}'
+        '{% if next_attempt %}We\'ll try again on {{ next_attempt }}.\n\n{% endif %}'
+        'Update your card or Mobile Money, or pay now: {{ frontend_url }}/billing',
+    ),
+    'cancellation': (
+        'Your {{ plan_name }} plan was cancelled',
+        'Hi {{ vendor_name }},\n\nYour {{ plan_name }} plan won\'t renew. You keep it until {{ end_date }}. '
+        'Changed your mind? {{ subscribe_url }}',
+    ),
+    'expired': (
+        'Your {{ plan_name }} plan has ended',
+        'Hi {{ vendor_name }},\n\nYour {{ plan_name }} plan has ended and your store is now on the Free plan. '
+        'Your listings stay live. Subscribe again: {{ subscribe_url }}',
+    ),
+}
+
+
+def _fmt_date(iso):
+    from django.utils.dateparse import parse_datetime
+    dt = parse_datetime(iso) if iso else None
+    return dt.strftime('%B %d, %Y') if dt else None
+
+
 # ── Central email dispatcher ──────────────────────────────────────────────────
 
 def send_templated_email(template_type: str, recipient_email: str, context: dict):
@@ -68,11 +116,16 @@ def send_templated_email(template_type: str, recipient_email: str, context: dict
     """
     from .email_models import EmailTemplate, SubscriptionEmailConfig
 
-    try:
-        tmpl = EmailTemplate.objects.get(type=template_type, is_active=True)
-    except EmailTemplate.DoesNotExist:
-        logger.warning('send_templated_email: no active template for type=%s', template_type)
+    tmpl = EmailTemplate.objects.filter(type=template_type).first()
+    if tmpl is not None and not tmpl.is_active:
+        logger.info('send_templated_email: type=%s is switched off in admin', template_type)
         return
+    if tmpl is None:
+        default = DEFAULT_EMAILS.get(template_type)
+        if default is None:
+            logger.warning('send_templated_email: no template for type=%s', template_type)
+            return
+        tmpl = EmailTemplate(type=template_type, subject=default[0], text_body=default[1])
 
     cfg = SubscriptionEmailConfig.get()
 
@@ -181,33 +234,44 @@ def send_renewal_success_email(vendor_id: int):
 
 
 @shared_task(name="subscriptions.send_payment_method_required_email")
-def send_payment_method_required_email(vendor_id: int):
+def send_payment_method_required_email(vendor_id: int, reason: str = '', no_method: bool = False,
+                                       access_until: str = None, next_attempt: str = None,
+                                       upcoming: bool = False):
     """
-    Email + SMS sent on the FIRST renewal failure.
-    Tells the vendor to update their card/MoMo before the next retry.
+    Email + SMS when a renewal payment failed (each attempt), when the plan
+    goes past due, or ahead of the renewal date when there's nothing to charge.
+    Says why, until when the store keeps its plan, and when we'll retry.
     """
     from vendor.models import Vendor
     from .models import VendorSubscription
     try:
         vendor = Vendor.objects.get(pk=vendor_id)
-        # Fetch the subscription for plan context (may be past_due or active)
         sub = VendorSubscription.objects.filter(
             vendor=vendor, status__in=['active', 'past_due']
         ).select_related('plan').first()
         name      = vendor.name or vendor.email
         plan_name = sub.plan.name if sub else 'your'
+        until     = _fmt_date(access_until)
         ctx = {
-            'vendor_name': name,
-            'plan_name':   plan_name,
+            'vendor_name':  name,
+            'plan_name':    plan_name,
+            'reason':       reason,
+            'no_method':    no_method,
+            'access_until': until,
+            'next_attempt': _fmt_date(next_attempt),
+            'upcoming':     upcoming,
         }
         send_templated_email('payment_failed', vendor.email, ctx)
 
         first_name = name.split()[0]
-        _send_sms(
-            _get_vendor_phone(vendor),
-            f"Hi {first_name}, Negromart couldn't renew your {plan_name} plan - payment failed. "
-            f"Update your card/MoMo: seller.negromart.com/billing/cards"
-        )
+        if upcoming:
+            sms = (f"Hi {first_name}, add a card or MoMo before {until or 'your renewal date'} "
+                   f"to keep your Negromart {plan_name} plan: seller.negromart.com/billing")
+        else:
+            sms = (f"Hi {first_name}, we couldn't renew your Negromart {plan_name} plan. "
+                   + (f"Pay by {until} to keep it: " if until else "Update your card/MoMo: ")
+                   + "seller.negromart.com/billing")
+        _send_sms(_get_vendor_phone(vendor), sms)
     except Exception as e:
         logger.error('send_payment_method_required_email failed vendor=%s: %s', vendor_id, e)
 
@@ -323,126 +387,46 @@ def send_subscription_expired_email(vendor_id: int):
 # config.  Their schedule (hour/minute UTC) is controlled from the admin panel.
 
 
-@shared_task(name="subscriptions.process_renewals")
+@shared_task(name="subscriptions.process_renewals", ignore_result=True)
 def process_subscription_renewals():
     """
-    Queues a charge_vendor_for_renewal task for every subscription whose
-    end_date falls exactly renewal_advance_days from now and has auto_renew=True.
-    Runs daily at the time set in SubscriptionEmailConfig.run_renewals_hour/minute.
+    Hourly. Queues one renewal attempt for every auto-renewing subscription
+    that is due: inside the renewal window and not waiting for its next retry
+    (payments/subscription_lifecycle.py). Window-based, so a missed run is
+    caught up by the next one; each attempt claims its row, so queuing the
+    same subscription twice never charges twice.
     """
-    from .models import VendorSubscription
-    from .email_models import SubscriptionEmailConfig
-    from django.utils import timezone
-    from datetime import timedelta
-
-    cfg    = SubscriptionEmailConfig.get()
-    target = timezone.now() + timedelta(days=cfg.renewal_advance_days)
-
-    due = VendorSubscription.objects.filter(
-        status='active', auto_renew=True,
-        end_date__date=target.date(),
-    ).values_list('id', flat=True)
+    from .subscription_lifecycle import due_for_renewal_ids
+    from .tasks import charge_vendor_for_renewal
 
     count = 0
-    for sub_id in due:
-        from .tasks import charge_vendor_for_renewal
-        charge_vendor_for_renewal.apply_async(
-            args=[sub_id],
-            max_retries=cfg.renewal_max_retries,
-        )
+    for sub_id in due_for_renewal_ids().iterator(chunk_size=1000):
+        charge_vendor_for_renewal.delay(sub_id)
         count += 1
-
-    logger.info('process_subscription_renewals: queued %d renewal task(s)', count)
+    logger.info('process_subscription_renewals: queued %d renewal attempt(s)', count)
     return f'queued:{count}'
 
 
-@shared_task(name="subscriptions.warn_expiring_soon")
+@shared_task(name="subscriptions.warn_expiring_soon", ignore_result=True)
 def warn_expiring_soon():
     """
-    Sends expiry warnings at both thresholds from SubscriptionEmailConfig.
-
-    auto_renew=False → urgent "please renew" at first AND second threshold.
-    auto_renew=True  → informational heads-up at the first threshold only
-                       (they will be charged automatically; no second nag).
-
-    Runs daily at SubscriptionEmailConfig.run_expiry_check_hour/minute (UTC).
+    Daily. Reminders before the renewal date — see
+    subscription_lifecycle.send_upcoming_reminders (each sent once per period).
     """
-    from .models import VendorSubscription
-    from .email_models import SubscriptionEmailConfig
-    from django.utils import timezone
-    from datetime import timedelta
-
-    cfg   = SubscriptionEmailConfig.get()
-    count = 0
-
-    # Urgent warnings for vendors who must renew manually
-    thresholds = [cfg.expiry_warning_days]
-    if cfg.second_warning_days > 0:
-        thresholds.append(cfg.second_warning_days)
-
-    for days in thresholds:
-        target   = timezone.now() + timedelta(days=days)
-        expiring = VendorSubscription.objects.filter(
-            status='active', auto_renew=False,
-            end_date__date=target.date(),
-        )
-        for sub in expiring:
-            send_expiring_soon_email.delay(sub.vendor_id, sub.id)
-            count += 1
-
-    # Heads-up for auto-renewing vendors (first threshold only — no double nag)
-    target       = timezone.now() + timedelta(days=cfg.expiry_warning_days)
-    auto_renewing = VendorSubscription.objects.filter(
-        status='active', auto_renew=True,
-        end_date__date=target.date(),
-    )
-    for sub in auto_renewing:
-        send_expiring_soon_email.delay(sub.vendor_id, sub.id)
-        count += 1
-
-    logger.info('warn_expiring_soon: sent %d warning(s)', count)
+    from .subscription_lifecycle import send_upcoming_reminders
+    count = send_upcoming_reminders()
+    logger.info('warn_expiring_soon: sent %d reminder(s)', count)
     return f'warned:{count}'
 
 
-@shared_task(name="subscriptions.expire_old_subscriptions")
+@shared_task(name="subscriptions.expire_old_subscriptions", ignore_result=True)
 def expire_old_subscriptions():
     """
-    Finds every active subscription whose end_date has already passed,
-    marks it as expired, downgrades the vendor to the Free plan feature-set,
-    and notifies the vendor via email + SMS.
-
-    Runs daily at SubscriptionEmailConfig.run_expire_old_hour/minute (UTC).
-    This is the safety net — charge_vendor_for_renewal normally handles renewal
-    before the end_date, but this task catches anything that slipped through.
+    Hourly. Plans whose period ended go to past_due (grace period, renewal
+    still retried) or straight to Free; past_due plans whose grace ran out,
+    and finished trials, expire. Emails go out on each change.
     """
-    from .models import VendorSubscription
-    from django.utils import timezone
-
-    overdue = VendorSubscription.objects.filter(
-        status='active',
-        end_date__lt=timezone.now(),
-    ).select_related('vendor', 'plan')
-
-    count = 0
-    for sub in overdue:
-        try:
-            sub.status = 'expired'
-            sub.save(update_fields=['status'])
-
-            # Downgrade vendor feature flags to reflect the Free plan limits
-            try:
-                from . import services
-                services._sync_vendor_flags(sub.vendor)
-            except Exception as flag_exc:
-                logger.warning(
-                    'expire_old_subscriptions: _sync_vendor_flags failed for vendor=%s: %s',
-                    sub.vendor_id, flag_exc,
-                )
-
-            send_subscription_expired_email.delay(sub.vendor_id)
-            count += 1
-        except Exception as e:
-            logger.error('expire_old_subscriptions: failed for sub=%s: %s', sub.id, e)
-
-    logger.info('expire_old_subscriptions: expired %d subscription(s)', count)
-    return f'expired:{count}'
+    from .subscription_lifecycle import sweep_lapsed
+    counts = sweep_lapsed()
+    logger.info('expire_old_subscriptions: %s', counts)
+    return f"expired:{counts['expired']} past_due:{counts['past_due']}"

@@ -95,15 +95,17 @@ class SellerOfferView(APIView):
         ser.is_valid(raise_exception=True)
         d = ser.validated_data
 
+        from django.db import transaction
+        from payments.entitlements import sync_usage
+
         gate = SubscriptionGateMixin()
         gate.request = request
-        gate._gate_product_limit()      # same plan limit as any new listing
         try:
-            offer = services.create_offer(vendor, d['product'], price=d['price'], quantity=d['quantity'],
-                                          condition=d['condition'], seller_sku=d['seller_sku'])
+            with transaction.atomic():
+                gate._gate_product_limit()      # same plan limit as any new listing (store row locked)
+                offer = services.create_offer(vendor, d['product'], price=d['price'], quantity=d['quantity'],
+                                              condition=d['condition'], seller_sku=d['seller_sku'])
         except services.CatalogError as exc:
             return Response({'detail': str(exc)}, status=exc.status)
-        from django.db.models import F
-        from payments.models import SubscriptionUsage
-        SubscriptionUsage.objects.filter(vendor=vendor).update(active_products_count=F('active_products_count') + 1)
+        sync_usage(vendor)
         return Response({'id': offer.pk, 'sku': offer.sku, 'slug': offer.slug}, status=status.HTTP_201_CREATED)

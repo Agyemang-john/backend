@@ -67,6 +67,23 @@ STATUS_MAP = {
     'SEIZED': ('exception', 'Seized by the authorities'),
 }
 
+# Raven statuses that end the shipment on Raven's side -> our Shipment.status.
+# Their tracking event stays 'exception' (that's what the buyer sees); the
+# shipment itself must stop looking like it's on its way. 'canceled' lets the
+# seller book again; 'failed' needs a person (claim, refund or resend).
+ENDING_STATUSES = {
+    'CANCELLED': 'canceled',
+    'BOOKING_FAILED': 'canceled',
+    'LOST': 'failed',
+    'DAMAGED': 'failed',
+    'SEIZED': 'failed',
+}
+
+# Statuses reached at most once per delivery attempt. These carry a state key
+# shared by webhooks and polling, so the same milestone is never applied
+# twice. Hub and transit statuses repeat on a multi-hub route and don't.
+MILESTONES = {'PICKED_UP', 'OUT_FOR_DELIVERY', 'FAILED_ATTEMPT', 'DELIVERED', 'RETURNED', *ENDING_STATUSES}
+
 
 def _setting(name, default=''):
     return getattr(settings, name, default)
@@ -286,12 +303,56 @@ class RavenDeliveryProvider(DeliveryProvider):
 
         data = payload.get('data') or {}
         raven_status = data.get('to', '')
+        return [self._update(
+            raven_status,
+            lookup=data.get('reference') or data.get('shipment_id', ''),
+            raven_id=data.get('shipment_id', ''),
+            attempts=data.get('delivery_attempts'),
+            occurred=parse_datetime(data.get('occurred_at') or '') or timezone.now(),
+            event_id=str(payload.get('id', '')),
+            keyed=raven_status in MILESTONES,
+        )]
+
+    def _update(self, raven_status, *, lookup, raven_id, attempts, occurred, event_id='', keyed=True):
         status, description = STATUS_MAP.get(raven_status, ('info', raven_status.replace('_', ' ').capitalize()))
-        occurred = parse_datetime(data.get('occurred_at') or '') or timezone.now()
-        return [TrackingUpdate(
-            shipment_lookup=data.get('reference') or data.get('shipment_id', ''),
+        state_key = f"state:{raven_id}:{raven_status}:{attempts or 0}" if keyed and raven_id else ''
+        return TrackingUpdate(
+            shipment_lookup=lookup,
             status=status,
             description=description,
             event_date=occurred,
-            event_id=str(payload.get('id', '')),
-        )]
+            event_id=event_id,
+            shipment_status=ENDING_STATUSES.get(raven_status, ''),
+            state_key=state_key,
+        )
+
+    def sync(self, shipment):
+        """Catch up from Raven's current status when its webhooks didn't reach us."""
+        from order.fulfilment import EVENT_TO_SHIPMENT_STATUS
+
+        if not shipment.external_reference:
+            return []
+        try:
+            response = self._request('GET', f"shipments/{shipment.external_reference}")
+        except requests.RequestException as exc:
+            raise DeliveryProviderError("Raven could not be reached.") from exc
+        if response.status_code != 200:
+            raise self._error(response)
+        data = response.json()
+        raven_status = data.get('status', '')
+
+        # Polling sees only where the parcel is now, so it only acts when that
+        # would move our shipment; info-only statuses are left to webhooks.
+        update = self._update(
+            raven_status,
+            lookup=shipment.shipment_id,
+            raven_id=str(data.get('shipment_id') or shipment.external_reference),
+            attempts=data.get('delivery_attempts'),
+            occurred=(parse_datetime(data.get({'DELIVERED': 'delivered_at',
+                                               'PICKED_UP': 'picked_up_at'}.get(raven_status, '')) or '')
+                      or timezone.now()),
+        )
+        target = update.shipment_status or EVENT_TO_SHIPMENT_STATUS.get(update.status)
+        if not target or target == shipment.status:
+            return []
+        return [update]

@@ -108,24 +108,84 @@ def on_shipment_delivered(shipment):
 
 
 def record_tracking_event(shipment, *, status, description, event_date,
-                          location='', city='', country=''):
-    """Store a tracking event and apply its consequences. Returns the event."""
+                          location='', city='', country='', shipment_status=None, courier=False):
+    """
+    Store a tracking event and apply its consequences. Returns the event.
+
+    `shipment_status` overrides the status derived from the event (a courier
+    ending the shipment). `courier=True` is for reports from an external
+    courier, which can arrive late and out of order: the event is always kept
+    on the timeline, but it only moves the shipment if it is the newest one
+    and the shipment hasn't already finished. Otherwise a retried "in transit"
+    landing after "delivered" would undo the delivery.
+    """
     event = TrackingEvent.objects.create(
         shipment=shipment, status=status, description=description,
         location=location, city=city, country=country, event_date=event_date,
     )
 
-    new_status = EVENT_TO_SHIPMENT_STATUS.get(status)
+    new_status = shipment_status or EVENT_TO_SHIPMENT_STATUS.get(status)
+    if new_status and courier and (
+        shipment.status in TERMINAL_SHIPMENT_STATUSES
+        or shipment.tracking_events.filter(event_date__gt=event_date).exclude(pk=event.pk).exists()
+    ):
+        new_status = None
+
     if new_status and shipment.status != new_status:
         shipment.status = new_status
         shipment.save(update_fields=['status', 'updated_at'])
 
-    if status == 'delivered':
+    if new_status == 'delivered':
         on_shipment_delivered(shipment)
 
-    if status in ('delivered', 'returned_to_sender', 'failed_attempt'):
+    if new_status in ('delivered', 'returned', 'failed', 'canceled'):
         recompute_order_status(shipment.order)
     return event
+
+
+def apply_courier_updates(provider_code, updates):
+    """
+    Apply TrackingUpdates from an external courier, whether its webhook pushed
+    them or order.tasks.sync_courier_tracking polled for them. Returns how
+    many were applied; duplicates and unknown shipments are skipped.
+    """
+    from .models import DeliveryWebhookEvent
+
+    applied = 0
+    touched_orders = set()
+    for update in updates:
+        base = Shipment.objects.select_related('order', 'vendor').filter(provider=provider_code)
+        shipment = (base.filter(shipment_id=update.shipment_lookup).first()
+                    or base.filter(external_reference=update.shipment_lookup).first())
+        if shipment is None:
+            logger.warning("courier update: unknown shipment %s from %s", update.shipment_lookup, provider_code)
+            continue
+        status_before = shipment.status
+        with transaction.atomic():
+            # Claimed in the same transaction as the event they guard, so a
+            # failure part-way leaves the notification unclaimed for the retry.
+            # event_id stops a retried webhook; state_key stops a milestone that
+            # polling already caught up on from being applied again by a late
+            # webhook (or the other way round).
+            duplicate = False
+            for key in filter(None, (update.event_id, update.state_key)):
+                _, first_time = DeliveryWebhookEvent.objects.get_or_create(provider=provider_code, event_id=key)
+                duplicate = duplicate or not first_time
+            if duplicate:
+                continue
+            event = record_tracking_event(
+                shipment, status=update.status, description=update.description,
+                event_date=update.event_date, location=update.location, city=update.city,
+                country=update.country, shipment_status=update.shipment_status or None, courier=True,
+            )
+        notify_tracking_event(shipment, event)
+        if update.shipment_status and shipment.status == update.shipment_status != status_before:
+            notify_seller_delivery_problem(shipment, event)
+        touched_orders.add(shipment.order_id)
+        applied += 1
+    for order_id in touched_orders:
+        broadcast_tracking(order_id)
+    return applied
 
 
 # ── Ship-by deadlines ─────────────────────────────────────────────────────────
@@ -193,6 +253,11 @@ def book_shipment(order, vendor, items, provider, **fields):
     from .delivery import DeliveryProviderError
 
     fields.setdefault('fulfilled_by', provider.fulfilled_by)
+    # One shipment per store per order (unique_together), so a delivery the
+    # courier cancelled is cleared out before booking its replacement. It
+    # carries no money: earnings are only posted on delivery.
+    Shipment.objects.filter(order=order, vendor=vendor, status='canceled',
+                            ledger_posted_at__isnull=True).delete()
     shipment = Shipment.objects.create(order=order, vendor=vendor, provider=provider.code, **fields)
     shipment.items.set(items)
     try:
@@ -268,6 +333,26 @@ def broadcast_tracking(order_id):
         )
     except Exception as exc:
         logger.warning("Broadcast tracking failed for order %s: %s", order_id, exc)
+
+
+def notify_seller_delivery_problem(shipment, event):
+    """The courier ended a shipment; the seller has to act (rebook or resolve)."""
+    vendor = shipment.vendor
+    if not vendor or not vendor.user_id:
+        return
+    from notification.utils import send_notification
+    order = shipment.order
+    next_step = ("You can book the delivery again from the order page." if shipment.status == 'canceled'
+                 else "Negromart support will follow up on this parcel.")
+    send_notification(
+        recipient=vendor.user, verb="vendor_delivery_problem", target=order,
+        data={
+            "order_number": order.order_number,
+            "message": f"{shipment.carrier or 'The courier'}: {event.description} "
+                       f"(order #{order.order_number}). {next_step}",
+            "url": f"/orders/{order.id}/detail/",
+        },
+    )
 
 
 def notify_tracking_event(shipment, event):

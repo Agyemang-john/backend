@@ -15,7 +15,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from django.conf import settings
 from django.utils.dateparse import parse_datetime
 from django.utils import timezone
-from django.db import transaction
+from django.db import models, transaction
 
 from .models import (
     SubscriptionPlan,
@@ -170,9 +170,14 @@ def quote_change(vendor, plan: SubscriptionPlan) -> dict:
 
 def schedule_downgrade(vendor, plan: SubscriptionPlan) -> VendorSubscription:
     """Queue `plan` for the next renewal. Re-enables renewal if it was off."""
+    current = current_paid_subscription(vendor)
+    if current is None:
+        raise SubscriptionChangeError("You don't have a paid plan to change.")
     with transaction.atomic():
         sub = (VendorSubscription.objects.select_for_update()
-               .filter(pk=current_paid_subscription(vendor).pk).first())
+               .filter(pk=current.pk, status='active').first())
+        if sub is None:
+            raise SubscriptionChangeError("Your plan changed in the meantime. Please refresh and try again.")
         sub.scheduled_plan = plan
         sub.auto_renew = True
         sub.cancelled_at = None
@@ -201,7 +206,12 @@ def _switch_plan_without_payment(vendor, plan, quote) -> dict:
     """An upgrade fully covered by credit: switch now and log a zero-amount record."""
     with transaction.atomic():
         Vendor.objects.select_for_update().get(pk=vendor.pk)
+        # Re-quote under the lock: the subscription may have changed since.
+        quote = quote_change(vendor, plan)
         sub = current_paid_subscription(vendor)
+        if sub is None or quote["change_type"] != "upgrade" or quote["amount_due"] != 0:
+            raise SubscriptionChangeError("Prices changed in the meantime. Please review the new amount.")
+        sub = VendorSubscription.objects.select_for_update().get(pk=sub.pk)
         sub.plan = plan
         sub.end_date = quote["period_end"]
         sub.scheduled_plan = None
@@ -212,8 +222,10 @@ def _switch_plan_without_payment(vendor, plan, quote) -> dict:
             vendor=vendor, subscription=sub, transaction_type='upgrade',
             amount=Decimal("0.00"), currency='GHS', status='success',
             paystack_reference=_generate_reference(vendor, "UPG"), paid_at=timezone.now(),
+            plan=plan, billing=plan.billing_cycle,
         )
-        _sync_vendor_flags(vendor)
+        from .subscription_lifecycle import refresh_store
+        refresh_store(vendor)
     return {"activated": True, "plan": plan.name, "end_date": sub.end_date.isoformat()}
 
 
@@ -282,11 +294,14 @@ def initiate_subscription(vendor, plan_id: int, billing: str) -> dict:
         currency='GHS',
         status='pending',
         paystack_reference=reference,
+        plan=plan,
+        billing=plan.billing_cycle,
     )
 
     payload = {
         "email": vendor.email,
-        "amount": int(quote["amount_due"] * 100),   # Paystack uses pesewas
+        "amount": _pesewas(quote["amount_due"]),   # Paystack uses pesewas
+        "currency": "GHS",
         "reference": reference,
         "callback_url": f"{settings.SITE_URL}/subscription/verify/?ref={reference}",
         "metadata": payment_metadata(
@@ -346,7 +361,7 @@ def charge_saved_card(vendor, plan_id: int, billing: str, card_id: int) -> dict:
     txn = PaymentTransaction.objects.create(
         vendor=vendor, authorization=card, transaction_type=quote["change_type"],
         amount=quote["amount_due"], currency='GHS', status='pending',
-        paystack_reference=reference,
+        paystack_reference=reference, plan=plan, billing=plan.billing_cycle,
     )
 
     try:
@@ -355,7 +370,8 @@ def charge_saved_card(vendor, plan_id: int, billing: str, card_id: int) -> dict:
             json={
                 "authorization_code": card.authorization_code,
                 "email": vendor.email,
-                "amount": int(quote["amount_due"] * 100),
+                "amount": _pesewas(quote["amount_due"]),
+                "currency": "GHS",
                 "reference": reference,
                 "metadata": payment_metadata(vendor, plan, billing, quote, transaction_db_id=str(txn.id)),
             },
@@ -369,22 +385,34 @@ def charge_saved_card(vendor, plan_id: int, billing: str, card_id: int) -> dict:
         logger.error(f"Saved-card charge failed for vendor {vendor.id}: {exc}")
         raise SubscriptionChangeError("We couldn't reach the payment provider. Please try again.")
 
-    if ps_data.get("status") != "success":
+    state = (ps_data.get("status") or "").lower()
+    if state in ("send_otp", "send_pin", "open_url", "pending", "ongoing", "processing"):
+        # Bank wants an extra step; the webhook activates the plan once it clears.
+        return {"activated": False, "pending": True, "reference": reference,
+                "message": "Your bank is confirming this payment. Your plan switches as soon as it does."}
+    if state != "success":
         reason = ps_data.get("gateway_response") or "The card was declined."
-        txn.status, txn.failure_reason = 'failed', reason
-        txn.save(update_fields=['status', 'failure_reason'])
+        PaymentTransaction.objects.filter(pk=txn.pk, status='pending').update(status='failed', failure_reason=reason)
         raise SubscriptionChangeError(f"{reason} Try another card or Mobile Money.")
 
-    result = verify_and_activate(reference)
-    return {**result, "activated": True, "reference": reference}
+    from . import subscription_lifecycle as lifecycle
+    try:
+        sub = lifecycle.activate_paid_transaction(
+            txn.pk, paid_pesewas=int(ps_data.get("amount") or 0),
+            currency=ps_data.get("currency") or "GHS", gateway_id=ps_data.get("id", ""),
+        )
+    except lifecycle.ActivationRefused as exc:
+        raise SubscriptionChangeError(str(exc))
+    return {**lifecycle.subscription_result(sub), "activated": True, "reference": reference}
 
 
 def _activate_free_plan(vendor, plan: SubscriptionPlan) -> dict:
     """Activates the free plan directly — no Paystack involved."""
     with transaction.atomic():
         # Cancel any existing active subscription
+        # A lapsed/past-due paid plan stops here too: the store chose Free.
         VendorSubscription.objects.filter(
-            vendor=vendor, status='active'
+            vendor=vendor, status__in=VendorSubscription.LIVE_STATUSES
         ).update(status='cancelled')
 
         sub = VendorSubscription.objects.create(
@@ -395,8 +423,8 @@ def _activate_free_plan(vendor, plan: SubscriptionPlan) -> dict:
             end_date=timezone.now() + timedelta(days=36500),  # 100 years = forever
             auto_renew=False,
         )
-        _ensure_usage_record(vendor, sub)
-        _sync_vendor_flags(vendor)
+        from .subscription_lifecycle import refresh_store
+        refresh_store(vendor)
 
     return {"activated": True, "plan": plan.name}
 
@@ -439,20 +467,17 @@ def _check_paid_transaction(txn, ps_data, meta):
 
 def verify_and_activate(reference: str, vendor=None) -> dict:
     """
-    Called from the /verify/ endpoint after Paystack redirects (card payments),
-    and from poll_momo_status on MoMo success.
-
-    IDEMPOTENT: If this reference has already been processed, returns the
-    existing subscription data without creating a duplicate.
-
-    RACE-SAFE: Uses select_for_update on the vendor row to prevent two
-    simultaneous calls (e.g. webhook + frontend verify) from both activating.
+    Called from the /verify/ endpoint after Paystack redirects back.
 
     TRUSTED: only references we created (a PaymentTransaction row) activate,
-    for the store that started them, and only once the amount we quoted was
+    for the store that started them, and only once the amount we charged was
     paid. `vendor`, when given, is the caller's store and must match.
+
+    IDEMPOTENT: a transaction is applied once. Replaying an old reference
+    returns the subscription it created and never starts a new period —
+    even after that subscription has ended.
     """
-    from django.db import IntegrityError
+    from . import subscription_lifecycle as lifecycle
 
     txn_record = PaymentTransaction.objects.filter(paystack_reference=reference).first()
     if txn_record is None or txn_record.vendor_id is None:
@@ -460,20 +485,21 @@ def verify_and_activate(reference: str, vendor=None) -> dict:
     if vendor is not None and txn_record.vendor_id != vendor.id:
         raise SubscriptionVerifyError("This payment belongs to a different store.")
 
-    # ── Idempotency: already activated? ──────────────────────────────────────
-    existing_txn = PaymentTransaction.objects.filter(
-        paystack_reference=reference, status='success'
-    ).select_related('subscription__plan').first()
+    if txn_record.status == 'success' and txn_record.subscription_id:
+        logger.info(f'verify_and_activate: ref={reference} already applied')
+        return lifecycle.subscription_result(txn_record.subscription)
+    if txn_record.status in ('review', 'refunded'):
+        raise SubscriptionVerifyError(
+            "This payment is being checked by our team. We'll be in touch — no need to pay again.")
 
-    if existing_txn and existing_txn.subscription and existing_txn.subscription.status == 'active':
-        sub = existing_txn.subscription
-        logger.info(f'verify_and_activate: ref={reference} already processed — returning existing sub')
-        return {
-            'vendor_id': sub.vendor_id,
-            'plan':      sub.plan.name,
-            'status':    'active',
-            'end_date':  sub.end_date.isoformat(),
-        }
+    if txn_record.transaction_type == 'renewal':
+        outcome = lifecycle.reconcile_renewal(txn_record)
+        if outcome != 'applied':
+            raise SubscriptionVerifyError("This renewal payment hasn't completed.")
+        txn_record.refresh_from_db()
+        return lifecycle.subscription_result(txn_record.subscription)
+    if txn_record.transaction_type not in lifecycle.PLAN_PURCHASE_TYPES:
+        raise SubscriptionVerifyError("We don't recognise this payment.")
 
     # ── Fetch + verify from Paystack ─────────────────────────────────────────
     try:
@@ -489,383 +515,47 @@ def verify_and_activate(reference: str, vendor=None) -> dict:
         raise
 
     if ps_data["status"] != "success":
-        PaymentTransaction.objects.filter(paystack_reference=reference).update(
+        PaymentTransaction.objects.filter(paystack_reference=reference, status='pending').update(
             status='failed',
             failure_reason=ps_data.get("gateway_response", "Payment not successful"),
         )
         raise Exception("Payment was not successful.")
 
-    meta      = ps_data.get("metadata") or {}
+    meta = ps_data.get("metadata") or {}
     if not isinstance(meta, dict):
         meta = {}
     if ps_data.get("reference") not in (None, reference):
         raise SubscriptionVerifyError("We don't recognise this payment.")
     _check_paid_transaction(txn_record, ps_data, meta)
-    vendor    = Vendor.objects.get(pk=txn_record.vendor_id)
+
     try:
-        plan  = SubscriptionPlan.objects.get(pk=meta["plan_id"])
-    except (KeyError, ValueError, SubscriptionPlan.DoesNotExist):
-        raise SubscriptionVerifyError("This payment is not for a plan we offer.")
-    billing   = meta.get("billing", "monthly")
-    txn_type  = meta.get("transaction_type", "initial")
-
-    with transaction.atomic():
-        # ── Row-level lock on vendor ──────────────────────────────────────────
-        Vendor.objects.select_for_update().get(pk=vendor.pk)
-
-        # ── Second idempotency check inside the lock ──────────────────────────
-        # Handles the case where another request activated between our first
-        # check and acquiring the lock.
-        existing_txn2 = PaymentTransaction.objects.filter(
-            paystack_reference=reference, status='success'
-        ).select_related('subscription__plan').first()
-        if existing_txn2 and existing_txn2.subscription and existing_txn2.subscription.status == 'active':
-            sub = existing_txn2.subscription
-            logger.info(f'verify_and_activate (in lock): ref={reference} already activated')
-            return {
-                'vendor_id': sub.vendor_id,
-                'plan':      sub.plan.name,
-                'status':    'active',
-                'end_date':  sub.end_date.isoformat(),
-            }
-
-        # ── Save Paystack customer ────────────────────────────────────────────
-        customer, _ = PaystackCustomer.objects.get_or_create(
-            vendor=vendor,
-            defaults={
-                "customer_code": ps_data["customer"]["customer_code"],
-                "email":         vendor.email,
-            },
+        sub = lifecycle.activate_paid_transaction(
+            txn_record.pk,
+            paid_pesewas=int(ps_data.get("amount") or 0),
+            currency=ps_data.get("currency") or "GHS",
+            gateway_id=ps_data.get("id", ""),
+            authorization=ps_data.get("authorization") or {},
+            customer_code=(ps_data.get("customer") or {}).get("customer_code"),
+            legacy_plan_id=meta.get("plan_id"),
+            legacy_billing=meta.get("billing"),
         )
-
-        # ── Save card authorization ───────────────────────────────────────────
-        auth_data = ps_data.get("authorization", {})
-        if auth_data.get("reusable"):
-            authorization, created = PaystackAuthorization.objects.get_or_create(
-                authorization_code=auth_data["authorization_code"],
-                defaults={
-                    "vendor":             vendor,
-                    "paystack_customer":  customer,
-                    "card_type":          auth_data.get("card_type", ""),
-                    "last4":              auth_data.get("last4", ""),
-                    "exp_month":          auth_data.get("exp_month", ""),
-                    "exp_year":           auth_data.get("exp_year", ""),
-                    "bank":               auth_data.get("bank", ""),
-                    "is_reusable":        True,
-                    "is_default":         True,
-                },
-            )
-            if created:
-                PaystackAuthorization.objects.filter(
-                    vendor=vendor
-                ).exclude(pk=authorization.pk).update(is_default=False)
-
-        # ── Cancel existing active/trial subscriptions ────────────────────────
-        cancelled = VendorSubscription.objects.filter(
-            vendor=vendor, status__in=['active', 'trial']
-        ).update(status='cancelled')
-        if cancelled:
-            logger.info(f'verify_and_activate: cancelled {cancelled} sub(s) for vendor {vendor.id}')
-
-        # ── Create new active subscription ────────────────────────────────────
-        try:
-            sub = VendorSubscription.objects.create(
-                vendor=vendor,
-                plan=plan,
-                status='active',
-                start_date=timezone.now(),
-                end_date=period_end_from(meta, billing),
-                auto_renew=True,
-                payment_reference=reference,
-            )
-        except IntegrityError:
-            # Partial unique index fired — concurrent activation won the race
-            logger.warning(f'IntegrityError creating sub for vendor {vendor.id} ref={reference}')
-            sub = VendorSubscription.objects.filter(
-                vendor=vendor, status='active'
-            ).select_related('plan').first()
-            if not sub:
-                raise
-
-        # ── Update usage tracker ──────────────────────────────────────────────
-        _ensure_usage_record(vendor, sub)
-
-        # ── Mark transaction success ──────────────────────────────────────────
-        PaymentTransaction.objects.filter(paystack_reference=reference).update(
-            subscription=sub,
-            status='success',
-            paystack_transaction_id=str(ps_data.get("id", "")),
-            paid_at=timezone.now(),
-        )
-
-        # ── Sync vendor flags ─────────────────────────────────────────────────
-        _sync_vendor_flags(vendor)
-
-    from .email_tasks import send_subscription_confirmation_email
-
-    send_subscription_confirmation_email.delay(vendor.id, sub.id)
-
-    logger.info(f"Subscription {txn_type}: vendor={vendor.id}, plan={plan.name}")
-    return {
-        "vendor_id": vendor.id,
-        "plan":      plan.name,
-        "status":    "active",
-        "end_date":  sub.end_date.isoformat(),
-    }
+    except lifecycle.ActivationRefused as exc:
+        raise SubscriptionVerifyError(str(exc))
+    return lifecycle.subscription_result(sub)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# REPLACE charge_for_renewal() in subscriptions/services.py with this version.
-#
-# Fixes:
-# 1. Imports email tasks from email_tasks.py (not the old tasks.py)
-# 2. Replaces sub.renew() with explicit field updates (in case renew() is not
-#    defined on the model — avoids AttributeError in production)
-# 3. Adds MoMo fallback: if no saved card exists, checks for a default MoMo
-#    account and initiates a MoMo charge instead of immediately going past_due
-# 4. Idempotency: skips if a successful renewal txn for today already exists
+# 4. Renewal — see payments/subscription_lifecycle.py
 # ─────────────────────────────────────────────────────────────────────────────
 
-def charge_for_renewal(subscription_id: int) -> dict:
+def charge_for_renewal(subscription_id: int, manual: bool = False, card=None) -> dict:
     """
-    Auto-renewal for a single subscription.
-    Called by the Celery task `charge_vendor_for_renewal`.
-
-    Priority:
-    1. Saved card (charge_authorization — silent, no vendor action needed)
-    2. Default MoMo account (initiates USSD prompt — vendor must approve on phone)
-    3. Neither found → mark past_due, email vendor to add payment method
-
-    Returns { status, reference } on success.
-    Raises on failure so the Celery task can retry.
+    Collect the renewal for one subscription (saved card first, then the
+    default MoMo account). Claims the subscription under a lock, so running
+    it twice never charges twice. manual=True is the seller's "Pay now".
     """
-    from django.utils import timezone
-    from datetime import timedelta
+    from .subscription_lifecycle import attempt_renewal
+    return attempt_renewal(subscription_id, manual=manual, card=card)
 
-    sub    = VendorSubscription.objects.select_related('vendor', 'plan', 'scheduled_plan').get(pk=subscription_id)
-    vendor = sub.vendor
-    # A scheduled downgrade takes effect at this renewal: charge its price.
-    plan   = sub.scheduled_plan or sub.plan
-
-    # ── Idempotency: already renewed today? ───────────────────────────────────
-    today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    already_renewed = PaymentTransaction.objects.filter(
-        vendor=vendor,
-        transaction_type='renewal',
-        status='success',
-        paid_at__gte=today_start,
-    ).exists()
-    if already_renewed:
-        logger.info(f'charge_for_renewal: sub={subscription_id} already renewed today — skipping')
-        return {'status': 'already_renewed'}
-
-    # ── Try card first ────────────────────────────────────────────────────────
-    authorization = PaystackAuthorization.objects.filter(
-        vendor=vendor, is_default=True, is_reusable=True
-    ).first()
-
-    if authorization:
-        return _charge_renewal_via_card(sub, vendor, plan, authorization)
-
-    # ── Fall back to MoMo ─────────────────────────────────────────────────────
-    try:
-        from .models import MomoAccount
-        momo = MomoAccount.objects.filter(vendor=vendor, is_default=True).first()
-    except Exception:
-        momo = None
-
-    if momo:
-        return _charge_renewal_via_momo(sub, vendor, plan, momo)
-
-    # ── No payment method at all ──────────────────────────────────────────────
-    sub.status = 'past_due'
-    sub.save(update_fields=['status'])
-    _sync_vendor_flags(vendor)
-
-    from .email_tasks import send_payment_method_required_email
-    send_payment_method_required_email.delay(vendor.id)
-
-    logger.warning(f'charge_for_renewal: no payment method for vendor={vendor.id} — marked past_due')
-    return {'status': 'past_due', 'reason': 'No saved payment method found'}
-
-
-def _charge_renewal_via_card(sub, vendor, plan, authorization) -> dict:
-    """Charge renewal via saved Paystack card authorization."""
-    reference = _generate_reference(vendor, 'RNW')
-
-    txn = PaymentTransaction.objects.create(
-        vendor=vendor,
-        subscription=sub,
-        authorization=authorization,
-        transaction_type='renewal',
-        amount=plan.price,
-        currency='GHS',
-        status='pending',
-        paystack_reference=reference,
-    )
-
-    try:
-        response = requests.post(
-            f'{PAYSTACK_BASE}/transaction/charge_authorization',
-            json={
-                'authorization_code': authorization.authorization_code,
-                'email':              vendor.email,
-                'amount':             int(float(plan.price) * 100),
-                'reference':          reference,
-                'metadata': {
-                    'payment_type':   'renewal',
-                    'vendor_id':      str(vendor.id),
-                    'subscription_id': str(sub.id),
-                },
-            },
-            headers=PAYSTACK_HEADERS,
-            timeout=15,
-        )
-        response.raise_for_status()
-        ps_data = response.json().get('data', {})
-
-        if ps_data.get('status') == 'success':
-            with transaction.atomic():
-                _renew_subscription(sub, plan)
-
-                txn.status                  = 'success'
-                txn.paystack_transaction_id = str(ps_data.get('id', ''))
-                txn.paid_at                 = timezone.now()
-                txn.save(update_fields=['status', 'paystack_transaction_id', 'paid_at'])
-
-                _sync_vendor_flags(vendor)
-
-            from .email_tasks import send_renewal_success_email
-            send_renewal_success_email.delay(vendor.id)
-
-            logger.info(f'Card renewal success: vendor={vendor.id} sub={sub.id} ref={reference}')
-            return {'status': 'success', 'method': 'card', 'reference': reference}
-
-        else:
-            raise Exception(ps_data.get('gateway_response') or 'Card charge failed')
-
-    except Exception as exc:
-        txn.status         = 'failed'
-        txn.failure_reason = str(exc)
-        txn.save(update_fields=['status', 'failure_reason'])
-        logger.warning(f'Card renewal failed: vendor={vendor.id} — {exc}')
-        raise
-
-
-def _charge_renewal_via_momo(sub, vendor, plan, momo) -> dict:
-    """
-    Initiate renewal via MoMo. The vendor will receive a USSD prompt.
-    We create a pending transaction; activation happens when poll_momo_status
-    is called and Paystack confirms success.
-
-    Note: MoMo renewal cannot be fully automatic (requires vendor to approve
-    on phone). This initiates the charge; if the vendor doesn't approve within
-    the session window it will fail and the task will retry tomorrow.
-    """
-    from .momo_services import (
-        initiate_momo_manual_payment,
-        PROVIDER_PAYSTACK_MAP,
-        _post_charge,
-        _mask,
-        require_billing_profile,
-        CHARGE_CACHE_TTL,
-    )
-    from django.core.cache import cache
-
-    try:
-        profile = require_billing_profile(vendor)
-    except ValueError:
-        # Billing profile incomplete — fall through to past_due
-        sub.status = 'past_due'
-        sub.save(update_fields=['status'])
-        _sync_vendor_flags(vendor)
-        from .email_tasks import send_payment_method_required_email
-        send_payment_method_required_email.delay(vendor.id)
-        return {'status': 'past_due', 'reason': 'Billing profile incomplete'}
-
-    reference   = _generate_reference(vendor, 'RNW-MM')
-    ps_provider = PROVIDER_PAYSTACK_MAP.get(momo.provider, momo.provider)
-
-    txn = PaymentTransaction.objects.create(
-        vendor=vendor,
-        subscription=sub,
-        transaction_type='renewal',
-        amount=plan.price,
-        currency='GHS',
-        status='pending',
-        paystack_reference=reference,
-    )
-
-    resp, data = _post_charge(
-        reference,
-        int(float(plan.price) * 100),
-        profile.email,
-        momo.phone,
-        ps_provider,
-    )
-
-    if resp.status_code >= 400 or not data.get('status'):
-        txn.status         = 'failed'
-        txn.failure_reason = data.get('message') or 'MoMo charge failed'
-        txn.save(update_fields=['status', 'failure_reason'])
-        msg = data.get('message') or 'MoMo charge initiation failed'
-        logger.warning(f'MoMo renewal failed: vendor={vendor.id} — {msg}')
-        raise Exception(msg)
-
-    # Store intent so poll_momo_status can activate the subscription
-    cache.set(f'momo_charge:{reference}', {
-        'vendor_id': vendor.id,
-        'plan_id':   plan.id,
-        'billing':   sub.plan.billing_cycle if hasattr(sub.plan, 'billing_cycle') else 'monthly',
-        'sub_id':    sub.id,
-        'type':      'renewal',
-    }, timeout=CHARGE_CACHE_TTL)
-
-    momo.last_reference = reference
-    momo.save(update_fields=['last_reference'])
-
-    charge       = data.get('data') or {}
-    display_text = charge.get('display_text') or 'Please approve the renewal on your phone.'
-    requires_otp = charge.get('status') == 'send_otp'
-
-    logger.info(
-        f'MoMo renewal initiated: vendor={vendor.id} sub={sub.id} '
-        f'ref={reference} requires_otp={requires_otp}'
-    )
-    return {
-        'status':      'pending_momo',
-        'method':      'momo',
-        'reference':   reference,
-        'display_text': display_text,
-        'requires_otp': requires_otp,
-        'masked_phone': _mask(momo.phone),
-    }
-
-
-def _renew_subscription(sub, plan) -> None:
-    """
-    Extend the subscription end_date by one billing period.
-    Works whether or not the model has a .renew() method.
-    """
-    from django.utils import timezone
-    from datetime import timedelta
-
-    BILLING_DAYS = {'monthly': 30, 'quarterly': 90, 'yearly': 365}
-
-    # Try the model method first
-    if hasattr(sub, 'renew') and callable(sub.renew):
-        sub.renew()
-        return
-
-    # Fallback: explicit field update
-    billing_cycle = getattr(plan, 'billing_cycle', 'monthly')
-    days          = BILLING_DAYS.get(billing_cycle, 30)
-
-    # If already past end_date, start from today; otherwise extend from end_date
-    base = max(sub.end_date, timezone.now())
-    sub.end_date   = base + timedelta(days=days)
-    sub.status     = 'active'
-    sub.auto_renew = True
-    sub.save(update_fields=['end_date', 'status', 'auto_renew'])
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. Cancellation
@@ -881,7 +571,9 @@ def cancel_subscription(vendor, reason: str = "") -> VendorSubscription:
     """
     with transaction.atomic():
         sub = VendorSubscription.objects.filter(
-            vendor=vendor, status='active', plan__price__gt=0, end_date__gt=timezone.now(),
+            vendor=vendor, plan__price__gt=0,
+        ).filter(
+            models.Q(status='active', end_date__gt=timezone.now()) | models.Q(status='past_due')
         ).select_for_update().first()
 
         if not sub:
@@ -890,6 +582,10 @@ def cancel_subscription(vendor, reason: str = "") -> VendorSubscription:
             raise SubscriptionChangeError("This subscription is already cancelled.")
 
         sub.cancel(reason=reason)
+        if sub.status == 'past_due':
+            # Nothing left to keep: the paid period is over and retries stop.
+            from .subscription_lifecycle import _expire
+            _expire(sub)
 
     # Fire the email outside the transaction — no need to hold the lock
     # while Celery enqueues the task.
@@ -1144,30 +840,45 @@ def _verify_webhook_signature(raw_body: bytes, signature: str):
 
 
 def _webhook_charge_success(data: dict) -> str:
+    """
+    The signed event is the source of truth when the seller closes the tab
+    before our verify page loads, or a MoMo/OTP payment clears later.
+    """
+    from . import subscription_lifecycle as lifecycle
+
     reference = data.get("reference")
     txn = PaymentTransaction.objects.filter(paystack_reference=reference).first()
     if not txn:
         return f"charge.success: unknown reference {reference}"
+    paid = dict(paid_pesewas=int(data.get("amount") or 0), currency=data.get("currency") or "GHS",
+                gateway_id=data.get("id", ""))
 
-    # MoMo renewals are started by Celery, so nobody is polling for them:
-    # the webhook is what extends the subscription once the seller approves.
-    if txn.transaction_type == 'renewal' and txn.subscription_id and txn.status != 'success':
-        from .momo_services import _apply_momo_renewal
-        _apply_momo_renewal(reference, {'sub_id': txn.subscription_id})
-        return f"charge.success: renewal applied {reference}"
+    if txn.transaction_type == 'renewal':
+        sub = lifecycle.apply_renewal_payment(txn.pk, **paid)
+        return f"charge.success: renewal {'applied' if sub else 'not applied'} {reference}"
 
-    if txn.status != 'success':
-        txn.status = 'success'
-        txn.paystack_transaction_id = str(data.get("id", ""))
-        txn.paid_at = timezone.now()
-        txn.save()
+    if txn.transaction_type in lifecycle.PLAN_PURCHASE_TYPES:
+        meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+        try:
+            lifecycle.activate_paid_transaction(
+                txn.pk, authorization=data.get("authorization") or {},
+                customer_code=(data.get("customer") or {}).get("customer_code"),
+                legacy_plan_id=meta.get("plan_id"), legacy_billing=meta.get("billing"), **paid)
+        except lifecycle.ActivationRefused as exc:
+            return f"charge.success: not applied {reference}: {exc}"
+        return f"charge.success: plan applied {reference}"
 
+    # Other payment types (sponsored-products card charges) settle in their own flow.
+    if txn.status == 'pending':
+        PaymentTransaction.objects.filter(pk=txn.pk, status='pending').update(
+            status='success', paystack_transaction_id=str(data.get("id", "")), paid_at=timezone.now())
     return f"charge.success: processed {reference}"
 
 
 def _webhook_charge_failed(data: dict) -> str:
     reference = data.get("reference")
-    PaymentTransaction.objects.filter(paystack_reference=reference).update(
+    # Never let a late/forged failure overwrite a payment that succeeded.
+    PaymentTransaction.objects.filter(paystack_reference=reference, status='pending').update(
         status='failed',
         failure_reason=data.get("gateway_response", "Charge failed"),
     )
@@ -1177,7 +888,7 @@ def _webhook_charge_failed(data: dict) -> str:
 def _webhook_invoice_failed(data: dict) -> str:
     """Triggered when a recurring charge fails on Paystack's side."""
     reference = data.get("reference", "")
-    PaymentTransaction.objects.filter(paystack_reference=reference).update(
+    PaymentTransaction.objects.filter(paystack_reference=reference, status='pending').update(
         status='failed',
         failure_reason="Invoice payment failed",
     )
@@ -1185,11 +896,11 @@ def _webhook_invoice_failed(data: dict) -> str:
 
 
 def _webhook_refund_processed(data: dict) -> str:
+    from .subscription_lifecycle import handle_refund
     reference = data.get("transaction_reference", "")
-    PaymentTransaction.objects.filter(paystack_reference=reference).update(
-        status='refunded',
-    )
-    return f"refund.processed: {reference}"
+    amount = data.get("amount")
+    outcome = handle_refund(reference, int(amount) if amount is not None else None)
+    return f"refund.processed: {reference} ({outcome})"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1213,20 +924,10 @@ def _generate_reference(vendor, prefix: str) -> str:
     return f"{prefix}-{vendor.id}-{uid}"
 
 
-def _ensure_usage_record(vendor, subscription: VendorSubscription):
-    """Create or reset the SubscriptionUsage record for a vendor."""
-    usage, created = SubscriptionUsage.objects.get_or_create(
-        vendor=vendor,
-        defaults={
-            "subscription": subscription,
-            "active_products_count": 0,
-            "period_start": timezone.now(),
-        },
-    )
-    if not created:
-        usage.subscription = subscription
-        usage.reset_for_new_cycle()
-    return usage
+def _ensure_usage_record(vendor, subscription: VendorSubscription = None):
+    """Bring the billing-page usage numbers in line with reality (never resets them)."""
+    from .entitlements import sync_usage
+    return sync_usage(vendor)
 
 
 def _sync_vendor_flags(vendor):
@@ -1235,10 +936,10 @@ def _sync_vendor_flags(vendor):
     subscription_end_date fields on the Vendor model in sync.
     """
     active_sub = VendorSubscription.objects.filter(
-        vendor=vendor, status='active'
+        vendor=vendor, status__in=VendorSubscription.LIVE_STATUSES
     ).order_by('-created_at').first()
 
-    if active_sub and active_sub.end_date >= timezone.now():
+    if active_sub and active_sub.in_force():
         vendor.is_subscribed = True
         vendor.subscription_start_date = active_sub.start_date.date()
         vendor.subscription_end_date = active_sub.end_date.date()

@@ -328,79 +328,27 @@ def batch_payouts():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# REPLACE charge_vendor_for_renewal() in subscriptions/tasks.py with this.
-# Reads max_retries from SubscriptionEmailConfig instead of hardcoding 3.
+# Subscription renewal (payments/subscription_lifecycle.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@shared_task(
-    name='subscriptions.charge_vendor_for_renewal',
-    bind=True,
-    max_retries=10,          # ceiling — actual limit comes from DB config
-    default_retry_delay=86400,  # 24 hours between retries
-)
-def charge_vendor_for_renewal(self, subscription_id: int):
+@shared_task(name='subscriptions.charge_vendor_for_renewal', ignore_result=True)
+def charge_vendor_for_renewal(subscription_id: int):
     """
-    Charges a single vendor's saved card or MoMo for renewal.
-    Retries up to renewal_max_retries times (from SubscriptionEmailConfig),
-    once per day, before expiring the subscription.
+    One renewal attempt for one subscription. No Celery retries: the next
+    attempt time is stored on the subscription and picked up by the hourly
+    process_renewals run. (Long retry countdowns on a Redis broker get
+    re-delivered after the visibility timeout, which charged cards twice.)
+    The attempt claims the row under a lock, so a duplicate task is a no-op.
     """
-    from . import services
-    from .models import VendorSubscription
-    from .email_models import SubscriptionEmailConfig
-
-    cfg         = SubscriptionEmailConfig.get()
-    max_retries = cfg.renewal_max_retries  # reads live from DB
-
+    from .subscription_lifecycle import attempt_renewal
     try:
-        result = services.charge_for_renewal(subscription_id)
-
-        if result.get('status') == 'pending_momo':
-            # MoMo was initiated — the vendor needs to approve on their phone.
-            # Poll will activate the subscription when they do.
-            # Log and return — don't retry (retrying would fire another USSD prompt).
-            logger.info(
-                f'MoMo renewal initiated for sub={subscription_id}: '
-                f'ref={result.get("reference")} — waiting for vendor approval'
-            )
-            return result
-
-        logger.info(f'Renewal success: sub={subscription_id} ref={result.get("reference")}')
-        return result
-
+        result = attempt_renewal(subscription_id)
     except Exception as exc:
-        attempt = self.request.retries + 1
-        logger.warning(
-            f'Renewal attempt {attempt}/{max_retries} failed '
-            f'for sub={subscription_id}: {exc}'
-        )
+        logger.error(f'Renewal attempt crashed for sub={subscription_id}: {exc}', exc_info=True)
+        return {'status': 'error'}
+    logger.info(f'Renewal attempt sub={subscription_id}: {result.get("status")} ref={result.get("reference")}')
+    return result
 
-        # On the very first failure, immediately alert the vendor so they can
-        # update their payment method before the next automatic retry tomorrow.
-        if self.request.retries == 0:
-            try:
-                _sub = VendorSubscription.objects.select_related('vendor').get(pk=subscription_id)
-                from .email_tasks import send_payment_method_required_email
-                send_payment_method_required_email.delay(_sub.vendor.id)
-            except Exception as notify_exc:
-                logger.error(
-                    f'Failed to send first-failure notification for sub={subscription_id}: {notify_exc}'
-                )
-
-        if self.request.retries < max_retries - 1:
-            raise self.retry(exc=exc)
-
-        # All retries exhausted — mark expired and notify the vendor
-        logger.error(f'Renewal exhausted ({max_retries} attempts) for sub={subscription_id}. Expiring.')
-        try:
-            sub = VendorSubscription.objects.select_related('vendor').get(pk=subscription_id)
-            sub.status = 'expired'
-            sub.save(update_fields=['status'])
-            services._sync_vendor_flags(sub.vendor)
-
-            from .email_tasks import send_subscription_expired_email
-            send_subscription_expired_email.delay(sub.vendor.id)
-        except Exception as inner:
-            logger.error(f'Failed to expire sub={subscription_id}: {inner}')
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Seller ledger & payouts (payments/ledger.py)

@@ -1,5 +1,6 @@
 from product import sourcing as product_sourcing
 import re
+from django.db import transaction
 from rest_framework import serializers
 from django.utils.text import slugify
 from product.models import Product, ProductImages, Variants, VariantImage, ProductDeliveryOption, DeliveryOption, Sub_Category, Brand, Color, Size
@@ -255,6 +256,33 @@ class ProductSerializer(serializers.ModelSerializer):
             data['variant_keys'] = self._variant_keys
         return data
 
+    def _save_attributes(self, product, category_changed=False):
+        """
+        Structured specs (attributes/) sent with the product as `attributes`,
+        a JSON {slug: value} for the product's category. Saved in the same
+        transaction, so a product is never left half-created by a bad value.
+        """
+        from attributes import services as attribute_services
+
+        if category_changed:
+            attribute_services.prune_values(product)
+        raw = self.context['request'].data.get('attributes')
+        if raw in (None, ''):
+            return
+        try:
+            values = json.loads(raw) if isinstance(raw, str) else raw
+        except json.JSONDecodeError:
+            raise serializers.ValidationError({'attributes': 'Specifications could not be read.'})
+        if not isinstance(values, dict):
+            raise serializers.ValidationError({'attributes': 'Specifications could not be read.'})
+        if not values:
+            return
+        try:
+            attribute_services.save_values(product, values)
+        except attribute_services.AttributeValueError as exc:
+            raise serializers.ValidationError({'attributes': str(exc)})
+
+    @transaction.atomic
     def create(self, validated_data):
         request = self.context['request']
         self._variant_keys = {}
@@ -311,11 +339,15 @@ class ProductSerializer(serializers.ModelSerializer):
                 delivery_serializer.is_valid(raise_exception=True)
                 delivery_serializer.save(product=product)
 
+        self._save_attributes(product)
         return product
 
+    @transaction.atomic
     def update(self, instance, validated_data):
         request = self.context['request']
         self._variant_keys = {}
+        category_changed = ('sub_category' in validated_data
+                            and validated_data['sub_category'] != instance.sub_category)
         delivery_options_raw = request.data.get("delivery_options")
         variants_raw = request.data.get("variants")
         validated_data.pop('delivery_options', None)
@@ -422,6 +454,7 @@ class ProductSerializer(serializers.ModelSerializer):
 
             instance.productdeliveryoption_set.exclude(id__in=keep_ids).delete()
 
+        self._save_attributes(instance, category_changed=category_changed)
         return instance
  
 from product.models import ProductReview

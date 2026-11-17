@@ -8,6 +8,7 @@ from rest_framework import status
 
 # ⚠️  Import from .models, NOT .momo_models
 from .momo_models import MomoAccount, BillingProfile
+from .models import PaymentTransaction
 from .momo_serializers import (
     MomoAccountSerializer,
     BillingProfileSerializer,
@@ -203,8 +204,13 @@ class PollMomoStatusView(APIView):
         reference = request.query_params.get('ref')
         if not reference:
             return Response({'error': 'Missing ref parameter.'}, status=status.HTTP_400_BAD_REQUEST)
+        vendor = _vendor(request)
+        if not vendor:
+            return Response({'error': 'No vendor account.'}, status=status.HTTP_403_FORBIDDEN)
         try:
-            return Response(momo_services.poll_momo_status(reference))
+            return Response(momo_services.poll_momo_status(reference, vendor=vendor))
+        except PermissionError:
+            return Response({'error': 'Unknown payment reference.'}, status=status.HTTP_404_NOT_FOUND)
         except Exception as exc:
             logger.error(f'PollMoMo error ref={reference}: {exc}')
             # Non-500 so frontend keeps polling through transient errors
@@ -232,6 +238,10 @@ class SubmitMomoOtpView(APIView):
             return Response({'error': 'Missing reference.'}, status=status.HTTP_400_BAD_REQUEST)
         if not otp or not otp.isdigit():
             return Response({'error': 'Please enter the numeric OTP from the SMS.'}, status=status.HTTP_400_BAD_REQUEST)
+        vendor = _vendor(request)
+        if not vendor or not PaymentTransaction.objects.filter(
+                paystack_reference=reference, vendor=vendor).exists():
+            return Response({'error': 'Unknown payment reference.'}, status=status.HTTP_404_NOT_FOUND)
  
         try:
             result = momo_services.submit_momo_otp(reference, otp)

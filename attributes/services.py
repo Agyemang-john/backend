@@ -156,6 +156,12 @@ def save_values(product, data):
     return missing_required(product, defs.values())
 
 
+def prune_values(product):
+    """Drop values for attributes that no longer apply (the product moved category)."""
+    keep = [d.pk for d in definitions_for(product.sub_category)]
+    ProductAttributeValue.objects.filter(product=product).exclude(definition_id__in=keep).delete()
+
+
 def missing_required(product, defs=None):
     defs = list(defs if defs is not None else definitions_for(product.sub_category))
     have = set(ProductAttributeValue.objects.filter(product=product).values_list('definition_id', flat=True))

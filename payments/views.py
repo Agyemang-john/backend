@@ -551,7 +551,7 @@ class CurrentSubscriptionView(APIView):
 
         active_sub = VendorSubscription.objects.filter(
             vendor=vendor,
-            status__in=['active', 'trial'],
+            status__in=VendorSubscription.LIVE_STATUSES,
         ).select_related('plan').first()
 
         usage = getattr(vendor, 'subscription_usage', None)

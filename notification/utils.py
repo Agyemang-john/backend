@@ -56,6 +56,7 @@ VERB_META = {
     # Fulfilment & returns
     "vendor_orders_late":        {"title": "Orders Past Ship-by Date",  "icon": "schedule",        "color": "#C62828"},
     "vendor_sourcing_due":       {"title": "Imported Orders Need Attention", "icon": "flight_land", "color": "#E65100"},
+    "vendor_delivery_problem":   {"title": "Courier Delivery Problem",  "icon": "report",          "color": "#C62828"},
     "vendor_return_requested":   {"title": "Return Requested",          "icon": "assignment_return", "color": "#E65100"},
     "customer_return_update":    {"title": "Return Update",             "icon": "assignment_return", "color": "#1565C0"},
     # Reviews

@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import timedelta
 from unittest import mock
 
 import requests
@@ -204,8 +205,8 @@ class CourierCancellationTests(DeliveryTestCase):
         self.assertEqual(self.shipment.status, 'label_created')
 
 
-@override_settings(**RAVEN_SETTINGS)
-class RavenWebhookTests(DeliveryTestCase):
+class RavenWebhookCase(DeliveryTestCase):
+    """Shared setup for tests that post signed Raven webhooks."""
     URL = '/api/v1/order/delivery/webhooks/raven/'
 
     def setUp(self):
@@ -224,6 +225,10 @@ class RavenWebhookTests(DeliveryTestCase):
         raw, headers = signed(body, **kwargs)
         with self.captureOnCommitCallbacks(execute=True):
             return APIClient().post(self.URL, raw, content_type='application/json', **headers)
+
+
+@override_settings(**RAVEN_SETTINGS)
+class RavenWebhookTests(RavenWebhookCase):
 
     def test_delivery_is_applied_once_however_often_raven_retries(self):
         first = self.post(self.event())
@@ -256,3 +261,107 @@ class RavenWebhookTests(DeliveryTestCase):
 
     def test_provider_is_registered(self):
         self.assertEqual(get_provider('raven').fulfilled_by, 'carrier')
+
+
+@override_settings(**RAVEN_SETTINGS)
+class RavenOrderingAndEndingTests(RavenWebhookCase):
+    """Late, out-of-order and shipment-ending reports from Raven."""
+
+    def event_at(self, to, event_id, occurred_at, **data):
+        body = self.event(to=to, event_id=event_id)
+        body['data'].update(occurred_at=occurred_at, **data)
+        return body
+
+    def test_a_late_in_transit_does_not_undo_a_delivery(self):
+        self.post(self.event_at('DELIVERED', 'd-1', '2026-10-12T10:00:00+00:00'))
+        late = self.post(self.event_at('IN_TRANSIT', 'd-0', '2026-10-12T08:00:00+00:00'))
+        self.assertEqual(late.data['applied'], 1)  # kept on the timeline...
+        self.shipment.refresh_from_db()
+        self.assertEqual(self.shipment.status, 'delivered')  # ...but the delivery stands
+        self.assertEqual(TrackingEvent.objects.filter(shipment=self.shipment).count(), 2)
+
+    def test_nothing_moves_a_finished_shipment(self):
+        self.post(self.event_at('DELIVERED', 'd-1', '2026-10-12T10:00:00+00:00'))
+        self.post(self.event_at('OUT_FOR_DELIVERY', 'd-2', '2026-10-12T11:00:00+00:00'))
+        self.shipment.refresh_from_db()
+        self.assertEqual(self.shipment.status, 'delivered')
+
+    def test_an_older_event_still_moves_a_shipment_with_no_newer_news(self):
+        self.post(self.event_at('OUT_FOR_DELIVERY', 'd-1', '2026-10-12T08:00:00+00:00'))
+        self.shipment.refresh_from_db()
+        self.assertEqual(self.shipment.status, 'out_for_delivery')
+
+    def test_raven_cancelling_frees_the_seller_to_book_again(self):
+        from notification.models import Notification
+        res = self.post(self.event(to='CANCELLED'))
+        self.assertEqual(res.data['applied'], 1)
+        self.shipment.refresh_from_db()
+        self.order.refresh_from_db()
+        self.assertEqual(self.shipment.status, 'canceled')
+        self.assertEqual(self.order.status, 'processing')
+        self.assertTrue(Notification.objects.filter(recipient=self.owner, verb='vendor_delivery_problem').exists())
+
+        def fake(method, url, **kwargs):
+            if url.endswith('/v1/rates'):
+                return response(200, {'offers': [{'quote_id': 'q-2'}], 'refusals': []})
+            return response(201, raven_shipment(kwargs['json']['reference']))
+
+        with mock.patch('order.delivery.raven.requests.request', side_effect=fake):
+            rebooked = self.book_via_seller()
+        self.assertEqual(rebooked.status_code, 201, rebooked.data)
+        self.assertEqual(Shipment.objects.get(order=self.order).status, 'label_created')
+
+    def test_a_live_shipment_still_blocks_a_second_booking(self):
+        self.assertEqual(self.book_via_seller().status_code, 409)
+
+    def test_a_lost_parcel_stops_looking_like_it_is_coming(self):
+        self.post(self.event(to='LOST'))
+        self.shipment.refresh_from_db()
+        self.assertEqual(self.shipment.status, 'failed')
+        self.assertEqual(TrackingEvent.objects.get(shipment=self.shipment).status, 'exception')
+
+
+@override_settings(**RAVEN_SETTINGS)
+class RavenSyncTests(RavenWebhookCase):
+    """order.tasks.sync_courier_tracking: catching up on webhooks that never came."""
+
+    def setUp(self):
+        super().setUp()
+        Shipment.objects.filter(pk=self.shipment.pk).update(
+            external_reference=RAVEN_ID, created_at=self.shipment.created_at - timedelta(hours=1))
+
+    def run_sync(self, raven_status, attempts=0, **extra):
+        from order.tasks import sync_courier_tracking
+        body = {**raven_shipment(self.shipment.shipment_id), 'status': raven_status,
+                'delivery_attempts': attempts, 'delivered_at': None, 'picked_up_at': None, **extra}
+        with mock.patch('order.delivery.raven.requests.request', return_value=response(200, body)) as call, \
+                self.captureOnCommitCallbacks(execute=True):
+            sync_courier_tracking()
+        return call
+
+    def test_a_missed_delivery_is_caught_up(self):
+        call = self.run_sync('DELIVERED', delivered_at='2026-10-12T09:58:00+00:00')
+        self.assertEqual(call.call_args.args, ('GET', f'https://raven.test/api/v1/shipments/{RAVEN_ID}'))
+        self.shipment.refresh_from_db()
+        self.assertEqual(self.shipment.status, 'delivered')
+        self.assertIsNotNone(self.shipment.delivered_at)
+
+    def test_the_late_webhook_for_a_synced_milestone_is_not_applied_again(self):
+        self.run_sync('DELIVERED')
+        self.assertEqual(self.post(self.event(to='DELIVERED')).data['applied'], 0)
+        self.assertEqual(TrackingEvent.objects.filter(shipment=self.shipment).count(), 1)
+
+    def test_a_shipment_already_up_to_date_gets_no_new_event(self):
+        self.run_sync('AT_HUB')  # ours is already in_transit
+        self.assertFalse(TrackingEvent.objects.filter(shipment=self.shipment).exists())
+
+    def test_finished_and_unbooked_shipments_are_not_polled(self):
+        Shipment.objects.filter(pk=self.shipment.pk).update(status='delivered')
+        self.assertFalse(self.run_sync('DELIVERED').called)
+
+    def test_raven_being_down_is_logged_not_raised(self):
+        from order.tasks import sync_courier_tracking
+        with mock.patch('order.delivery.raven.requests.request', side_effect=requests.ConnectionError()):
+            sync_courier_tracking()
+        self.shipment.refresh_from_db()
+        self.assertEqual(self.shipment.status, 'in_transit')

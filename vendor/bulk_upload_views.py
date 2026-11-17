@@ -61,16 +61,21 @@ EXAMPLE_ROW = [
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
+from payments.entitlements import ProductLimitReached, reserve_product_slots, sync_usage
+
+
 def _get_vendor(user):
     return getattr(user, "current_vendor", None)
 
 
 def _check_product_limit(user, requested_count):
+    """Early, friendly refusal; each row is still checked under a lock when created."""
+    from payments.entitlements import product_count
     usage = _usage(user)
     plan  = _plan(user)
     if not plan or not plan.max_products:
         return usage, None
-    current   = usage.active_products_count if usage else 0
+    current   = product_count(_get_vendor(user))
     remaining = max(plan.max_products - current, 0)
     if current + requested_count > plan.max_products:
         return None, {
@@ -100,16 +105,17 @@ def _run_rows_sync(vendor, rows, usage):
             continue
         try:
             with transaction.atomic():
+                reserve_product_slots(vendor)   # plan limit, store row locked
                 product = ser.save(vendor=vendor)
                 created_ids.append(product.id)
+        except ProductLimitReached as exc:
+            errors.append({"row": i, "title": row.get("title", "—"), "errors": {"non_field_errors": [str(exc)]}})
         except Exception as exc:
             logger.error("BulkUpload sync row %d vendor %d: %s", i, vendor.id, exc, exc_info=True)
             errors.append({"row": i, "title": row.get("title", "—"), "errors": {"non_field_errors": [str(exc)]}})
 
-    if created_ids and usage:
-        SubscriptionUsage.objects.filter(pk=usage.pk).update(
-            active_products_count=F("active_products_count") + len(created_ids)
-        )
+    if created_ids:
+        sync_usage(vendor)
 
     result = {
         "mode": "sync",

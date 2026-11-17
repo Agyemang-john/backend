@@ -134,6 +134,7 @@ class VendorSubscriptionAdmin(admin.ModelAdmin):
     readonly_fields = [
         "created_at", "updated_at",
         "cancelled_at", "days_remaining_display",
+        "renewal_attempts", "next_renewal_attempt_at", "last_renewal_error", "last_reminder_key",
     ]
     date_hierarchy = "start_date"
 
@@ -145,7 +146,13 @@ class VendorSubscriptionAdmin(admin.ModelAdmin):
             "fields": ("start_date", "end_date", "trial_end_date"),
         }),
         ("Renewal & cancellation", {
-            "fields": ("auto_renew", "cancelled_at", "cancellation_reason"),
+            "fields": ("auto_renew", "scheduled_plan", "cancelled_at", "cancellation_reason"),
+        }),
+        ("Failed renewals (dunning)", {
+            "description": "Set by payments/subscription_lifecycle.py. Past due = paid features stay on "
+                           "until 'grace until' while renewal is retried.",
+            "fields": ("grace_until", "renewal_attempts", "next_renewal_attempt_at",
+                       "last_renewal_error", "last_reminder_key"),
         }),
         ("Payment", {
             "fields": ("payment_reference",),
@@ -308,6 +315,7 @@ class PaymentTransactionAdmin(admin.ModelAdmin):
             "pending":  "#d97706",
             "success":  "#16a34a",
             "failed":   "#dc2626",
+            "review":   "#7c3aed",   # money received, not applied: refund or apply by hand
             "refunded": "#6b7280",
         }
         colour = colours.get(obj.status, "#6b7280")

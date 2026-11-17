@@ -154,145 +154,32 @@ def _get_most_recent_pending_momo(vendor):
 # Does NOT call Paystack again — we already know it succeeded.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _activate_momo_subscription(reference, intent):
+def _activate_momo_subscription(reference, intent=None, paid_pesewas=None, currency='GHS', gateway_id=''):
     """
-    Activate a subscription after MoMo payment confirmation.
-
-    IDEMPOTENT: If this reference has already been processed (e.g. poll called
-    twice before cache clears), returns the existing subscription immediately.
-
-    RACE-SAFE: Uses select_for_update on the vendor row to ensure only one
-    concurrent activation can proceed at a time.
+    Apply a MoMo payment that Paystack reports as successful. Everything is
+    read from our PaymentTransaction row; the cache intent is only a fallback
+    for charges started before plans were recorded on the transaction.
+    Idempotent: a reference is applied once.
     """
-    from vendor.models import Vendor
-    from django.db import IntegrityError
-
-    vendor_id = intent['vendor_id']
-    plan_id   = intent['plan_id']
-    billing   = intent.get('billing', 'monthly')
-
-    from .services import period_end_from
-
-    vendor = Vendor.objects.select_related('user').get(pk=vendor_id)
-    plan   = SubscriptionPlan.objects.get(pk=plan_id)
-
-    if intent.get('type') == 'renewal' and intent.get('sub_id'):
-        return _apply_momo_renewal(reference, intent)
-
-    with db_transaction.atomic():
-        # ── Idempotency: if this reference is already activated, return early ──
-        existing_txn = PaymentTransaction.objects.filter(
-            paystack_reference=reference, status='success'
-        ).select_related('subscription').first()
-        if existing_txn and existing_txn.subscription and existing_txn.subscription.status == 'active':
-            logger.info(f'MoMo ref={reference} already activated — returning existing sub')
-            return existing_txn.subscription
-
-        # ── Row-level lock on vendor to prevent concurrent activations ─────────
-        # select_for_update blocks until any other transaction holding this lock
-        # completes, so two simultaneous poll hits queue up rather than racing.
-        Vendor.objects.select_for_update().get(pk=vendor_id)
-
-        # ── Cancel all existing active/trial subscriptions ────────────────────
-        cancelled = VendorSubscription.objects.filter(
-            vendor=vendor, status__in=['active', 'trial']
-        ).update(status='cancelled')
-        if cancelled:
-            logger.info(f'Cancelled {cancelled} existing subscription(s) for vendor {vendor_id}')
-
-        # ── Create the new active subscription ────────────────────────────────
-        try:
-            sub = VendorSubscription.objects.create(
-                vendor=vendor,
-                plan=plan,
-                status='active',
-                start_date=timezone.now(),
-                end_date=period_end_from(intent, billing),
-                auto_renew=True,
-                payment_reference=reference,
-            )
-        except IntegrityError:
-            # Partial unique index fired — another concurrent activation won the race.
-            # Find the subscription it created and return it.
-            logger.warning(f'IntegrityError creating sub for vendor {vendor_id} ref={reference} — returning concurrent sub')
-            sub = VendorSubscription.objects.filter(
-                vendor=vendor, status='active'
-            ).select_related('plan').first()
-            if not sub:
-                raise  # Unexpected — re-raise so the error surfaces
-            return sub
-
-        # ── Update/create usage tracker ───────────────────────────────────────
-        usage, created = SubscriptionUsage.objects.get_or_create(
-            vendor=vendor,
-            defaults={
-                'subscription':        sub,
-                'active_products_count': 0,
-                'period_start':        timezone.now(),
-            },
-        )
-        if not created:
-            usage.subscription = sub
-            usage.reset_for_new_cycle()
-
-        # ── Mark transaction as success ───────────────────────────────────────
-        PaymentTransaction.objects.filter(
-            paystack_reference=reference
-        ).update(
-            subscription=sub,
-            status='success',
-            paid_at=timezone.now(),
-        )
-
-        # ── Sync denormalised vendor flags ────────────────────────────────────
-        vendor.is_subscribed            = True
-        vendor.subscription_start_date  = sub.start_date.date()
-        vendor.subscription_end_date    = sub.end_date.date()
-        vendor.save(update_fields=[
-            'is_subscribed', 'subscription_start_date', 'subscription_end_date'
-        ])
-
-    # Fire email outside the transaction — worker reads committed data
-    try:
-        from .tasks import send_subscription_confirmation_email
-        send_subscription_confirmation_email.delay(vendor.id, sub.id)
-    except Exception as exc:
-        logger.warning(f'Failed to queue confirmation email for MoMo sub: {exc}')
-
-    logger.info(
-        f'MoMo subscription activated: vendor={vendor.id} plan={plan.name} '
-        f'billing={billing} ref={reference}'
+    from . import subscription_lifecycle as lifecycle
+    intent = intent or {}
+    txn = PaymentTransaction.objects.filter(paystack_reference=reference).first()
+    if txn is None:
+        raise ValueError(f'Unknown MoMo reference {reference}')
+    if paid_pesewas is None:
+        paid_pesewas = lifecycle.pesewas(txn.amount)
+    if txn.transaction_type == 'renewal':
+        return lifecycle.apply_renewal_payment(txn.pk, paid_pesewas=paid_pesewas, currency=currency,
+                                               gateway_id=gateway_id)
+    return lifecycle.activate_paid_transaction(
+        txn.pk, paid_pesewas=paid_pesewas, currency=currency, gateway_id=gateway_id,
+        legacy_plan_id=intent.get('plan_id'), legacy_billing=intent.get('billing'),
     )
-    return sub
 
 
-def _apply_momo_renewal(reference, intent):
-    """
-    A MoMo renewal was approved: extend the existing subscription (switching
-    to its scheduled plan, if any) rather than starting a fresh one, so the
-    days left before end_date aren't lost. Idempotent on the reference.
-    """
-    with db_transaction.atomic():
-        txn = (PaymentTransaction.objects.select_for_update()
-               .filter(paystack_reference=reference).first())
-        sub = VendorSubscription.objects.select_for_update().get(pk=intent['sub_id'])
-        if txn and txn.status == 'success':
-            return sub
-        sub.renew()
-        if txn:
-            txn.status = 'success'
-            txn.paid_at = timezone.now()
-            txn.save(update_fields=['status', 'paid_at'])
-        from .services import _sync_vendor_flags
-        _sync_vendor_flags(sub.vendor)
-
-    try:
-        from .email_tasks import send_renewal_success_email
-        send_renewal_success_email.delay(sub.vendor_id)
-    except Exception as exc:
-        logger.warning(f'Failed to queue renewal email for MoMo ref={reference}: {exc}')
-    logger.info(f'MoMo renewal applied: sub={sub.id} ref={reference} end={sub.end_date}')
-    return sub
+def _apply_momo_renewal(reference, intent=None, paid_pesewas=None, currency='GHS', gateway_id=''):
+    """Kept for callers of the old name; see _activate_momo_subscription."""
+    return _activate_momo_subscription(reference, intent, paid_pesewas, currency, gateway_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -309,7 +196,8 @@ def initiate_momo_charge(vendor, plan_id, billing, phone, provider, save=False):
         return {**early, 'status': 'scheduled' if early.get('scheduled') else 'activated'}
     plan_id        = plan.id
     ps_provider    = PROVIDER_PAYSTACK_MAP.get(provider, provider)
-    amount_pesewas = int(quote['amount_due'] * 100)
+    from .subscription_lifecycle import pesewas
+    amount_pesewas = pesewas(quote['amount_due'])
 
     # Step 1: idempotency
     existing_ref = _get_inflight(vendor.id, plan_id)
@@ -407,13 +295,14 @@ def initiate_momo_charge(vendor, plan_id, billing, phone, provider, save=False):
     }, timeout=CHARGE_CACHE_TTL)
 
     active_sub = VendorSubscription.objects.filter(
-        vendor=vendor, status__in=['active', 'trial']
+        vendor=vendor, status__in=VendorSubscription.LIVE_STATUSES
     ).first()
     PaymentTransaction.objects.create(
         vendor=vendor, subscription=active_sub,
         transaction_type=quote['change_type'],
         amount=quote['amount_due'], currency='GHS',
         status='pending', paystack_reference=reference,
+        plan=plan, billing=plan.billing_cycle,
     )
 
     if save:
@@ -491,12 +380,16 @@ def submit_momo_otp(reference, otp):
 # Poll MoMo charge status
 # ─────────────────────────────────────────────────────────────────────────────
 
-def poll_momo_status(reference):
+def poll_momo_status(reference, vendor=None):
     """
-    Poll Paystack for the status of a MoMo charge.
-    On success, activates the subscription using MoMo-specific logic
-    (reads vendor/plan from our cache, NOT from Paystack metadata).
+    Poll Paystack for the status of a MoMo charge and apply it on success.
+    `vendor` (the caller's store) must own the reference. What the payment
+    buys comes from our PaymentTransaction, not from the cache.
     """
+    txn = PaymentTransaction.objects.filter(paystack_reference=reference).first()
+    if txn is None or (vendor is not None and txn.vendor_id != vendor.id):
+        raise PermissionError('Unknown payment reference.')
+
     resp = requests.get(
         f'{PAYSTACK_BASE}/charge/{reference}', headers=_headers(), timeout=15
     )
@@ -519,31 +412,26 @@ def poll_momo_status(reference):
     }
     our_status = STATUS_MAP.get(ps_status, 'pending')
     activated  = False
+    intent     = cache.get(f'momo_charge:{reference}') or {}
 
     if our_status == 'success':
-        intent = cache.get(f'momo_charge:{reference}')
-        if not intent:
-            logger.error(
-                f'poll_momo_status: no cache intent found for ref={reference}. '
-                f'Cannot activate subscription — cache may have expired.'
+        try:
+            applied = _activate_momo_subscription(
+                reference, intent,
+                paid_pesewas=int(charge.get('amount') or 0),
+                currency=charge.get('currency') or 'GHS',
+                gateway_id=charge.get('id', ''),
             )
-        else:
-            try:
-                _activate_momo_subscription(reference, intent)
-                activated = True
-                _clear_inflight(intent.get('vendor_id'), intent.get('plan_id'))
-            except Exception as exc:
-                logger.error(
-                    f'MoMo activation error ref={reference}: {exc}', exc_info=True
-                )
+            activated = applied is not None
+            _clear_inflight(txn.vendor_id, txn.plan_id or intent.get('plan_id'))
+        except Exception as exc:
+            logger.error(f'MoMo activation error ref={reference}: {exc}', exc_info=True)
 
     elif our_status == 'failed':
         PaymentTransaction.objects.filter(
-            paystack_reference=reference
+            paystack_reference=reference, status='pending'
         ).update(status='failed', failure_reason=charge.get('message', ''))
-        intent = cache.get(f'momo_charge:{reference}')
-        if intent:
-            _clear_inflight(intent.get('vendor_id'), intent.get('plan_id'))
+        _clear_inflight(txn.vendor_id, txn.plan_id or intent.get('plan_id'))
 
     return {
         'reference': reference,
@@ -563,17 +451,26 @@ def initiate_momo_manual_payment(vendor, momo_id=None, phone=None, provider=None
         phone    = account.phone
         provider = account.provider
 
+    from .subscription_lifecycle import MANUAL_INFLIGHT_WINDOW, pesewas
     sub = VendorSubscription.objects.filter(
         vendor=vendor, status__in=['active', 'past_due']
-    ).select_related('plan').first()
-    if not sub:
-        raise ValueError('No active subscription to renew.')
+    ).select_related('plan', 'scheduled_plan').first()
+    if not sub or not sub.in_force():
+        raise ValueError('Your plan has already ended. Choose a plan to subscribe again.')
+    plan = sub.scheduled_plan or sub.plan
+    if plan.price <= 0:
+        raise ValueError('There is nothing to pay on this plan.')
+    if PaymentTransaction.objects.filter(
+            subscription=sub, transaction_type='renewal', status='pending',
+            created_at__gte=timezone.now() - MANUAL_INFLIGHT_WINDOW).exists():
+        raise ValueError('pending_ussd_session:A payment for this renewal is already in progress. '
+                         'Approve it on your phone, or wait a few minutes and try again.')
 
     profile     = require_billing_profile(vendor)
     reference   = f'MOMO-RNW-{vendor.id}-{uuid.uuid4().hex[:8].upper()}'
     ps_provider = PROVIDER_PAYSTACK_MAP.get(provider, provider)
     resp, data  = _post_charge(
-        reference, int(float(sub.plan.price) * 100),
+        reference, pesewas(plan.price),
         profile.email, phone, ps_provider,
     )
 
@@ -605,14 +502,13 @@ def initiate_momo_manual_payment(vendor, momo_id=None, phone=None, provider=None
     charge       = data.get('data') or {}
     display_text = charge.get('display_text') or 'Please approve the payment on your phone.'
 
-    # For renewals, store intent differently — no plan_id change
-    cache.set(f'momo_charge:{reference}', {
-        'vendor_id':    vendor.id,
-        'plan_id':      sub.plan.id,
-        'billing':      sub.billing_cycle if hasattr(sub, 'billing_cycle') else 'monthly',
-        'sub_id':       sub.id,
-        'type':         'renewal',
-    }, timeout=CHARGE_CACHE_TTL)
+    # The renewal is recorded in the database, tied to the period it pays for,
+    # so it is applied exactly once whether the poll or the webhook sees it first.
+    PaymentTransaction.objects.create(
+        vendor=vendor, subscription=sub, transaction_type='renewal',
+        amount=plan.price, currency='GHS', status='pending', paystack_reference=reference,
+        plan=plan, billing=plan.billing_cycle, period_end=sub.end_date,
+    )
 
     if momo_id:
         MomoAccount.objects.filter(pk=momo_id).update(last_reference=reference)

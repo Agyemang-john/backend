@@ -11,6 +11,7 @@ from userauths.models import *
 from order.models import *
 from product.models import Product, Variants
 from product.listing import listing_page_size
+from .product_filters import apply_filters as apply_product_filters, facets as product_facets
 
 from rest_framework import status, generics, permissions
 from rest_framework.response import Response
@@ -496,7 +497,7 @@ class VendorProductPagination(PageNumberPagination):
     `?page=` is the persisted page (the frontend keeps it in the URL so a refresh
     lands on the same page). `?page_size=` is overridable up to 100.
     """
-    page_size             = 20
+    page_size             = 50
     page_size_query_param = 'page_size'
     max_page_size         = 100
 
@@ -548,21 +549,12 @@ class ProductListCreateView(SubscriptionGateMixin, generics.ListCreateAPIView):
         # columns the card renders — avoids hauling the rich-text/spec fields
         # and the N+1 nested relations.
         if self.request.method == 'GET':
-            search   = self.request.query_params.get('search', '').strip()
-            status_f = self.request.query_params.get('status', '').strip()
-            if search:
-                # Title or either SKU (sellers look products up by their own codes).
-                qs = qs.filter(Q(title__icontains=search) | Q(seller_sku__iexact=search) | Q(sku__iexact=search))
-            if status_f and status_f != 'all':
-                qs = qs.filter(status=status_f)
-            stock_f = self.request.query_params.get('stock', '').strip()
-            if stock_f == 'out':
-                qs = qs.filter(total_quantity=0)
-            elif stock_f == 'low':
-                qs = qs.filter(total_quantity__gt=0, total_quantity__lte=vendor.low_stock_threshold)
-            qs = qs.only(
+            # Search / status / stock / category / fulfilment / price / sort:
+            # see vendor/product_filters.py.
+            qs = apply_product_filters(qs, self.request.query_params, vendor)
+            return qs.only(
                 'id', 'title', 'slug', 'sku', 'seller_sku', 'image', 'status', 'review_note',
-                'total_quantity', 'price', 'old_price', 'views', 'date',
+                'total_quantity', 'price', 'old_price', 'views', 'date', 'updated',
             )
         return qs.order_by('-date')
 
@@ -578,6 +570,8 @@ class ProductListCreateView(SubscriptionGateMixin, generics.ListCreateAPIView):
         status_counts = {row['status']: row['c'] for row in counts}
         response.data['status_counts'] = status_counts
         response.data['catalog_total'] = sum(status_counts.values())
+        # Category list + stock counts for the filter menus.
+        response.data.update(product_facets(Product.objects.filter(vendor=vendor), vendor))
         return response
 
     # ✅ No perform_create — mixin handles everything
@@ -1614,8 +1608,10 @@ class ShipmentAPIView(APIView):
                                       "we'll notify you when it's cleared."}, status=status.HTTP_409_CONFLICT)
 
         # Prevent duplicate — each vendor can only have one shipment per order
+        # A cancelled one (e.g. the courier called it off) can be booked again;
+        # book_shipment clears it out.
         existing = Shipment.objects.filter(order=order, vendor=vendor).first()
-        if existing:
+        if existing and (existing.status != 'canceled' or order.status == 'canceled'):
             return Response(
                 {"error": "Shipment already exists for your store in this order.", "shipment_id": existing.shipment_id},
                 status=status.HTTP_409_CONFLICT,

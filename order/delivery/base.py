@@ -36,6 +36,13 @@ class TrackingUpdate:
     #: The provider's id for this notification. Couriers retry webhooks, so
     #: an update whose event_id was already applied is skipped.
     event_id: str = ''
+    #: Set when the courier has ended the shipment (cancelled, lost, ...):
+    #: the Shipment.status to move to. Blank means "derive it from `status`".
+    shipment_status: str = ''
+    #: Identifies the courier-side state this update reports, shared by the
+    #: webhook and polling paths so the same milestone is applied only once
+    #: whichever of them reports it first. Blank: no such de-duplication.
+    state_key: str = ''
 
 
 class DeliveryProviderError(Exception):
@@ -68,3 +75,11 @@ class DeliveryProvider:
     def parse_webhook(self, request) -> list[TrackingUpdate]:
         """Verify and translate a webhook call into tracking updates."""
         raise DeliveryProviderError(f"{self.name} does not send webhooks.")
+
+    def sync(self, shipment) -> list[TrackingUpdate]:
+        """
+        Ask the provider where a shipment is now, for webhooks that never
+        arrived. Returns updates only when that differs from what we hold.
+        Called by order.tasks.sync_courier_tracking when supports_tracking_sync.
+        """
+        return []

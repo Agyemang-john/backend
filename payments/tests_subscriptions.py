@@ -207,9 +207,11 @@ class PlanChangeTests(SubscriptionTestCase):
 
     @mock.patch('payments.services.requests.post')
     def test_renewal_charges_and_switches_to_scheduled_plan(self, post):
-        sub = self.subscribe(self.pro, days_left=3, scheduled_plan=self.basic)
+        # Inside the renewal window (renewal_advance_days = 1).
+        sub = self.subscribe(self.pro, days_left=1, scheduled_plan=self.basic)
         self.saved_card()
-        post.return_value = fake_response({'data': {'status': 'success', 'id': 7}})
+        post.return_value = fake_response({'status': True, 'data': {
+            'status': 'success', 'id': 7, 'amount': 10000, 'currency': 'GHS'}})
         old_end = sub.end_date
 
         services.charge_for_renewal(sub.id)
@@ -254,7 +256,8 @@ class PlanChangeTests(SubscriptionTestCase):
     @mock.patch('payments.services.requests.post')
     def test_saved_card_checkout_charges_card_directly(self, post, get):
         card = self.saved_card()
-        post.return_value = fake_response({'data': {'status': 'success', 'id': 9}})
+        post.return_value = fake_response({'status': True, 'data': {
+            'status': 'success', 'id': 9, 'amount': 30000, 'currency': 'GHS'}})
 
         def verify(url, **kw):
             ref = url.rsplit('/', 1)[-1]
@@ -289,8 +292,9 @@ class PlanChangeTests(SubscriptionTestCase):
         PaymentTransaction.objects.create(vendor=self.vendor, subscription=sub, transaction_type='renewal',
                                           amount=Decimal('300.00'), paystack_reference='RNW-MM-1')
 
-        services._webhook_charge_success({'reference': 'RNW-MM-1', 'id': 5})
-        services._webhook_charge_success({'reference': 'RNW-MM-1', 'id': 5})  # retried webhook
+        event = {'reference': 'RNW-MM-1', 'id': 5, 'amount': 30000, 'currency': 'GHS'}
+        services._webhook_charge_success(event)
+        services._webhook_charge_success(event)  # retried webhook
 
         sub.refresh_from_db()
         self.assertAlmostEqual(sub.end_date, old_end + timedelta(days=30), delta=timedelta(seconds=5))

@@ -56,7 +56,15 @@ class BillingSubscriptionSerializer(serializers.ModelSerializer):
             'payment_reference', 'days_remaining', 'is_active',
             'next_billing_date', 'cancel_at_period_end',
             'scheduled_plan', 'renewal_amount',
+            # past_due: paid features stay on until grace_until; the seller
+            # sees why the last renewal failed and can "Pay now".
+            'grace_until', 'access_until', 'last_renewal_error',
         ]
+
+    access_until = serializers.SerializerMethodField()
+
+    def get_access_until(self, obj):
+        return obj.access_until()
 
     def get_renewal_amount(self, obj):
         return str((obj.scheduled_plan or obj.plan).price)
@@ -69,7 +77,7 @@ class BillingSubscriptionSerializer(serializers.ModelSerializer):
 
     def get_next_billing_date(self, obj):
         """Next billing date = end_date when auto_renew is on."""
-        if obj.auto_renew and obj.status == 'active':
+        if obj.auto_renew and obj.status in ('active', 'past_due'):
             return obj.end_date
         return None
 
@@ -87,11 +95,14 @@ class BillingUsageSerializer(serializers.ModelSerializer):
         ]
 
     def get_max_products(self, obj):
-        return obj.subscription.plan.max_products if obj.subscription else 0
+        from .entitlements import product_limit
+        return product_limit(obj.vendor) or 0
 
     def get_usage_pct(self, obj):
-        if obj.subscription and obj.subscription.plan.max_products:
-            return round(obj.active_products_count / obj.subscription.plan.max_products * 100, 1)
+        from .entitlements import product_limit
+        limit = product_limit(obj.vendor)
+        if limit:
+            return round(obj.active_products_count / limit * 100, 1)
         return 0
 
     def get_can_add_product(self, obj):

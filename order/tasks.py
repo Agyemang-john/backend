@@ -108,3 +108,49 @@ def check_sourced_orders():
     stores = remind_sellers()
     buyers = notify_overdue()
     logger.info("check_sourced_orders: reminded %s store(s), %s late line(s) now cancellable", stores, buyers)
+
+
+@shared_task(ignore_result=True)
+def sync_courier_tracking(batch=200):
+    """
+    Every 30 minutes: ask each courier that can be polled (Raven) where its
+    open shipments are, and apply anything its webhooks never delivered. A
+    courier gives up on a webhook after a few hours of retries, so without
+    this a short outage here leaves a parcel stuck at its last status.
+    Oldest-checked first; updated_at is touched so the next run moves on.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from .delivery import DeliveryProviderError, available_providers
+    from .fulfilment import TERMINAL_SHIPMENT_STATUSES, apply_courier_updates
+    from .models import Shipment
+
+    now = timezone.now()
+    for provider in available_providers():
+        if not provider.supports_tracking_sync:
+            continue
+        shipments = list(
+            Shipment.objects.filter(provider=provider.code, created_at__lte=now - timedelta(minutes=10))
+            .exclude(status__in=TERMINAL_SHIPMENT_STATUSES).exclude(external_reference='')
+            .order_by('updated_at')[:batch]
+        )
+        checked = applied = failed = 0
+        for shipment in shipments:
+            try:
+                updates = provider.sync(shipment)
+            except DeliveryProviderError as exc:
+                failed += 1
+                logger.warning("sync_courier_tracking: %s %s: %s", provider.code, shipment.shipment_id, exc)
+                continue
+            except Exception:
+                failed += 1
+                logger.exception("sync_courier_tracking: %s %s failed", provider.code, shipment.shipment_id)
+                continue
+            checked += 1
+            applied += apply_courier_updates(provider.code, updates)
+            Shipment.objects.filter(pk=shipment.pk).update(updated_at=timezone.now())
+        if shipments:
+            logger.info("sync_courier_tracking: %s checked=%s applied=%s failed=%s",
+                        provider.code, checked, applied, failed)

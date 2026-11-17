@@ -206,7 +206,7 @@ class ManualPaymentView(APIView):
             return Response({"error": "No vendor account."}, status=status.HTTP_403_FORBIDDEN)
 
         sub = VendorSubscription.objects.filter(
-            vendor=vendor, status__in=['past_due', 'active']
+            vendor=vendor, status__in=['past_due', 'active'], plan__price__gt=0,
         ).select_related('plan').first()
 
         if not sub:
@@ -222,13 +222,35 @@ class ManualPaymentView(APIView):
                 "detail": "No default payment card on file. Please add a card first.",
             }, status=status.HTTP_400_BAD_REQUEST)
 
+        from .subscription_lifecycle import RenewalError
         try:
-            result = services.charge_for_renewal(sub, default_card)
+            result = services.charge_for_renewal(sub.pk, manual=True, card=default_card)
+        except RenewalError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"ManualPayment error vendor={vendor.id}: {e}")
+            return Response({"error": "The payment didn't go through. Try again or use another card."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        outcome = result.get("status")
+        if outcome == "success":
+            sub.refresh_from_db()
             return Response({
                 "message": "Payment successful.",
                 "reference": result.get("reference"),
                 "amount": str(sub.plan.price),
+                "end_date": sub.end_date,
             })
+        if outcome in ("pending", "unknown"):
+            return Response({
+                "message": "Your bank is still confirming this payment. Your plan updates as soon as it does.",
+                "reference": result.get("reference"),
+                "pending": True,
+            }, status=status.HTTP_202_ACCEPTED)
+        if outcome == "review":
+            return Response({"error": "We received your payment and our team will apply it shortly."},
+                            status=status.HTTP_202_ACCEPTED)
+        try:
+            raise RuntimeError(result.get("reason") or outcome)
         except Exception as e:
             logger.error(f"ManualPayment error vendor={vendor.id}: {e}")
             return Response({"error": "The payment didn't go through. Try again or use another card."},

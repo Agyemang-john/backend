@@ -186,21 +186,21 @@ class SubscriptionGateMixin:
             label = self.subscription_feature.replace("_", " ").replace("can ", "").title()
             raise PermissionDenied(_upgrade_error(label, plan.tier if plan else "free"))
 
-    def _gate_product_limit(self) -> None:
-        usage = _usage(self.request.user)
-        plan  = _plan(self.request.user)
-        if usage and not usage.can_add_product():
-            raise PermissionDenied({
-                "error":        "product_limit_reached",
-                "detail":       (
-                    f"You've reached your plan limit of {plan.max_products} products. "
-                    f"Upgrade your plan to add more."
-                ),
-                "limit":        plan.max_products if plan else 0,
-                "current_tier": plan.tier if plan else "free",
-                "action":       "upgrade",
-                "upgrade_url":  "/subscribe",
-            })
+    def _gate_product_limit(self, requested: int = 1) -> None:
+        """
+        Refuse when the store already has as many products as its plan
+        allows. Counts the real products (a counter drifts). Call inside
+        transaction.atomic() together with the create, so the store row lock
+        stops two requests taking the last slot.
+        """
+        from payments.entitlements import ProductLimitReached, reserve_product_slots
+        vendor = _vendor_of(self.request.user)
+        if vendor is None:
+            return
+        try:
+            reserve_product_slots(vendor, requested)
+        except ProductLimitReached as exc:
+            raise PermissionDenied(exc.payload(_plan(self.request.user)))
 
     def _gate_image_limit(self, image_count: int) -> None:
         plan = _plan(self.request.user)
@@ -224,27 +224,28 @@ class SubscriptionGateMixin:
         return {}
 
     def perform_create(self, serializer):
+        from django.db import transaction
+        from payments.entitlements import sync_usage
         self._gate_feature()
-        if self.check_product_limit:
-            self._gate_product_limit()
         if self.check_image_limit:
             images = self.request.FILES.getlist("images[]", [])
             self._gate_image_limit(len(images))
 
-        serializer.save(**self.get_perform_create_kwargs())
+        # Limit check and create in one transaction (store row locked).
+        with transaction.atomic():
+            if self.check_product_limit:
+                self._gate_product_limit()
+            serializer.save(**self.get_perform_create_kwargs())
 
         if self.check_product_limit:
-            usage = _usage(self.request.user)
-            if usage:
-                SubscriptionUsage.objects.filter(pk=usage.pk).update(
-                    active_products_count=F("active_products_count") + 1
-                )
-    
+            vendor = _vendor_of(self.request.user)
+            if vendor is not None:
+                sync_usage(vendor)
+
     def perform_destroy(self, instance):
         super().perform_destroy(instance)
         if getattr(self, 'check_product_limit', False):
-            usage = _usage(self.request.user)
-            if usage and usage.active_products_count > 0:
-                SubscriptionUsage.objects.filter(pk=usage.pk).update(
-                    active_products_count=F("active_products_count") - 1
-                )
+            from payments.entitlements import sync_usage
+            vendor = _vendor_of(self.request.user)
+            if vendor is not None:
+                sync_usage(vendor)

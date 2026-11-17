@@ -169,6 +169,7 @@ class VendorSubscriptionSerializer(serializers.ModelSerializer):
     renewal_amount = serializers.SerializerMethodField()
     cancel_at_period_end = serializers.BooleanField(read_only=True)
     scheduled_plan = serializers.SerializerMethodField()
+    access_until = serializers.SerializerMethodField()
 
     class Meta:
         model = VendorSubscription
@@ -191,6 +192,9 @@ class VendorSubscriptionSerializer(serializers.ModelSerializer):
             'renewal_amount',
             'cancel_at_period_end',
             'scheduled_plan',
+            'grace_until',
+            'access_until',
+            'last_renewal_error',
             'created_at',
             'updated_at',
         ]
@@ -210,6 +214,9 @@ class VendorSubscriptionSerializer(serializers.ModelSerializer):
 
     def get_renewal_amount(self, obj):
         return float((obj.scheduled_plan or obj.plan).price)
+
+    def get_access_until(self, obj):
+        return obj.access_until()
 
     def get_scheduled_plan(self, obj):
         return _scheduled_plan_data(obj)
@@ -233,7 +240,7 @@ class ActiveSubscriptionSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'plan_name', 'plan_tier', 'plan_billing_cycle',
             'status', 'end_date', 'auto_renew', 'days_remaining',
-            'cancel_at_period_end', 'scheduled_plan',
+            'cancel_at_period_end', 'scheduled_plan', 'grace_until',
         ]
 
     def get_days_remaining(self, obj):
@@ -268,9 +275,8 @@ class SubscriptionUsageSerializer(serializers.ModelSerializer):
         return obj.can_add_product()
 
     def get_max_products(self, obj):
-        if obj.subscription and obj.subscription.plan:
-            return obj.subscription.plan.max_products
-        return 0
+        from .entitlements import product_limit
+        return product_limit(obj.vendor) or 0
 
     def get_usage_percentage(self, obj):
         max_p = self.get_max_products(obj)

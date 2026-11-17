@@ -27,9 +27,8 @@ def process_bulk_upload(self, job_id, rows, vendor_id):
     """
     from .models import BulkUploadJob, Vendor
     from vendor.bulk_upload_serializer import BulkProductRowSerializer
-    from payments.models import SubscriptionUsage
+    from payments.entitlements import ProductLimitReached, reserve_product_slots, sync_usage
     from django.db import transaction
-    from django.db.models import F
 
     try:
         job = BulkUploadJob.objects.get(id=job_id)
@@ -52,8 +51,12 @@ def process_bulk_upload(self, job_id, rows, vendor_id):
                 continue
             try:
                 with transaction.atomic():
+                    reserve_product_slots(vendor)   # plan limit, store row locked
                     product = serializer.save(vendor=vendor)
                     created_ids.append(product.id)
+            except ProductLimitReached as exc:
+                errors.append({"row": i, "title": row.get("title", "—"),
+                               "errors": {"non_field_errors": [str(exc)]}})
             except Exception as exc:
                 logger.error(
                     "BulkUpload job %s: row %d failed for vendor %d: %s",
@@ -66,9 +69,7 @@ def process_bulk_upload(self, job_id, rows, vendor_id):
                 })
 
         if created_ids:
-            SubscriptionUsage.objects.filter(vendor=vendor).update(
-                active_products_count=F("active_products_count") + len(created_ids)
-            )
+            sync_usage(vendor)
 
         job.status = BulkUploadJob.STATUS_DONE
         job.success_count = len(created_ids)

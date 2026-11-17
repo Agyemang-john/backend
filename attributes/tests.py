@@ -33,8 +33,8 @@ def make_user(n):
     return User.objects.get(pk=user.pk)
 
 
-@override_settings(**TEST_SETTINGS)
-class AttributeTests(TestCase):
+class AttributeTestCase(TestCase):
+    """Shared fixtures: a store, phone categories, four attributes and three phones."""
 
     def setUp(self):
         from django.core.cache import cache
@@ -75,6 +75,10 @@ class AttributeTests(TestCase):
 
     def listing(self, **params):
         return APIClient().get(f'/api/v1/product/category/{self.sub.slug}/', params)
+
+
+@override_settings(**TEST_SETTINGS)
+class AttributeTests(AttributeTestCase):
 
     def test_filters_and_counts(self):
         res = self.listing(a_ram='8-gb')
@@ -157,3 +161,54 @@ class AttributeTests(TestCase):
                                        status='published', price=Decimal('5'), brand=self.brand)
             ProductAttributeValue.objects.create(product=p, definition=self.ram, option=self.r8)
         self.assertEqual(count(), before)
+
+
+@override_settings(**TEST_SETTINGS)
+class SpecsWithProductFormTests(AttributeTestCase):
+    """Specs sent with the product form itself (seller create/edit page), not a later PUT."""
+
+    def seller(self):
+        client = APIClient()
+        client.cookies['vendor_access'] = str(CustomVendorRefreshToken.for_user(self.owner).access_token)
+        client.credentials(HTTP_X_USER_TYPE='vendor')
+        return client
+
+    def form(self, **extra):
+        import json
+        from address.models import Country
+        ghana, _ = Country.objects.get_or_create(name='Ghana', defaults={'code': 'GH'})
+        data = {'title': 'Attr Phone New', 'slug': 'attr-phone-new', 'available_in_regions': [ghana.pk],
+                'price': '250.00', 'total_quantity': '4',
+                'sub_category': self.sub.pk, 'brand': self.brand.pk, 'variant': 'None', 'product_type': 'new'}
+        data.update({k: json.dumps(v) if isinstance(v, dict) or k == 'attributes' else v for k, v in extra.items()})
+        return data
+
+    def test_specs_are_saved_with_a_new_product(self):
+        res = self.seller().post('/api/v1/vendor/products/', self.form(
+            attributes={'ram': self.r16.pk, 'nfc': True, 'finish': [self.matte.pk, self.gloss.pk]}), format='multipart')
+        self.assertEqual(res.status_code, 201, res.content)
+        product = Product.objects.get(pk=res.data['id'])
+        self.assertEqual(ProductAttributeValue.objects.filter(product=product).count(), 4)  # ram, nfc, 2 finishes
+
+    def test_a_bad_spec_saves_nothing(self):
+        before = Product.objects.count()
+        res = self.seller().post('/api/v1/vendor/products/', self.form(attributes={'ram': self.matte.pk}),
+                                 format='multipart')
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('attributes', res.data)
+        self.assertEqual(Product.objects.count(), before, "no half-created product")
+
+    def test_moving_category_drops_specs_that_no_longer_apply(self):
+        other = Sub_Category.objects.create(title='Attr Cables', category=Category.objects.create(
+            title='Attr Accessories', main_category=self.cat.main_category))
+        phone = self.phones[0]
+        res = self.seller().put(f'/api/v1/vendor/products/{phone.pk}/', self.form(sub_category=other.pk),
+                                format='multipart')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertFalse(ProductAttributeValue.objects.filter(product=phone).exists())
+
+    def test_editing_without_specs_leaves_them_alone(self):
+        phone = self.phones[0]
+        res = self.seller().put(f'/api/v1/vendor/products/{phone.pk}/', self.form(), format='multipart')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(ProductAttributeValue.objects.filter(product=phone).count(), 3)

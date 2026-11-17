@@ -78,7 +78,17 @@ class SubscriptionEmailConfig(models.Model):
     # Retry settings
     renewal_max_retries = models.PositiveIntegerField(
         default=3,
-        help_text='How many times to retry a failed renewal charge (once per day each retry).',
+        help_text='How many times to retry a failed renewal charge after the first attempt.',
+    )
+    renewal_retry_hours = models.PositiveIntegerField(
+        default=24,
+        validators=[MinValueValidator(1)],
+        help_text='Hours between renewal charge attempts.',
+    )
+    grace_period_days = models.PositiveIntegerField(
+        default=3,
+        help_text='Days after the renewal date that a store with a failed payment keeps its paid '
+                  'plan (status "past due") while we retry. 0 = downgrade on the renewal date.',
     )
 
     # Email sender overrides
@@ -89,8 +99,8 @@ class SubscriptionEmailConfig(models.Model):
     frontend_url = models.URLField(default='https://seller.negromart.com', help_text='Base URL for links in emails.')
 
     # Celery Beat schedule (read by admin — the admin registers periodic tasks dynamically)
-    run_renewals_hour     = models.PositiveIntegerField(default=8,  help_text='Hour (0–23) to run the daily renewal task (UTC).')
-    run_renewals_minute   = models.PositiveIntegerField(default=0,  help_text='Minute (0–59) for the renewal task.')
+    run_renewals_hour     = models.PositiveIntegerField(default=8,  help_text='Unused: renewals and expiry now run every hour at the minutes below.')
+    run_renewals_minute   = models.PositiveIntegerField(default=0,  help_text='Minute past each hour for the renewal task.')
     run_expiry_check_hour = models.PositiveIntegerField(default=9,  help_text='Hour to run the expiry warning check (UTC).')
     run_expiry_check_minute = models.PositiveIntegerField(default=0)
     run_expire_old_hour   = models.PositiveIntegerField(default=0,  help_text='Hour to run the subscription expiration cleanup (UTC).')
@@ -124,10 +134,13 @@ class SubscriptionEmailConfig(models.Model):
             import json
 
             tasks = [
+                # Renewals and expiry run hourly: a missed run (deploy, outage)
+                # is caught up an hour later, and nobody keeps a lapsed plan
+                # for most of a day. Both only touch rows that are due.
                 {
                     'name':   'subscriptions.process_renewals',
                     'task':   'subscriptions.process_renewals',
-                    'hour':   self.run_renewals_hour,
+                    'hour':   '*',
                     'minute': self.run_renewals_minute,
                 },
                 {
@@ -139,7 +152,7 @@ class SubscriptionEmailConfig(models.Model):
                 {
                     'name':   'subscriptions.expire_old_subscriptions',
                     'task':   'subscriptions.expire_old_subscriptions',
-                    'hour':   self.run_expire_old_hour,
+                    'hour':   '*',
                     'minute': self.run_expire_old_minute,
                 },
             ]

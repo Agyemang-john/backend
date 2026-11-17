@@ -662,6 +662,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "order.tasks.check_sourced_orders",
         "schedule": crontab(hour=7, minute=15),
     },
+    # Catch up on courier (Raven) tracking whose webhooks never arrived
+    "sync-courier-tracking": {
+        "task": "order.tasks.sync_courier_tracking",
+        "schedule": 1800,  # 30 minutes
+    },
 
     # ── Vendor subscription lifecycle tasks ───────────────────────────────────
     # These three tasks run on a crontab schedule defined in the
@@ -678,9 +683,11 @@ CELERY_BEAT_SCHEDULE = {
     # Queues a charge_vendor_for_renewal task for every active auto-renewing
     # subscription whose end_date falls renewal_advance_days from now (default 1 day).
     # Runs daily at 08:00 UTC (matches SubscriptionEmailConfig.run_renewals_hour default).
+    # Hourly: picks up every auto-renewing subscription that is due (or due a
+    # retry) — window-based, so a missed run is simply caught up next hour.
     "subscriptions.process_renewals": {
         "task": "subscriptions.process_renewals",
-        "schedule": crontab(hour=8, minute=0),
+        "schedule": crontab(minute=0),
     },
 
     # Sends expiry warning emails + SMS to vendors whose subscription is
@@ -697,9 +704,10 @@ CELERY_BEAT_SCHEDULE = {
     # passed (charge failed and retries exhausted), marks it expired, downgrades
     # the vendor to Free, and fires the expired email + SMS.
     # Runs daily at 00:30 UTC (matches SubscriptionEmailConfig.run_expire_old_hour default).
+    # Hourly: moves lapsed plans to past_due (grace) or Free.
     "subscriptions.expire_old_subscriptions": {
         "task": "subscriptions.expire_old_subscriptions",
-        "schedule": crontab(hour=0, minute=30),
+        "schedule": crontab(minute=30),
     },
 
     # ── Vendor activity / inactivity tasks ───────────────────────────────────
