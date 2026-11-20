@@ -101,6 +101,7 @@ def get_guest_cart_response(request):
             "is_flash_sale": pricing['flash_sale'] is not None,
             "item_packaging_fee": float(item_packaging),
             "sourcing": sourcing_info(product, variant),
+            "available_stock": max(product.get_stock_quantity(variant), 0),
         })
 
         total_amount += subtotal

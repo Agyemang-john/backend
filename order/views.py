@@ -51,6 +51,30 @@ class AddToCartView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Never let the cart hold more than is in stock: checkout would only
+        # fail later (order/stock.py). Lowering the quantity is always allowed.
+        stock_quantity = product.get_stock_quantity(variant)
+        if quantity_change > 0:
+            if request.user.is_authenticated:
+                in_cart = CartItem.objects.filter(
+                    cart__user=request.user, product=product, variant=variant,
+                ).values_list("quantity", flat=True).first() or 0
+            else:
+                in_cart = request.session.get("guest_cart", {}).get(item_key, 0)
+            if in_cart + quantity_change > stock_quantity:
+                if stock_quantity <= 0:
+                    detail = "This item is out of stock."
+                elif in_cart >= stock_quantity:
+                    detail = f"Only {stock_quantity} in stock. You already have the maximum in your cart."
+                else:
+                    detail = f"Only {stock_quantity} in stock. You can add {stock_quantity - in_cart} more."
+                return Response({
+                    "detail": detail,
+                    "quantity": in_cart,
+                    "available_stock": max(stock_quantity, 0),
+                    "is_out_of_stock": True,
+                }, status=status.HTTP_400_BAD_REQUEST)
+
         # Handle cart
         if request.user.is_authenticated:
             result = handle_authenticated_cart(request.user, product, variant, quantity_change)
@@ -60,7 +84,6 @@ class AddToCartView(APIView):
             cart_item_id = None
 
         # Stock check
-        stock_quantity = product.get_stock_quantity(variant)
         is_out_of_stock = (result["quantity"] >= stock_quantity > 0) or (stock_quantity <= 0)
 
         # Total cart items count
@@ -76,6 +99,7 @@ class AddToCartView(APIView):
             "is_out_of_stock": is_out_of_stock,
             "cart_item_id": cart_item_id,
             "total_cart_quantity": total_cart_quantity,
+            "available_stock": max(stock_quantity, 0),
         })
 
 class RemoveFromCartView(APIView):

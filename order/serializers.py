@@ -183,9 +183,15 @@ class CartItemSerializer(serializers.ModelSerializer):
             'id', 'product', 'variant', 'quantity',
             'item_total', 'packaging_fee', 'delivery_option',
             'flash_sale_price', 'effective_unit_price', 'is_flash_sale', 'sourcing',
+            'available_stock',
         ]
 
     sourcing = serializers.SerializerMethodField()
+    available_stock = serializers.SerializerMethodField()
+
+    def get_available_stock(self, obj):
+        # The most this line may hold; the cart stepper stops here.
+        return max(obj.product.get_stock_quantity(obj.variant), 0)
 
     def get_sourcing(self, obj):
         from product.sourcing import info
