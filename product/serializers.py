@@ -379,9 +379,21 @@ class VariantSerializer(serializers.ModelSerializer):
         fields = [
             "product", "price", "title", "color", "size",
             "quantity", "image", "currency", "id", "sourcing",
+            "options", "option_label",
         ]
 
     sourcing = serializers.SerializerMethodField()
+    # {"flavor": "Vanilla", "size": "500 g"} and "Vanilla / 500 g" (product/variations.py).
+    options = serializers.SerializerMethodField()
+    option_label = serializers.SerializerMethodField()
+
+    def get_options(self, obj):
+        from product.variations import variant_options
+        return variant_options(obj)
+
+    def get_option_label(self, obj):
+        from product.variations import option_label
+        return option_label(obj)
 
     def get_sourcing(self, obj):
         return product_sourcing.info(obj.product, obj)

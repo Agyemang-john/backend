@@ -7,7 +7,6 @@ from django.core.cache import cache
 from django.db.models import Avg, Count
 
 
-
 @receiver(user_logged_in)
 def merge_carts(sender, request, user, **kwargs):
     try:
@@ -50,22 +49,6 @@ def save_carts_before_logout(sender, request, user, **kwargs):
                 cart_item.save()
             item.delete()
 
-# from product.models import Product
-# from elasticsearch8 import Elasticsearch
-
-# es = Elasticsearch(['http://elasticsearch:9200'])
-
-# @receiver(post_save, sender=Product)
-# def update_product_index(sender, instance, **kwargs):
-#     if instance.status == 'published':
-#         doc = {
-#             # Your document structure
-#         }
-#         es.index(index="products", id=instance.id, body=doc)
-
-# @receiver(post_delete, sender=Product)
-# def delete_product_index(sender, instance, **kwargs):
-#     es.delete(index="products", id=instance.id, ignore=[404])
 
 def product_detail_cache_key(product):
     # Must match product/views.get_cached_product_data.
@@ -108,7 +91,6 @@ def sync_product_rating(sender, instance, **kwargs):
         avg_rating=round(stats['avg'] or 0.0, 2),
         review_count=stats['count'] or 0,
     )
-
 
 
 # ── Review summary cache & media flag (product/review_views.py) ──────────────

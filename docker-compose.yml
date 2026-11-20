@@ -1,5 +1,14 @@
+# Container logs are capped (3 files x 10 MB per service): without this
+# Docker keeps every line forever and slowly fills the droplet's disk.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   web:
+    logging: *logging
     build:
       context: .
       dockerfile: Dockerfile
@@ -17,6 +26,7 @@ services:
     restart: always
 
   nginx:
+    logging: *logging
     image: nginx:1.25
     container_name: nginx
     ports:
@@ -32,6 +42,7 @@ services:
     restart: always
 
   certbot:
+    logging: *logging
     image: certbot/certbot:latest
     container_name: certbot
     volumes:
@@ -41,6 +52,7 @@ services:
     restart: always
 
   celery:
+    logging: *logging
     image: ecommerce_app:latest
     command: celery -A ecommerce worker --loglevel=info --concurrency=1
     env_file:
@@ -51,6 +63,7 @@ services:
     restart: always
 
   celery-beat:
+    logging: *logging
     image: ecommerce_app:latest
     command: celery -A ecommerce beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     env_file:
@@ -61,6 +74,7 @@ services:
     restart: always
 
   redis:
+    logging: *logging
     image: redis:7-alpine
     command:
       - redis-server
@@ -76,6 +90,7 @@ services:
     volumes:
       - redis_data:/data
   migrate:
+    logging: *logging
     image: ecommerce_app:latest
     command: >
       sh -c "

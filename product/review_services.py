@@ -66,8 +66,8 @@ def describe_variant(line):
     variant = line.variant if line else None
     if not variant:
         return ''
-    parts = [getattr(variant.size, 'name', None), getattr(variant.color, 'name', None)]
-    return ' · '.join(p for p in parts if p) or (variant.title or '')[:120]
+    from product.variations import variant_options
+    return ' · '.join(variant_options(variant).values()) or (variant.title or '')[:120]
 
 
 @dataclass

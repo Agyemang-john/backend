@@ -449,37 +449,6 @@ class Order(models.Model):
         vendor_delivery_fee = self.calculate_vendor_delivery_fee(vendor)
         return vendor_total + vendor_delivery_fee.total
 
-    # def get_shipments(self):
-    #     return self.shipments.all().prefetch_related('tracking_events', 'items__product')
-
-    # def get_overall_status(self):
-    #     shipments = self.shipments.all()
-    #     if not shipments:
-    #         return "Pending"
-    #     if all(s.status == 'delivered' for s in shipments):
-    #         return "Delivered"
-    #     if any(s.status == 'delivered' for s in shipments):
-    #         return "Partially Delivered"
-    #     if any(s.status in ['in_transit', 'out_for_delivery'] for s in shipments):
-    #         return "Shipped"
-    #     return "Processing"
-
-    # def get_tracking_summary(self):
-    #     return [
-    #         {
-    #             'shipment_id': s.shipment_id,
-    #             'vendor': s.vendor.name,
-    #             'carrier': s.carrier,
-    #             'tracking_number': s.tracking_number,
-    #             'tracking_url': s.tracking_url,
-    #             'status': s.get_status_display(),
-    #             'estimated_delivery': s.estimated_delivery_date,
-    #             'progress': s.progress_percentage,
-    #             'latest_event': s.latest_event.description if s.latest_event else None,
-    #             'items': [op.product.title for op in s.items.all()]
-    #         }
-    #         for s in self.shipments.all()
-    #     ]
 
 class OrderProduct(models.Model):
     order = models.ForeignKey(Order, related_name='order_products', on_delete=models.CASCADE)

@@ -27,6 +27,8 @@ from django.db import IntegrityError, transaction
 from django.db.models import Exists, OuterRef
 from django.utils import timezone
 
+from product.variations import effective_axes, option_label
+
 from .emails import absolute_media, base_context, build_email, opted_out_user_ids, send_batch, site_url
 from .models import CartReminder, EmailOptOut
 
@@ -140,8 +142,7 @@ def _line_context(line):
         image = ''
     option = ''
     if line.variant is not None:
-        option = ' / '.join(n for n in (getattr(line.variant.size, 'name', ''),
-                                        getattr(line.variant.color, 'name', '')) if n)
+        option = option_label(line.variant, effective_axes(p))
     return {
         'title': p.title, 'option': option, 'quantity': line.quantity,
         'price': pricing['unit_price'], 'amount': pricing['amount'],

@@ -34,6 +34,15 @@ BILLING_DAYS = {
 }
 
 CHARGE_CACHE_TTL = 900
+# A phone prompt lives a minute or two. Pressing Pay again after that must send a
+# new prompt, not "resume" a charge whose prompt is long gone.
+RESUME_WINDOW = timedelta(minutes=3)
+
+
+def _recent(reference):
+    return PaymentTransaction.objects.filter(
+        paystack_reference=reference, created_at__gte=timezone.now() - RESUME_WINDOW,
+    ).exists()
 
 
 def _headers():
@@ -122,22 +131,57 @@ def _mask(phone):
     return ('•' * max(len(p) - 4, 0)) + p[-4:] if len(p) >= 4 else p
 
 
+def paystack_phone(phone):
+    """
+    The number as Paystack's Ghana mobile money expects it: local form, digits
+    only ("0551234987"). We store numbers as +233…, but Paystack's charge API
+    allows only letters, digits, '-', '.' and '=' in the phone field, and its
+    Ghana examples use the local form. Sending "+233…" is why the approval
+    prompt stopped reaching phones.
+    """
+    digits = ''.join(ch for ch in str(phone or '') if ch.isdigit())
+    if digits.startswith('233') and len(digits) == 12:
+        return '0' + digits[3:]
+    if len(digits) == 9:            # typed without the leading 0
+        return '0' + digits
+    return digits
+
+
+# AirtelTigo's code: Paystack's docs say 'tgo'; newer accounts list it as 'atl'.
+PROVIDER_FALLBACK = {'tgo': 'atl'}
+
+
+def _is_provider_error(data):
+    message = (data.get('message') or '').lower()
+    return 'provider' in message and ('invalid' in message or 'not supported' in message or 'unsupported' in message)
+
+
 def _post_charge(reference, amount_pesewas, email, phone, ps_provider):
-    """POST a MoMo charge to Paystack. Uses the actual phone number passed in."""
-    payload = {
-        'amount':    amount_pesewas,
-        'email':     email,
-        'currency':  'GHS',
-        'reference': reference,
-        'mobile_money': {
-            'phone':    phone,        # ← uses the actual phone, not hardcoded
-            'provider': ps_provider,
-        },
-    }
-    resp = requests.post(
-        f'{PAYSTACK_BASE}/charge', json=payload, headers=_headers(), timeout=30
-    )
-    return resp, resp.json()
+    """POST a MoMo charge to Paystack (first payment, Pay now and auto-renewal all come here)."""
+    def send(provider):
+        payload = {
+            'amount':    amount_pesewas,
+            'email':     email,
+            'currency':  'GHS',
+            'reference': reference,
+            'mobile_money': {'phone': paystack_phone(phone), 'provider': provider},
+        }
+        resp = requests.post(f'{PAYSTACK_BASE}/charge', json=payload, headers=_headers(), timeout=30)
+        return resp, resp.json()
+
+    resp, data = send(ps_provider)
+    if resp.status_code >= 400 and ps_provider in PROVIDER_FALLBACK and _is_provider_error(data):
+        logger.warning(f'Paystack refused provider {ps_provider!r} ({data.get("message")}); retrying as '
+                       f'{PROVIDER_FALLBACK[ps_provider]!r} ref={reference}')
+        resp, data = send(PROVIDER_FALLBACK[ps_provider])
+
+    # What Paystack answered decides what the seller sees: pay_offline = a PIN prompt on the
+    # phone, send_otp = a voucher/code to type in. Logged so a missing prompt can be traced.
+    inner = data.get('data') or {}
+    logger.info(f'MoMo charge ref={reference} provider={ps_provider} http={resp.status_code} '
+                f'ok={data.get("status")} charge_status={inner.get("status")!r} '
+                f'message={data.get("message")!r} display={inner.get("display_text")!r}')
+    return resp, data
 
 
 def _get_most_recent_pending_momo(vendor):
@@ -145,6 +189,7 @@ def _get_most_recent_pending_momo(vendor):
         vendor=vendor,
         status='pending',
         paystack_reference__startswith='MOMO-',
+        created_at__gte=timezone.now() - RESUME_WINDOW,
     ).order_by('-created_at').first()
 
 
@@ -202,7 +247,7 @@ def initiate_momo_charge(vendor, plan_id, billing, phone, provider, save=False):
     # Step 1: idempotency
     existing_ref = _get_inflight(vendor.id, plan_id)
     if existing_ref:
-        charge = _fetch_charge(existing_ref)
+        charge = _fetch_charge(existing_ref) if _recent(existing_ref) else None
         if _is_charge_alive(charge):
             logger.info(f'Reusing in-flight charge {existing_ref} for vendor {vendor.id}')
             return {

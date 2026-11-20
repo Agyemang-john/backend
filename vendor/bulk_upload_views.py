@@ -1,359 +1,290 @@
 """
 vendor/bulk_upload_views.py
 
-Bulk product upload endpoints.
+Bulk product upload endpoints (the format and the work: vendor/bulk_upload.py).
 
-  GET  /api/v1/vendor/products/bulk-upload/template/       → CSV template download
-  GET  /api/v1/vendor/products/bulk-upload/meta/           → Dropdowns + plan info
-  POST /api/v1/vendor/products/bulk-upload/                → CSV / TSV file upload
-  POST /api/v1/vendor/products/bulk-upload/direct/         → JSON rows (in-browser grid)
-  GET  /api/v1/vendor/products/bulk-upload/job/<uuid>/     → Async job status
+  GET  /api/v1/vendor/products/bulk-upload/template/   → CSV template with example rows
+  GET  /api/v1/vendor/products/bulk-upload/meta/       → columns, categories, brands, countries,
+                                                          delivery methods, store defaults, plan
+  POST /api/v1/vendor/products/bulk-upload/            → CSV/TSV file (field "file")
+  POST /api/v1/vendor/products/bulk-upload/direct/     → the in-browser table: "products" JSON
+                                                          (+ photo files, multipart)
+  GET  /api/v1/vendor/products/bulk-upload/job/<uuid>/ → background job status
 
-Access: IsVerifiedVendor + require_feature("can_access_bulk_upload")
-Routing: ≤ SYNC_THRESHOLD rows → synchronous; > SYNC_THRESHOLD rows → Celery task.
+Access: verified store, plan with can_access_bulk_upload, catalogue permission.
+Small uploads run in the request. Large ones, and any that must download
+photos from links, run as a background job the page polls.
 """
 
 import csv
 import io
+import json
 import logging
 
-from django.db.models import F
 from django.http import HttpResponse
-from django.db import transaction
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from payments.models import SubscriptionUsage
-from payments.subscription_permissions import require_feature, _usage, _plan
-from product.models import Sub_Category, Brand
-from vendor.permissions import IsVerifiedVendor
+from payments.entitlements import plan_for_vendor, product_count
+from payments.subscription_permissions import require_feature
+from product import variations
+from product.models import Brand, DeliveryOption, Sub_Category
+from vendor import bulk_upload
 from vendor.access import Capability, require_capability
-from vendor.bulk_upload_serializer import (
-    BulkUploadResultSerializer,
-    BulkProductRowSerializer,
-    REQUIRED_COLUMNS,
-)
+from vendor.permissions import IsVerifiedVendor
 
 logger = logging.getLogger(__name__)
 
-SYNC_THRESHOLD = 100  # rows ≤ this processed synchronously
+SYNC_THRESHOLD = 100            # products handled in the request; more go to a background job
+MAX_FILE_BYTES = 5 * 1024 * 1024
+MAX_TABLE_PHOTOS = 400          # files in one table upload
 
-# ── CSV template columns ───────────────────────────────────────────────────────
-TEMPLATE_HEADERS = [
-    "title", "price", "old_price", "sub_category_slug", "brand_slug",
-    "product_type", "total_quantity", "weight", "volume", "life",
-    "variant", "description", "features", "specifications",
-    "delivery_returns", "size_names", "color_names", "color_codes",
-    "variant_prices", "variant_quantities",
-]
-
-EXAMPLE_ROW = [
-    "Premium Cotton T-Shirt", "49.99", "69.99", "mens-clothing", "nike",
-    "new", "200", "0.3", "0.001", "2 years",
-    "Size-Color", "High quality cotton tee", "100% organic cotton",
-    "Machine wash cold", "Free returns within 30 days",
-    "S;M;L;XL", "Red;Blue;Black", "#FF0000;#0000FF;#000000",
-    "49.99;49.99;49.99", "20;20;20",
-]
+PERMISSIONS = [IsAuthenticated, IsVerifiedVendor, require_feature("can_access_bulk_upload"),
+               require_capability(Capability.MANAGE_CATALOG)]
 
 
-# ── Internal helpers ───────────────────────────────────────────────────────────
-
-from payments.entitlements import ProductLimitReached, reserve_product_slots, sync_usage
-
-
-def _get_vendor(user):
-    return getattr(user, "current_vendor", None)
+def _vendor(request):
+    return getattr(request.user, "current_vendor", None)
 
 
-def _check_product_limit(user, requested_count):
-    """Early, friendly refusal; each row is still checked under a lock when created."""
-    from payments.entitlements import product_count
-    usage = _usage(user)
-    plan  = _plan(user)
+def _limit_error(vendor, requested):
+    """Early, friendly refusal; each product is still checked under a lock when created."""
+    plan = plan_for_vendor(vendor)
     if not plan or not plan.max_products:
-        return usage, None
-    current   = product_count(_get_vendor(user))
+        return None
+    current = product_count(vendor)
     remaining = max(plan.max_products - current, 0)
-    if current + requested_count > plan.max_products:
-        return None, {
-            "error":           "product_limit_exceeded",
-            "detail":          (
-                f"This would exceed your plan limit of {plan.max_products} products. "
-                f"You have {remaining} slot{'s' if remaining != 1 else ''} remaining."
-            ),
-            "limit":           plan.max_products,
-            "current_count":   current,
-            "remaining_slots": remaining,
-            "requested":       requested_count,
-            "action":          "upgrade",
-            "upgrade_url":     "/subscribe",
-        }
-    return usage, None
+    if current + requested <= plan.max_products:
+        return None
+    return Response({
+        "error": "product_limit_exceeded",
+        "detail": (f"This would go over your plan's {plan.max_products} products. "
+                   f"You have room for {remaining} more."),
+        "limit": plan.max_products, "current_count": current, "remaining_slots": remaining,
+        "requested": requested, "action": "upgrade", "upgrade_url": "/subscribe",
+    }, status=status.HTTP_403_FORBIDDEN)
 
 
-def _run_rows_sync(vendor, rows, usage):
-    """Process rows synchronously. Returns a DRF Response."""
-    created_ids, errors = [], []
-
-    for i, row in enumerate(rows, start=2):
-        ser = BulkProductRowSerializer(data=row)
-        if not ser.is_valid():
-            errors.append({"row": i, "title": row.get("title", "—"), "errors": ser.errors})
-            continue
-        try:
-            with transaction.atomic():
-                reserve_product_slots(vendor)   # plan limit, store row locked
-                product = ser.save(vendor=vendor)
-                created_ids.append(product.id)
-        except ProductLimitReached as exc:
-            errors.append({"row": i, "title": row.get("title", "—"), "errors": {"non_field_errors": [str(exc)]}})
-        except Exception as exc:
-            logger.error("BulkUpload sync row %d vendor %d: %s", i, vendor.id, exc, exc_info=True)
-            errors.append({"row": i, "title": row.get("title", "—"), "errors": {"non_field_errors": [str(exc)]}})
-
-    if created_ids:
-        sync_usage(vendor)
-
-    result = {
-        "mode": "sync",
-        "total_rows":          len(rows),
-        "success_count":       len(created_ids),
-        "failed_count":        len(errors),
-        "created_product_ids": created_ids,
-        "errors":              errors,
-    }
-    http_status = (
-        status.HTTP_207_MULTI_STATUS if errors and created_ids
-        else status.HTTP_400_BAD_REQUEST if not created_ids
-        else status.HTTP_201_CREATED
-    )
-    return Response(BulkUploadResultSerializer(result).data, status=http_status)
-
-
-def _run_rows_async(vendor, rows):
-    """Dispatch rows to Celery. Returns a DRF Response with job metadata."""
-    from vendor.models import BulkUploadJob
-    from vendor.tasks import process_bulk_upload
-
-    job = BulkUploadJob.objects.create(vendor=vendor, total_rows=len(rows))
-    process_bulk_upload.delay(str(job.id), rows, vendor.id)
-    return Response(
-        {
-            "mode":       "async",
-            "job_id":     str(job.id),
-            "total_rows": len(rows),
-            "status":     job.status,
+def _run(vendor, specs, files_by_spec=None):
+    if not specs:
+        return Response({"error": "There are no products to upload (example rows starting with # are skipped)."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    limit = _limit_error(vendor, len(specs))
+    if limit:
+        return limit
+    background = not files_by_spec and (len(specs) > SYNC_THRESHOLD or bulk_upload.specs_need_downloads(specs))
+    if background:
+        from vendor.models import BulkUploadJob
+        from vendor.tasks import process_bulk_upload
+        job = BulkUploadJob.objects.create(vendor=vendor, total_rows=len(specs))
+        process_bulk_upload.delay(str(job.id), specs, vendor.id)
+        return Response({
+            "mode": "async", "job_id": str(job.id), "total_rows": len(specs), "status": job.status,
             "status_url": f"/api/v1/vendor/products/bulk-upload/job/{job.id}/",
-        },
-        status=status.HTTP_202_ACCEPTED,
-    )
+        }, status=status.HTTP_202_ACCEPTED)
+
+    report = bulk_upload.process_specs(vendor, specs, files_by_spec)
+    code = (status.HTTP_201_CREATED if not report["errors"]
+            else status.HTTP_207_MULTI_STATUS if report["products"] else status.HTTP_400_BAD_REQUEST)
+    return Response({"mode": "sync", **report}, status=code)
 
 
-def _dispatch(vendor, clean_rows, usage):
-    if len(clean_rows) <= SYNC_THRESHOLD:
-        return _run_rows_sync(vendor, clean_rows, usage)
-    return _run_rows_async(vendor, clean_rows)
+def _decode(raw):
+    # Excel on Windows saves CSV in the local code page, not UTF-8.
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return None
 
 
-# ── Template download ──────────────────────────────────────────────────────────
+# ── Template ─────────────────────────────────────────────────────────────────
 
 class BulkUploadTemplatAPIView(APIView):
-    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_feature("can_access_bulk_upload"), require_capability(Capability.MANAGE_CATALOG)]
+    permission_classes = PERMISSIONS
 
     def get(self, request):
         output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(TEMPLATE_HEADERS)
-        writer.writerow(EXAMPLE_ROW)
-        response = HttpResponse(output.getvalue(), content_type="text/csv")
+        writer = csv.DictWriter(output, fieldnames=bulk_upload.TEMPLATE_HEADERS)
+        writer.writeheader()
+        writer.writerows(bulk_upload.template_rows())
+        # BOM: Excel then opens the file as UTF-8 (₵, accents).
+        response = HttpResponse("﻿" + output.getvalue(), content_type="text/csv; charset=utf-8")
         response["Content-Disposition"] = 'attachment; filename="negromart_bulk_upload_template.csv"'
         return response
 
 
-# ── Metadata for dropdowns ─────────────────────────────────────────────────────
+# ── What the page needs ──────────────────────────────────────────────────────
 
 class BulkUploadMetaAPIView(APIView):
-    """
-    Returns all data the frontend needs to render its dropdowns and reference panels.
-    sub_categories includes a 'label' field with the full display path
-    (Main Category > Category > Sub Category) so the frontend doesn't need slugs.
-    """
-    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_feature("can_access_bulk_upload"), require_capability(Capability.MANAGE_CATALOG)]
+    permission_classes = PERMISSIONS
 
     def get(self, request):
-        sub_cats_qs = Sub_Category.objects.select_related(
-            "category__main_category"
-        ).order_by("category__main_category__title", "category__title", "title")
+        from address.models import Country
 
-        sub_categories = []
-        for sc in sub_cats_qs:
-            cat      = sc.category
-            main_cat = cat.main_category
-            sub_categories.append({
-                "id":    sc.id,
-                "slug":  sc.slug,
-                "title": sc.title,
-                "label": f"{main_cat.title} › {cat.title} › {sc.title}",
-            })
+        vendor = _vendor(request)
+        sub_categories = [{
+            "id": sc.id, "slug": sc.slug, "title": sc.title,
+            "label": " › ".join(t for t in (getattr(getattr(sc.category, "main_category", None), "title", None),
+                                            getattr(sc.category, "title", None), sc.title) if t),
+        } for sc in Sub_Category.objects.select_related("category__main_category")
+            .order_by("category__main_category__title", "category__title", "title")]
 
-        brands = list(Brand.objects.values("id", "title", "slug").order_by("title"))
-
-        usage = _usage(request.user)
-        plan  = _plan(request.user)
-        current         = usage.active_products_count if usage else 0
-        remaining_slots = (
-            max(plan.max_products - current, 0) if plan and plan.max_products else None
-        )
+        ctx = bulk_upload.Context(vendor) if vendor else None
+        plan = plan_for_vendor(vendor) if vendor else None
+        remaining = None
+        if plan and plan.max_products:
+            remaining = max(plan.max_products - product_count(vendor), 0)
 
         return Response({
-            "sub_categories":  sub_categories,
-            "brands":          brands,
-            "product_types":   [
-                {"value": "new",         "label": "New"},
-                {"value": "used",        "label": "Used / Second-hand"},
-                {"value": "book",        "label": "Book"},
-                {"value": "grocery",     "label": "Grocery / Food"},
-                {"value": "refurbished", "label": "Refurbished"},
+            "columns": [{"name": n, "required": r, "help": h, "example": e} for n, r, h, e in bulk_upload.COLUMNS],
+            "required_columns": bulk_upload.REQUIRED_COLUMNS,
+            "template_headers": bulk_upload.TEMPLATE_HEADERS,
+            "sub_categories": sub_categories,
+            "brands": list(Brand.objects.values("id", "title", "slug").order_by("title")),
+            "countries": list(Country.objects.values("id", "name", "code").order_by("name")),
+            "delivery_methods": list(DeliveryOption.objects.values("id", "name", "type", "min_days", "max_days")
+                                     .order_by("type", "min_days", "id")),
+            "conditions": [
+                {"value": "new", "label": "New"}, {"value": "used", "label": "Used"},
+                {"value": "refurbished", "label": "Refurbished"}, {"value": "grocery", "label": "Grocery / food"},
+                {"value": "book", "label": "Book"},
             ],
-            "variant_types":   [
-                {"value": "None",       "label": "No variants"},
-                {"value": "Size",       "label": "By size  (S, M, L …)"},
-                {"value": "Color",      "label": "By color"},
-                {"value": "Size-Color", "label": "By size AND color"},
-            ],
-            "required_columns":  REQUIRED_COLUMNS,
-            "template_headers":  TEMPLATE_HEADERS,
-            "sync_threshold":    SYNC_THRESHOLD,
-            "max_rows":          500,
-            "remaining_slots":   remaining_slots,
-            "plan_name":         plan.name if plan else None,
+            "defaults": {
+                "ships_to": [{"id": c.id, "name": c.name, "code": c.code} for c in (ctx.default_regions if ctx else [])],
+                "delivery_methods": [{"id": d.id, "name": d.name} for d in (ctx.default_delivery if ctx else [])],
+            },
+            "variation_options": {
+                "types": variations.OPTION_TYPES, "suggested": variations.SUGGESTED,
+                "default_suggested": variations.DEFAULT_SUGGESTED, "max_axes": variations.MAX_AXES,
+            },
+            "max_images_per_product": plan.max_images_per_product if plan else None,
+            "sync_threshold": SYNC_THRESHOLD,
+            "max_rows": bulk_upload.MAX_ROWS,
+            "remaining_slots": remaining,
+            "plan_name": plan.name if plan else None,
         })
 
 
-# ── CSV / TSV file upload ──────────────────────────────────────────────────────
+# ── Spreadsheet file ─────────────────────────────────────────────────────────
 
 class BulkProductUploadAPIView(APIView):
-    """POST multipart/form-data with field 'file' (CSV or TSV)."""
-    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_feature("can_access_bulk_upload"), require_capability(Capability.MANAGE_CATALOG)]
-    MAX_ROWS = 500
+    """POST multipart/form-data with field 'file' (.csv or .tsv)."""
+    permission_classes = PERMISSIONS
 
     def post(self, request):
-        vendor = _get_vendor(request.user)
+        vendor = _vendor(request)
         if not vendor:
-            return Response({"error": "No vendor account."}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"error": "No store account."}, status=status.HTTP_403_FORBIDDEN)
+        upload = request.FILES.get("file")
+        if not upload:
+            return Response({"error": "Choose a file to upload."}, status=status.HTTP_400_BAD_REQUEST)
+        name = upload.name.lower()
+        if name.endswith((".xlsx", ".xls", ".numbers", ".ods")):
+            return Response({"error": "Save the sheet as CSV first: in Excel, File › Save As › CSV UTF-8; "
+                                      "in Google Sheets, File › Download › Comma-separated values."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if upload.size > MAX_FILE_BYTES:
+            return Response({"error": "The file is larger than 5 MB."}, status=status.HTTP_400_BAD_REQUEST)
+        content = _decode(upload.read())
+        if content is None:
+            return Response({"error": "The file could not be read. Save it as CSV UTF-8 and try again."},
+                            status=status.HTTP_400_BAD_REQUEST)
 
-        uploaded_file = request.FILES.get("file")
-        if not uploaded_file:
-            return Response({"error": "No file uploaded."}, status=status.HTTP_400_BAD_REQUEST)
-
-        filename  = uploaded_file.name.lower()
-        delimiter = "\t" if filename.endswith(".tsv") else ","
-        try:
-            content = uploaded_file.read().decode("utf-8-sig")
-        except UnicodeDecodeError:
-            return Response({"error": "File encoding not supported. Use UTF-8."}, status=status.HTTP_400_BAD_REQUEST)
-
+        delimiter = "\t" if name.endswith(".tsv") else ","
+        if delimiter == "," and content[:2048].count(";") > content[:2048].count(","):
+            delimiter = ";"     # Excel in many locales separates with semicolons
         reader = csv.DictReader(io.StringIO(content), delimiter=delimiter)
         if not reader.fieldnames:
-            return Response({"error": "File appears to be empty."}, status=status.HTTP_400_BAD_REQUEST)
-
-        missing = set(REQUIRED_COLUMNS) - set(reader.fieldnames)
+            return Response({"error": "The file is empty."}, status=status.HTTP_400_BAD_REQUEST)
+        found = {bulk_upload.ALIASES.get(h.strip().lower().replace(" ", "_"), h.strip().lower().replace(" ", "_"))
+                 for h in reader.fieldnames if h}
+        missing = [c for c in bulk_upload.REQUIRED_COLUMNS if c not in found]
         if missing:
             return Response({
-                "error":            f"Missing required columns: {', '.join(sorted(missing))}",
-                "found_columns":    list(reader.fieldnames),
-                "required_columns": REQUIRED_COLUMNS,
+                "error": f"Missing columns: {', '.join(missing)}. Start from the template.",
+                "found_columns": list(reader.fieldnames), "required_columns": bulk_upload.REQUIRED_COLUMNS,
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        raw_rows = list(reader)
-        if len(raw_rows) > self.MAX_ROWS:
-            return Response({"error": f"File exceeds the {self.MAX_ROWS}-row limit."}, status=status.HTTP_400_BAD_REQUEST)
-
-        clean_rows = [
-            {k.strip(): (v.strip() if v else "") for k, v in row.items() if k}
-            for row in raw_rows
-            if any(v.strip() for v in row.values() if v)
-        ]
-        if not clean_rows:
-            return Response({"error": "File has no data rows."}, status=status.HTTP_400_BAD_REQUEST)
-
-        usage, limit_error = _check_product_limit(request.user, len(clean_rows))
-        if limit_error:
-            return Response(limit_error, status=status.HTTP_403_FORBIDDEN)
-
-        return _dispatch(vendor, clean_rows, usage)
+        rows = list(reader)
+        if len(rows) > bulk_upload.MAX_ROWS:
+            return Response({"error": f"Up to {bulk_upload.MAX_ROWS} rows per file. Split it into smaller files."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        return _run(vendor, bulk_upload.rows_to_specs(rows))
 
 
-# ── JSON / in-browser grid upload ──────────────────────────────────────────────
+# ── In-browser table ─────────────────────────────────────────────────────────
 
 class BulkProductDirectAPIView(APIView):
     """
-    POST /api/v1/vendor/products/bulk-upload/direct/
-    Body: { "products": [ { field: value, … }, … ] }
-
-    Accepts the same row schema as the CSV upload.
-    Used by the in-browser grid editor so sellers never touch a spreadsheet.
+    POST "products": a JSON list, as JSON or a multipart field. Each item is
+    either one flat row (the CSV columns) or {"rows": [row, ...]} for a product
+    with versions (one row per version). Photos attached in the table come as
+    files "photos_<product index>" (several) and "version_photo_<product>_<version>".
     """
-    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_feature("can_access_bulk_upload"), require_capability(Capability.MANAGE_CATALOG)]
-    MAX_ROWS = 500
+    permission_classes = PERMISSIONS
 
     def post(self, request):
-        vendor = _get_vendor(request.user)
+        vendor = _vendor(request)
         if not vendor:
-            return Response({"error": "No vendor account."}, status=status.HTTP_403_FORBIDDEN)
-
+            return Response({"error": "No store account."}, status=status.HTTP_403_FORBIDDEN)
         products = request.data.get("products")
+        if isinstance(products, str):
+            try:
+                products = json.loads(products)
+            except json.JSONDecodeError:
+                return Response({"error": "The products could not be read."}, status=status.HTTP_400_BAD_REQUEST)
         if not isinstance(products, list) or not products:
-            return Response({"error": "Provide a non-empty 'products' list."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "Add at least one product."}, status=status.HTTP_400_BAD_REQUEST)
+        if len(products) > bulk_upload.MAX_ROWS:
+            return Response({"error": f"Up to {bulk_upload.MAX_ROWS} products at once."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if len(request.FILES) > MAX_TABLE_PHOTOS:
+            return Response({"error": f"Up to {MAX_TABLE_PHOTOS} photos per upload."},
+                            status=status.HTTP_400_BAD_REQUEST)
 
-        if len(products) > self.MAX_ROWS:
-            return Response({"error": f"Maximum {self.MAX_ROWS} products per upload."}, status=status.HTTP_400_BAD_REQUEST)
+        specs, files_by_spec = [], {}
+        for index, item in enumerate(products):
+            rows = item.get("rows") if isinstance(item, dict) and isinstance(item.get("rows"), list) else [item]
+            rows = [bulk_upload.normalise_row(r) for r in rows if isinstance(r, dict)]
+            rows = [r for r in rows if any(r.values())]
+            if not rows:
+                continue
+            spec_index = len(specs)
+            specs.append({"rows": [index + 1], "product": rows[0], "versions": rows})
+            photos = request.FILES.getlist(f"photos_{index}")
+            version_photos = {}
+            for v in range(len(rows)):
+                upload = request.FILES.get(f"version_photo_{index}_{v}")
+                if upload:
+                    version_photos[v] = upload
+            if photos or version_photos:
+                files_by_spec[spec_index] = {"images": photos, "version_images": version_photos}
+        return _run(vendor, specs, files_by_spec)
 
-        # Drop completely empty rows (grid may send trailing blank rows)
-        clean_rows = [
-            {str(k): str(v).strip() if v is not None else "" for k, v in row.items()}
-            for row in products
-            if isinstance(row, dict) and any(str(v).strip() for v in row.values() if v)
-        ]
-        if not clean_rows:
-            return Response({"error": "No products provided."}, status=status.HTTP_400_BAD_REQUEST)
 
-        usage, limit_error = _check_product_limit(request.user, len(clean_rows))
-        if limit_error:
-            return Response(limit_error, status=status.HTTP_403_FORBIDDEN)
-
-        return _dispatch(vendor, clean_rows, usage)
-
-
-# ── Async job status ───────────────────────────────────────────────────────────
+# ── Background job ───────────────────────────────────────────────────────────
 
 class BulkUploadJobStatusAPIView(APIView):
-    """GET  /api/v1/vendor/products/bulk-upload/job/<uuid>/"""
-    permission_classes = [IsAuthenticated, IsVerifiedVendor, require_feature("can_access_bulk_upload"), require_capability(Capability.MANAGE_CATALOG)]
+    permission_classes = PERMISSIONS
 
     def get(self, request, job_id):
-        vendor = _get_vendor(request.user)
+        vendor = _vendor(request)
         if not vendor:
-            return Response({"error": "No vendor account."}, status=status.HTTP_403_FORBIDDEN)
-
+            return Response({"error": "No store account."}, status=status.HTTP_403_FORBIDDEN)
         from vendor.models import BulkUploadJob
         try:
             job = BulkUploadJob.objects.get(id=job_id, vendor=vendor)
         except BulkUploadJob.DoesNotExist:
-            return Response({"error": "Job not found."}, status=status.HTTP_404_NOT_FOUND)
-
+            return Response({"error": "Upload not found."}, status=status.HTTP_404_NOT_FOUND)
         return Response({
-            "job_id":              str(job.id),
-            "status":              job.status,
-            "total_rows":          job.total_rows,
-            "success_count":       job.success_count,
-            "failed_count":        job.failed_count,
-            "created_product_ids": job.created_product_ids,
-            "errors":              job.errors,
-            "error_message":       job.error_message,
-            "created_at":          job.created_at,
-            "updated_at":          job.updated_at,
+            "job_id": str(job.id), "status": job.status, "total_rows": job.total_rows,
+            "success_count": job.success_count, "failed_count": job.failed_count,
+            "draft_count": sum(1 for p in job.results if p.get("status") == "draft"),
+            "created_product_ids": job.created_product_ids, "products": job.results,
+            "errors": job.errors, "error_message": job.error_message,
+            "created_at": job.created_at, "updated_at": job.updated_at,
         })

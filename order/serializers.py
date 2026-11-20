@@ -152,8 +152,19 @@ class VariantSerializer(serializers.ModelSerializer):
         model = Variants
         fields = [
             "product", "price", "title", "color", "size",
-            "quantity", "image", "currency", "id"
+            "quantity", "image", "currency", "id", "options", "option_label",
         ]
+
+    options = serializers.SerializerMethodField()
+    option_label = serializers.SerializerMethodField()
+
+    def get_options(self, obj):
+        from product.variations import variant_options
+        return variant_options(obj)
+
+    def get_option_label(self, obj):
+        from product.variations import option_label
+        return option_label(obj)
 
     def get_currency(self, obj):
         request = self.context.get('request')
@@ -248,6 +259,7 @@ class OrderProductSerializer(serializers.ModelSerializer):
     variant_image = serializers.SerializerMethodField()
     variant_size = serializers.SerializerMethodField()
     variant_color = serializers.SerializerMethodField()
+    variant_label = serializers.SerializerMethodField()
     delivery_option_name = serializers.SerializerMethodField()
     delivery_range = serializers.SerializerMethodField()
     sourcing = serializers.SerializerMethodField()
@@ -264,6 +276,7 @@ class OrderProductSerializer(serializers.ModelSerializer):
             'variant_image',
             'variant_size',
             'variant_color',
+            'variant_label',
             'quantity',
             'price',
             'amount',
@@ -316,6 +329,11 @@ class OrderProductSerializer(serializers.ModelSerializer):
         if obj.variant and obj.variant.color:
             return obj.variant.color.name
         return None
+
+    def get_variant_label(self, obj):
+        # Every option the shopper chose ("Vanilla / 500 g"), not only size and colour.
+        from product.variations import option_label
+        return option_label(obj.variant) or None if obj.variant else None
 
     def get_delivery_option_name(self, obj):
         if obj.selected_delivery_option:

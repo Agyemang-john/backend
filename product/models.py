@@ -274,6 +274,8 @@ class Product(models.Model):
         ('Size','Size'),
         ('Color','Color'),
         ('Size-Color','Size-Color'),
+        # Any other options (Flavour, Scent, Pack size…): see variation_axes.
+        ('Options','Options'),
     )
     
     OPTIONS=(
@@ -288,6 +290,9 @@ class Product(models.Model):
     sub_category = models.ForeignKey('Sub_Category', on_delete=models.SET_NULL, null=True)
     vendor = models.ForeignKey(Vendor, on_delete=models.SET_NULL, null=True, related_name="product")
     variant = models.CharField(max_length=20, choices=VARIANTS, default='None')
+    # What shoppers choose between, in order, e.g. [{"key": "flavor", "label": "Flavour"}].
+    # Empty on older Size/Color products (product/variations.py reads both).
+    variation_axes = models.JSONField(default=list, blank=True)
     brand = models.ForeignKey(Brand, on_delete=models.SET_NULL, null=True)
     status = models.CharField(max_length=50, choices=STATUS, default='in_review')
     # Unique per store (Meta.constraints), not platform-wide.
@@ -408,7 +413,7 @@ class Product(models.Model):
         return (self.price - self.old_price) / self.price * 100
     
     def get_stock_quantity(self, variant=None):
-        if self.variant in ['Size', 'Color', 'Size-Color']:
+        if self.variant != 'None':
             if variant:
                 return variant.quantity
             return self.variants.aggregate(total=Sum('quantity'))['total'] or 0
@@ -458,6 +463,9 @@ class Variants(models.Model):
     product = models.ForeignKey(Product, related_name="variants", on_delete=models.CASCADE)
     size = models.ForeignKey(Size, on_delete=models.SET_NULL, blank=True, null=True)
     color = models.ForeignKey(Color, on_delete=models.SET_NULL, blank=True, null=True)
+    # This version's value per option, e.g. {"flavor": "Vanilla", "size": "500 g"}
+    # (product/variations.py). Colour and size are mirrored onto the keys above.
+    options = models.JSONField(default=dict, blank=True)
     image = models.ImageField(upload_to="variants/", default="product.jpg")
     quantity = models.PositiveIntegerField(default=1)
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
@@ -483,22 +491,22 @@ class Variants(models.Model):
         ]
 
     def get_combined_title(self):
-        """
-        Combine the base title with size and color if available.
-        """
-        components = [self.product.title]  # use product title as base
+        """The product title followed by this version's choices: "Protein Shake - Vanilla - 500 g"."""
+        from product.variations import variant_options
+        return " - ".join([self.product.title, *variant_options(self).values()])
 
-        if self.size and self.size.name:
-            components.append(self.size.name)
-
-        if self.color and self.color.name:
-            components.append(self.color.name)
-
-        return " - ".join(components)
+    @property
+    def option_label(self):
+        """'Vanilla / 500 g': the choices alone, for carts, orders and messages."""
+        from product.variations import option_label
+        return option_label(self)
 
     def save(self, *args, **kwargs):
-        # Automatically set the title before saving
-        self.title = self.get_combined_title()
+        # Older writers (bulk upload) set size/color only: keep options in step.
+        if not self.options and (self.size_id or self.color_id):
+            from product.variations import variant_options
+            self.options = variant_options(self)
+        self.title = self.get_combined_title()[:225]
         super().save(*args, **kwargs)
 
     def __str__(self):

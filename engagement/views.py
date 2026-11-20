@@ -7,6 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from product.models import Product, Variants
+from product.variations import effective_axes, option_label
 
 from .alerts import live_state, watch
 from .emails import read_opt_out_token
@@ -64,7 +65,8 @@ def _serialize(alerts, request):
             'kind': a.kind,
             'source': a.source,
             'product': {'id': p.pk, 'title': p.title, 'sku': p.sku, 'slug': p.slug, 'image': image},
-            'variant': ({'id': v.pk, 'size': getattr(v.size, 'name', None), 'color': getattr(v.color, 'name', None)}
+            'variant': ({'id': v.pk, 'size': getattr(v.size, 'name', None), 'color': getattr(v.color, 'name', None),
+                         'label': option_label(v, effective_axes(p))}
                         if v is not None else None),
             'currency': currency,
             'target_price': _money(a.target_price, rate),

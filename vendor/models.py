@@ -52,17 +52,6 @@ class VendorManager(models.Manager):
         """Return suspended vendors."""
         return self.filter(status='SUSPENDED', is_suspended=True)
 
-    # def get_queryset(self):
-    #     """Default queryset for non-admin users: only verified, approved, non-suspended vendors."""
-    #     today = timezone.now().date()
-    #     return super().get_queryset().filter(
-    #         # status='VERIFIED',
-    #         is_approved=True,
-    #         is_suspended=False,
-    #         is_subscribed=True,
-    #         # subscription_end_date__gte=today
-    #     )
-
 class Vendor(models.Model):
     # Constants for Choices
     VENDOR_TYPE_CHOICES = [
@@ -515,6 +504,8 @@ class BulkUploadJob(models.Model):
     success_count       = models.PositiveIntegerField(default=0)
     failed_count        = models.PositiveIntegerField(default=0)
     created_product_ids = models.JSONField(default=list)
+    # Per product: {row, title, product_id, status ('in_review' | 'draft'), warnings}
+    results             = models.JSONField(default=list, blank=True)
     errors              = models.JSONField(default=list)
     error_message       = models.TextField(blank=True)
     created_at          = models.DateTimeField(auto_now_add=True)

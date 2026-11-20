@@ -31,7 +31,18 @@ class VariantsSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Variants
-        fields = ['title', 'image', 'size_name', 'color_name', 'price']
+        fields = ['title', 'image', 'size_name', 'color_name', 'price', 'options', 'option_label']
+
+    options = serializers.SerializerMethodField()
+    option_label = serializers.SerializerMethodField()
+
+    def get_options(self, obj):
+        from product.variations import variant_options
+        return variant_options(obj)
+
+    def get_option_label(self, obj):
+        from product.variations import option_label
+        return option_label(obj)
 
 class ProductSerializer(serializers.ModelSerializer):
     class Meta:

@@ -1,4 +1,5 @@
 from product.sourcing import filter_fast_delivery
+from product import variations
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from ads import services as ad_services
@@ -82,30 +83,6 @@ class SitemapDataAPIView(APIView):
             "vendors": serialized_vendors,
         })
     
-
-# class AjaxColorAPIView(APIView):
-#     def post(self, request, *args, **kwargs):
-#         size_id = request.data.get('size')
-#         product_id = request.data.get('productid')
-        
-#         # Fetch the product by ID
-#         product = get_object_or_404(Product, id=product_id)
-        
-#         # Fetch variants based on product ID and size ID
-#         colors = Variants.objects.filter(product_id=product_id, size_id=size_id)
-
-#         # Serialize the product and variants data
-#         product_data = ProductSerializer(product, context={'request': request}).data
-#         colors_data = VariantSerializer(colors, many=True, context={'request': request}).data
-        
-#         # Prepare the response data
-#         response_data = {
-#             'product': product_data,
-#             'colors': colors_data
-#         }
-        
-#         # Return the JSON response
-#         return Response(response_data, status=status.HTTP_200_OK)
 
 
 from .models import Product, SEARCH_CONFIG
@@ -221,13 +198,16 @@ class ProductDetailAPIView(APIView):
             if variant_id:
                 variant = Variants.objects.filter(id=variant_id, product=product).first()
             if not variant:
-                variant = Variants.objects.filter(product=product).first()
+                # Open on a version that can be bought, when there is one.
+                versions = Variants.objects.filter(product=product).order_by('id')
+                variant = versions.filter(quantity__gt=0).first() or versions.first()
             
             stock_quantity = product.get_stock_quantity(variant)
             is_out_of_stock = stock_quantity <= 0
 
             variant_data = {}
             if product.variant != "None" and variant:
+                rate = Decimal(str(get_exchange_rates().get(currency, 1)))
                 variants = Variants.objects.filter(product=product).select_related(
                     "size", "color"
                 ).prefetch_related("variantimage_set")
@@ -247,6 +227,14 @@ class ProductDetailAPIView(APIView):
                     ).data,
                     "colors": VariantSerializer(same_size_variants, many=True, context={"request": request}).data,
                     "sizes": VariantSerializer(size_variants, many=True, context={"request": request}).data,
+                    # Any options (Flavour, Scent, Pack size...): one row of choices per option,
+                    # each pointing at the variant to open (product/variations.py).
+                    "axes": variations.effective_axes(product),
+                    "options": variations.selector(
+                        product, variant, list(variants.order_by('id')),
+                        image_url=lambda v: request.build_absolute_uri(v.image.url) if v.image else None,
+                        price_of=lambda v: round(v.price * rate, 2),
+                    ),
                 }
             
             shared_data['variant_data'] = variant_data

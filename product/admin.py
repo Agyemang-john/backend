@@ -95,34 +95,6 @@ class ProductAdmin(admin.ModelAdmin):
     readonly_fields = ['search_vector']
     list_per_page = 50
 
-    # actions = ['index_selected_products', 'setup_periodic_indexing']
-
-    # def index_selected_products(self, request, queryset):
-    #     task = index_products_task.delay(timezone.now().isoformat())
-    #     self.message_user(request, f"Started indexing products with task ID: {task.id}")
-
-    # def setup_periodic_indexing(self, request, queryset):
-    #     # Create or get a crontab schedule (every 6 hours)
-    #     schedule, _ = CrontabSchedule.objects.get_or_create(
-    #         minute='0',
-    #         hour='*/6',
-    #         day_of_week='*',
-    #         day_of_month='*',
-    #         month_of_year='*',
-    #     )
-
-    #     # Create or update the periodic task
-    #     PeriodicTask.objects.update_or_create(
-    #         name='Index Products Every 6 Hours',
-    #         defaults={
-    #             'crontab': schedule,
-    #             'task': 'product.tasks.index_products_task',
-    #             'enabled': True,
-    #             'args': json.dumps([timezone.now().isoformat()]),
-    #         }
-    #     )
-    #     self.message_user(request, "Periodic indexing task set up successfully")
-    # setup_periodic_indexing.short_description = "Set up periodic product indexing"
 
 class ProductVariantImageAdmin(admin.ModelAdmin):
     list_display = ['image']

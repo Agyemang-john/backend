@@ -11,6 +11,7 @@ from userauths.models import *
 from order.models import *
 from product.models import Product, Variants
 from product.listing import listing_page_size
+from product import variations
 from .product_filters import apply_filters as apply_product_filters, facets as product_facets
 
 from rest_framework import status, generics, permissions
@@ -612,61 +613,6 @@ class ProductDetailView(SubscriptionGateMixin, generics.RetrieveUpdateDestroyAPI
         return Product.objects.filter(vendor=vendor).prefetch_related('variants__variantimage_set')
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Bulk upload — Pro plan + explicit feature flag
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Uncomment and fill in when you build the bulk upload endpoint:
-#
-# class BulkProductUploadView(SubscriptionGateMixin, APIView):
-#     permission_classes = [
-#         IsAuthenticated, IsVerifiedVendor,
-#         RequireProPlan,
-#         require_feature("can_access_bulk_upload"),
-#     ]
-#     subscription_feature = "can_access_bulk_upload"
-#
-#     def post(self, request):
-#         ...
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Discount codes — Pro plan feature flag
-# ─────────────────────────────────────────────────────────────────────────────
-
-# class DiscountCodeView(APIView):
-#     permission_classes = [
-#         IsAuthenticated, IsVerifiedVendor,
-#         require_feature("can_offer_discounts"),
-#     ]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Featured products — Pro plan feature flag
-# ─────────────────────────────────────────────────────────────────────────────
-
-# class FeatureProductView(APIView):
-#     permission_classes = [
-#         IsAuthenticated, IsVerifiedVendor,
-#         require_feature("can_feature_products"),
-#     ]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Storefront customisation — Pro plan feature flag
-# ─────────────────────────────────────────────────────────────────────────────
-
-# class StorefrontCustomisationView(APIView):
-#     permission_classes = [
-#         IsAuthenticated, IsVerifiedVendor,
-#         require_feature("can_use_storefront_customization"),
-#     ]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Everything below is unchanged from your original — no subscription gates needed
-# ─────────────────────────────────────────────────────────────────────────────
-
 class LocationAutocompleteThrottle(UserRateThrottle):
     rate = '2/second'
 
@@ -1153,6 +1099,13 @@ class ProductRelatedDataAPIView(APIView):
             "brands":           BrandSerializer(Brand.objects.all(), many=True).data,
             "regions":          CountrySerializer(Country.objects.all(), many=True).data,
             "delivery_options": DeliveryOptionSerializer(DeliveryOption.objects.all(), many=True, context={'request': request}).data,
+            # What versions can differ by (product/variations.py).
+            "variation_options": {
+                "types": variations.OPTION_TYPES,
+                "suggested": variations.SUGGESTED,
+                "default_suggested": variations.DEFAULT_SUGGESTED,
+                "max_axes": variations.MAX_AXES,
+            },
         })
 
 

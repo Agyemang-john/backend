@@ -1,4 +1,5 @@
 from product import sourcing as product_sourcing
+from product import variations
 import re
 from django.db import transaction
 from rest_framework import serializers
@@ -52,6 +53,8 @@ class VariantsSerializer(serializers.ModelSerializer):
     # Extra photos are uploaded one by one to vendor/variants/<id>/images/
     # (vendor/variant_gallery.py); a product save only removes or reorders them.
     gallery = VariantImageSerializer(many=True, read_only=True, source='variantimage_set')
+    # {option key: value}; cleaned against the product's options by ProductSerializer.
+    options = serializers.JSONField(required=False)
 
     def to_internal_value(self, data):
         # Remove 'image' from data to prevent validation errors
@@ -61,8 +64,13 @@ class VariantsSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Variants
-        fields = ['id', 'title', 'size', 'color', 'image', 'quantity', 'price', 'seller_sku', 'gallery',
+        fields = ['id', 'title', 'size', 'color', 'options', 'image', 'quantity', 'price', 'seller_sku', 'gallery',
                   'fulfilment_type', 'sourcing_min_days', 'sourcing_max_days']
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data['options'] = variations.variant_options(instance)   # also for older size/colour variants
+        return data
 
     def validate(self, attrs):
         # Blank fulfilment_type: the variant follows its product.
@@ -76,12 +84,19 @@ class VariantsSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
-        variant = Variants.objects.create(**validated_data)
+        variant = Variants(**validated_data)
+        if 'options' in validated_data:
+            variations.mirror_foreign_keys(variant)
+        variant.save()
         return variant
 
     def update(self, instance, validated_data):
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
+        if 'options' in validated_data:
+            variations.mirror_foreign_keys(instance)
+        elif 'size' in validated_data or 'color' in validated_data:
+            instance.options = {}   # an older client set size/colour: save() rebuilds options from them
         instance.save()
         return instance
 
@@ -121,10 +136,13 @@ class ProductSerializer(serializers.ModelSerializer):
             'delivery_options', 'sku', 'seller_sku', 'review_note', 'date', 'updated', 'views',
             'p_images', 'variants',
             'fulfilment_type', 'sourcing_min_days', 'sourcing_max_days', 'sourced_from',
-            'gtin',
+            'gtin', 'variation_axes',
         ]
         # review_note is written by Negromart reviewers (e.g. why it was rejected).
-        read_only_fields = ['vendor', 'sku', 'review_note', 'date', 'updated', 'views']
+        # variation_axes is read from the raw request (JSON in multipart) in validate().
+        # status is Negromart's review decision (a seller can't publish their own product);
+        # a draft moves to review on its own once it has a photo (update()).
+        read_only_fields = ['vendor', 'sku', 'review_note', 'date', 'updated', 'views', 'variation_axes', 'status']
 
     PRODUCT_VIDEO_MAX_BYTES = 50 * 1024 * 1024    # what the seller help page promises
 
@@ -207,7 +225,71 @@ class ProductSerializer(serializers.ModelSerializer):
             except json.JSONDecodeError:
                 variants_data = []
             self._check_variant_skus(variants_data, product=self.instance)
+            self._check_variant_options(variants_data)
         return attrs
+
+    def _requested_axes(self):
+        """
+        The seller's chosen options (Colour, Flavour...) or None when the client
+        did not send any (older clients and bulk upload use `variant` alone).
+        """
+        if hasattr(self, '_axes'):
+            return self._axes
+        raw = self.context['request'].data.get('variation_axes')
+        if raw is None:
+            self._axes = None
+            return None
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            self._axes = variations.clean_axes(parsed)
+        except json.JSONDecodeError:
+            raise serializers.ValidationError({'variation_axes': 'Variant options could not be read.'})
+        except variations.VariationError as exc:
+            raise serializers.ValidationError({'variation_axes': str(exc)})
+        return self._axes
+
+    def _check_variant_options(self, variants_data):
+        """Every variant has a value for every option, and no two are the same version."""
+        axes = self._requested_axes()
+        if not axes:
+            return
+        seen = {}
+        for i, var_data in enumerate(variants_data or [], start=1):
+            if not isinstance(var_data, dict):
+                continue
+            try:
+                options = variations.clean_variant_options(axes, var_data.get('options'), position=i)
+            except variations.VariationError as exc:
+                raise serializers.ValidationError({'variants': str(exc)})
+            key = variations.combo_key(options)
+            if key in seen:
+                same = ' / '.join(options.values())
+                raise serializers.ValidationError({'variants': (
+                    f"Variants {seen[key]} and {i} are the same ({same}). Change one or remove it.")})
+            seen[key] = i
+            var_data['options'] = options          # cleaned, saved by VariantsSerializer
+            var_data.pop('size', None)              # derived from options instead
+            var_data.pop('color', None)
+
+    def _apply_axes(self, validated_data, instance=None):
+        axes = self._requested_axes()
+        if axes is not None:
+            validated_data['variation_axes'] = axes
+            validated_data['variant'] = variations.variant_type_for(axes)
+        elif instance is not None and validated_data.get('variant', instance.variant) != instance.variant:
+            # An older client switched Size/Color: drop options it can't see.
+            validated_data['variation_axes'] = []
+
+    def _parsed_variants(self, variants_raw):
+        """The variants list, with options cleaned against the chosen options."""
+        if not variants_raw:
+            return []
+        try:
+            data = json.loads(variants_raw) if isinstance(variants_raw, str) else variants_raw
+        except json.JSONDecodeError:
+            return []
+        self._check_variant_options(data)
+        return data
 
     def _check_variant_skus(self, variants_data, product=None):
         """Variant SKUs must be unique within the store (across all products)."""
@@ -252,6 +334,7 @@ class ProductSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
+        data['variation_axes'] = variations.effective_axes(instance)   # older Size/Color products too
         if getattr(self, '_variant_keys', None):
             data['variant_keys'] = self._variant_keys
         return data
@@ -291,6 +374,7 @@ class ProductSerializer(serializers.ModelSerializer):
 
         regions = validated_data.pop('available_in_regions', [])
         validated_data['slug'] = slugify(validated_data['title'])
+        self._apply_axes(validated_data)
         product = Product.objects.create(**validated_data)
         product.available_in_regions.set(regions)
 
@@ -304,13 +388,7 @@ class ProductSerializer(serializers.ModelSerializer):
 
         # Handle variants
         if variants_raw:
-            try:
-                if isinstance(variants_raw, str):
-                    variants_data = json.loads(variants_raw)
-                else:
-                    variants_data = variants_raw
-            except json.JSONDecodeError:
-                variants_data = []
+            variants_data = self._parsed_variants(variants_raw)
 
             for i, var_data in enumerate(variants_data):
                 var_serializer = VariantsSerializer(data=var_data)
@@ -363,6 +441,7 @@ class ProductSerializer(serializers.ModelSerializer):
 
         if 'title' in validated_data:
             validated_data['slug'] = slugify(validated_data['title'])
+        self._apply_axes(validated_data, instance)
 
         # Update product fields
         for attr, value in validated_data.items():
@@ -385,13 +464,7 @@ class ProductSerializer(serializers.ModelSerializer):
 
         # Handle variants
         if variants_raw:
-            try:
-                if isinstance(variants_raw, str):
-                    variants_data = json.loads(variants_raw)
-                else:
-                    variants_data = variants_raw
-            except json.JSONDecodeError:
-                variants_data = []
+            variants_data = self._parsed_variants(variants_raw)
 
             keep_variant_ids = [v.get('id') for v in variants_data if v.get('id')]
             instance.variants.exclude(id__in=keep_variant_ids).delete()
@@ -455,6 +528,11 @@ class ProductSerializer(serializers.ModelSerializer):
             instance.productdeliveryoption_set.exclude(id__in=keep_ids).delete()
 
         self._save_attributes(instance, category_changed=category_changed)
+
+        # Drafts (e.g. from bulk upload without a photo) go to review once they have one.
+        if instance.status == 'draft' and (instance.image or instance.variants.exclude(image='product.jpg').exists()):
+            instance.status = 'in_review'
+            instance.save(update_fields=['status'])
         return instance
  
 from product.models import ProductReview

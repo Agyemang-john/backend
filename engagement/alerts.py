@@ -24,6 +24,7 @@ from django.utils import timezone
 from .emails import (absolute_media, base_context, build_email, opted_out_user_ids,
                      send_batch, site_url)
 from .models import EmailOptOut, ProductAlert
+from product.variations import effective_axes, option_label
 
 logger = logging.getLogger(__name__)
 
@@ -46,12 +47,12 @@ def live_state(keys):
     product_ids = {p for p, _ in keys}
     variant_ids = {v for _, v in keys if v}
     products = {p.pk: p for p in Product.objects.filter(pk__in=product_ids)
-                .select_related('vendor').only('pk', 'title', 'slug', 'sku', 'image', 'price', 'variant',
+                .select_related('vendor').only('pk', 'title', 'slug', 'sku', 'image', 'price', 'variant', 'variation_axes',
                                                'total_quantity', 'status', 'vendor__shop_paused',
                                                'vendor__is_suspended', 'vendor__name')}
     variants = {v.pk: v for v in Variants.objects.filter(pk__in=variant_ids)
                 .select_related('size', 'color').only('pk', 'product_id', 'price', 'quantity', 'title',
-                                                      'size__name', 'color__name')}
+                                                      'options', 'size__name', 'color__name')}
     # Product-level stock for products sold in sizes/colours = sum of their variants.
     variant_stock = dict(Variants.objects.filter(product_id__in=product_ids)
                          .values_list('product_id').annotate(total=Sum('quantity')))
@@ -198,7 +199,7 @@ def _item_context(alert, item):
         image = ''
     option = ''
     if variant is not None:
-        option = ' / '.join(n for n in (getattr(variant.size, 'name', ''), getattr(variant.color, 'name', '')) if n)
+        option = option_label(variant, effective_axes(product))
     return {
         'title': product.title,
         'option': option,

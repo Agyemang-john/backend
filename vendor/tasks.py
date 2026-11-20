@@ -18,81 +18,49 @@ def _get_sms_client():
     return _sms_client
 
 
-@shared_task(bind=True, max_retries=0, soft_time_limit=300, time_limit=360)
-def process_bulk_upload(self, job_id, rows, vendor_id):
+# Photos may have to be downloaded from links, so allow time (500 products max).
+@shared_task(bind=True, max_retries=0, soft_time_limit=1800, time_limit=1900)
+def process_bulk_upload(self, job_id, specs, vendor_id):
     """
-    Async Celery task for large bulk product uploads (>100 rows).
-    Processes rows, creates products, updates SubscriptionUsage, and
-    writes the result back to the BulkUploadJob record.
+    Background bulk upload (vendor/bulk_upload.py): large uploads and any that
+    download photos from links. Progress is written to the BulkUploadJob as it
+    goes, so the upload page can show it.
     """
     from .models import BulkUploadJob, Vendor
-    from vendor.bulk_upload_serializer import BulkProductRowSerializer
-    from payments.entitlements import ProductLimitReached, reserve_product_slots, sync_usage
-    from django.db import transaction
+    from vendor import bulk_upload
 
     try:
         job = BulkUploadJob.objects.get(id=job_id)
         vendor = Vendor.objects.get(id=vendor_id)
-
         job.status = BulkUploadJob.STATUS_PROCESSING
         job.save(update_fields=["status", "updated_at"])
 
-        created_ids = []
-        errors = []
+        # Jobs queued before the current format sent flat rows.
+        if specs and "versions" not in specs[0]:
+            specs = bulk_upload.rows_to_specs(specs)
 
-        for i, row in enumerate(rows, start=2):
-            serializer = BulkProductRowSerializer(data=row)
-            if not serializer.is_valid():
-                errors.append({
-                    "row": i,
-                    "title": row.get("title", "—"),
-                    "errors": serializer.errors,
-                })
-                continue
-            try:
-                with transaction.atomic():
-                    reserve_product_slots(vendor)   # plan limit, store row locked
-                    product = serializer.save(vendor=vendor)
-                    created_ids.append(product.id)
-            except ProductLimitReached as exc:
-                errors.append({"row": i, "title": row.get("title", "—"),
-                               "errors": {"non_field_errors": [str(exc)]}})
-            except Exception as exc:
-                logger.error(
-                    "BulkUpload job %s: row %d failed for vendor %d: %s",
-                    job_id, i, vendor_id, exc, exc_info=True,
-                )
-                errors.append({
-                    "row": i,
-                    "title": row.get("title", "—"),
-                    "errors": {"non_field_errors": [str(exc)]},
-                })
+        def progress(done_ok, done_failed):
+            BulkUploadJob.objects.filter(id=job_id).update(success_count=done_ok, failed_count=done_failed)
 
-        if created_ids:
-            sync_usage(vendor)
-
+        report = bulk_upload.process_specs(vendor, specs, on_progress=progress)
         job.status = BulkUploadJob.STATUS_DONE
-        job.success_count = len(created_ids)
-        job.failed_count = len(errors)
-        job.created_product_ids = created_ids
-        job.errors = errors
-        job.save(update_fields=[
-            "status", "success_count", "failed_count",
-            "created_product_ids", "errors", "updated_at",
-        ])
-
-        logger.info(
-            "BulkUpload job %s done: %d created, %d failed",
-            job_id, len(created_ids), len(errors),
-        )
-
+        job.success_count = report["success_count"]
+        job.failed_count = report["failed_count"]
+        job.created_product_ids = report["created_product_ids"]
+        job.results = report["products"]
+        job.errors = report["errors"]
+        job.save(update_fields=["status", "success_count", "failed_count", "created_product_ids",
+                                "results", "errors", "updated_at"])
+        logger.info("BulkUpload job %s done: %d created, %d failed",
+                    job_id, report["success_count"], report["failed_count"])
     except BulkUploadJob.DoesNotExist:
         logger.error("BulkUploadJob %s not found", job_id)
     except Exception as exc:
         logger.error("BulkUpload job %s crashed: %s", job_id, exc, exc_info=True)
         BulkUploadJob.objects.filter(id=job_id).update(
             status=BulkUploadJob.STATUS_FAILED,
-            error_message=str(exc),
+            error_message="The upload stopped unexpectedly. Products created so far are in My Products; "
+                          "upload the rest again.",
         )
 
 @shared_task(bind=True, max_retries=3, retry_backoff=True)
