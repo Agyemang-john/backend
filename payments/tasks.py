@@ -113,6 +113,10 @@ def create_order_from_payment_task(
             order.order_number = order_number
             order.save()
 
+            # Stores' own systems (seller API webhooks, tools/webhooks.py).
+            from tools.webhooks import order_event_later
+            order_event_later(order.pk, 'order.created')
+
             # Send notifications to vendors
             from notification.utils import send_notification
             for vendor in unique_vendors:

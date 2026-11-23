@@ -44,10 +44,20 @@ class SearchTrendsTests(TestCase):
         st.record_search(self._req(), 'rice cooker', 5)
         self.assertEqual(SearchTermDaily.objects.get(term='rice cooker').searchers, 2)
 
-    def test_no_results_and_bots_not_counted(self):
-        st.record_search(self._req(), 'zzqx gadget', 0)
+    def test_no_results_counted_apart_and_bots_ignored(self):
         st.record_search(self._req(ua='Googlebot/2.1'), 'rice cooker', 5)
         self.assertFalse(SearchTermDaily.objects.exists())
+        # Searches that found nothing feed sellers' demand insights, never trending.
+        for _ in range(st.MIN_SEARCHERS + 2):
+            st.record_search(self._req(), 'zzqx gadget', 0)
+        row = SearchTermDaily.objects.get(term='zzqx gadget')
+        self.assertEqual((row.searchers, row.no_result_searchers), (0, st.MIN_SEARCHERS + 2))
+        self.assertNotIn('zzqx gadget', st.trending_searches())
+
+    def test_fewest_results_kept(self):
+        st.record_search(self._req(), 'rice cooker', 9)
+        st.record_search(self._req(), 'rice cooker', 4)
+        self.assertEqual(SearchTermDaily.objects.get(term='rice cooker').fewest_results, 4)
 
     # ── trending ─────────────────────────────────────────────────────────────
     def test_trending_needs_several_shoppers_and_ranks_recent_higher(self):

@@ -55,6 +55,7 @@ urlpatterns = [
     path("api/v1/push/", include("push.urls")),
     path("api/v1/pickup/", include("pickup.urls")),
     path("api/v1/analytics/", include("analytics.urls")),
+    path("api/v1/tools/", include("tools.urls")),
     path("api/v1/2fa/", SellerTwoFactorView.as_view(), name="seller-2fa"),
     path("api/health/", health_view, name="health"),
     path("ckeditor5/", include('django_ckeditor_5.urls')),

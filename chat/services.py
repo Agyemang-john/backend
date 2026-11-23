@@ -187,6 +187,10 @@ def send_message(conversation, user, side, body, product=None, client_id=''):
             return Message.objects.get(conversation=conversation, client_id=client_id), False
         raise
     transaction.on_commit(lambda: realtime.message_created(conversation.pk, message.pk))
+    if side == Side.CUSTOMER:
+        # The store's away message, if it has one on (paid tool, tools/chat_tools.py).
+        from tools.chat_tools import auto_reply_later
+        auto_reply_later(conversation.pk)
     return message, True
 
 

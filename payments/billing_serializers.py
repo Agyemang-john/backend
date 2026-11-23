@@ -26,6 +26,10 @@ class BillingPlanSerializer(serializers.ModelSerializer):
             'can_feature_products', 'can_use_analytics', 'can_offer_discounts',
             'can_access_bulk_upload', 'can_use_storefront_customization',
             'priority_support', 'is_featured_vendor',
+            'can_bulk_edit', 'can_use_stock_forecast', 'listing_assistant_monthly_limit',
+            'can_use_profit_report', 'can_use_price_insights', 'can_use_auto_repricer',
+            'can_use_demand_insights', 'can_use_promotions', 'broadcasts_monthly_limit', 'can_print_labels',
+            'can_use_chat_tools', 'can_use_store_link', 'can_use_api',
             'commission_rate', 'commission_display',
             'payout_delay_days', 'is_recommended', 'description',
         ]

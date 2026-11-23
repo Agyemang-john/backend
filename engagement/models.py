@@ -11,9 +11,11 @@ class EmailOptOut(models.Model):
     """
     ALERTS = 'alerts'            # price drops / back in stock
     CART = 'cart'                # abandoned-cart reminders
+    STORE_OFFERS = 'store_offers'  # coupons and news from stores the shopper bought from / follows (tools/)
     CATEGORY_CHOICES = [
         (ALERTS, 'Price and stock alerts'),
         (CART, 'Cart reminders'),
+        (STORE_OFFERS, 'Offers from stores'),
     ]
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='email_opt_outs')

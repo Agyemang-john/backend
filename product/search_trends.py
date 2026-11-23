@@ -22,7 +22,8 @@ import re
 from datetime import timedelta
 
 from django.core.cache import cache
-from django.db.models import F
+from django.db.models import F, Value
+from django.db.models.functions import Coalesce, Least
 from django.utils import timezone
 
 from .models import BlockedSearchTerm, Product, SearchTermDaily
@@ -64,9 +65,14 @@ def normalize_term(raw) -> str | None:
 
 
 def record_search(request, query, results: int) -> None:
-    """Count one shopper's search for `query`. Never raises."""
+    """
+    Count one shopper's search for `query` (`results` = products it found,
+    filters aside). Searches that found something feed trending; ones that
+    found nothing are counted separately, for the sellers' demand insights.
+    Never raises.
+    """
     try:
-        if not results or results <= 0 or detect_bot(request):
+        if detect_bot(request):
             return
         term = normalize_term(query)
         if not term:
@@ -78,11 +84,18 @@ def record_search(request, query, results: int) -> None:
         digest = hashlib.md5(f"{visitor}|{term}".encode()).hexdigest()
         if not cache.add(f"search_trends:seen:{today:%Y%m%d}:{digest}", 1, 26 * 3600):
             return   # this shopper already counted for this term today
-        updated = SearchTermDaily.objects.filter(term=term, date=today).update(searchers=F('searchers') + 1)
-        if not updated:
-            obj, created = SearchTermDaily.objects.get_or_create(term=term, date=today, defaults={'searchers': 1})
+        found = bool(results and results > 0)
+        if found:
+            changes = {'searchers': F('searchers') + 1,
+                       'fewest_results': Least(Coalesce('fewest_results', Value(results)), Value(results))}
+        else:
+            changes = {'no_result_searchers': F('no_result_searchers') + 1}
+        if not SearchTermDaily.objects.filter(term=term, date=today).update(**changes):
+            obj, created = SearchTermDaily.objects.get_or_create(
+                term=term, date=today,
+                defaults={'searchers': 1, 'fewest_results': results} if found else {'no_result_searchers': 1})
             if not created:
-                SearchTermDaily.objects.filter(pk=obj.pk).update(searchers=F('searchers') + 1)
+                SearchTermDaily.objects.filter(pk=obj.pk).update(**changes)
     except Exception:
         logger.warning("record_search failed for %r", query, exc_info=True)
 
@@ -99,7 +112,7 @@ def _ranked_terms(limit: int) -> list[str]:
     """Terms from the last WINDOW_DAYS, best first, already filtered."""
     today = timezone.localdate()
     since = today - timedelta(days=WINDOW_DAYS - 1)
-    rows = (SearchTermDaily.objects.filter(date__gte=since)
+    rows = (SearchTermDaily.objects.filter(date__gte=since, searchers__gt=0)
             .order_by('-searchers').values_list('term', 'date', 'searchers')[:5000])
     score: dict[str, float] = {}
     total: dict[str, int] = {}

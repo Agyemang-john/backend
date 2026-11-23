@@ -49,7 +49,8 @@ class MessageSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Message
-        fields = ['id', 'conversation_id', 'side', 'body', 'created_at', 'client_id', 'sender_name', 'product']
+        fields = ['id', 'conversation_id', 'side', 'body', 'created_at', 'client_id', 'sender_name', 'product',
+                  'is_automatic']
 
     def get_sender_name(self, obj):
         # Shoppers see which team member answered ("Ama"), first name only.

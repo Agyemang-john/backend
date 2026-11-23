@@ -164,6 +164,10 @@ class PlaceOrderCODAPIView(APIView):
                 order.order_number = order_number
                 order.save()
 
+                # Stores' own systems (seller API webhooks, tools/webhooks.py).
+                from tools.webhooks import order_event_later
+                order_event_later(order.pk, 'order.created')
+
                 # Notify vendors
                 for vendor in unique_vendors:
                     if hasattr(vendor, "user") and vendor.user:

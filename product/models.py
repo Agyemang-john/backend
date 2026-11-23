@@ -301,6 +301,9 @@ class Product(models.Model):
     video = models.FileField(upload_to="video/%y", null=True, blank=True)
     price = models.DecimalField(max_digits=10, decimal_places=2, default="1.99", help_text="Base currency in GHS (e.g 70)")
     old_price = models.DecimalField(max_digits=10, decimal_places=2, default="2.99", help_text="Base currency in GHS (e.g 50)")
+    # What one unit costs the seller (buying + packing), never shown to shoppers.
+    # Used by the profit report (tools/profit.py). Empty = not given.
+    unit_cost = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     features = CKEditor5Field(null=True, blank=True, default="Black")
     description = CKEditor5Field(null=True, blank=True, default="I sell good products only")
     specifications = CKEditor5Field(null=True, blank=True, default="Black")
@@ -469,6 +472,8 @@ class Variants(models.Model):
     image = models.ImageField(upload_to="variants/", default="product.jpg")
     quantity = models.PositiveIntegerField(default=1)
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    # The seller's cost of one unit of this version; empty = the product's unit_cost.
+    unit_cost = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     # Seller's own code for this exact size/colour. Uniqueness within the
     # store is checked in the seller product serializer (it spans products).
     seller_sku = models.CharField(max_length=64, blank=True, default='')
@@ -956,6 +961,9 @@ class Coupon(models.Model):
         help_text="Stop once this much discount has been given (GHS). Empty = no budget.",
     )
     discount_spent = models.DecimalField(max_digits=12, decimal_places=2, default=0, editable=False)
+    # A personal coupon (win-back, thank-you: tools/promotions.py): only this shopper can use it.
+    only_for = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, null=True, blank=True,
+                                 related_name='personal_coupons')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1569,6 +1577,11 @@ class SearchTermDaily(models.Model):
     term      = models.CharField(max_length=80)
     date      = models.DateField(default=timezone.localdate)
     searchers = models.PositiveIntegerField(default=0)
+    # Shoppers whose search for the term found nothing at all (filters aside).
+    # Not used for trending; it feeds the sellers' demand insights (tools/demand.py).
+    no_result_searchers = models.PositiveIntegerField(default=0)
+    # Fewest products a search for the term found that day (thin supply).
+    fewest_results = models.PositiveIntegerField(null=True, blank=True)
 
     class Meta:
         unique_together = ('term', 'date')

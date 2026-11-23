@@ -136,6 +136,35 @@ class SubscriptionPlan(models.Model):
         help_text="Vendor can download orders and account statements as CSV."
     )
 
+    # Seller tools (tools/registry.py lists them; the Seller tools page reads it).
+    can_bulk_edit = models.BooleanField(
+        default=False, help_text="Change prices, stock and cost of many products at once (in the browser or by CSV).")
+    can_use_stock_forecast = models.BooleanField(
+        default=False, help_text="Days of stock left per product, reorder list and running-out alerts.")
+    listing_assistant_monthly_limit = models.PositiveIntegerField(
+        default=0, help_text="AI listing rewrites per month (0 = not included). Listing scores are included "
+                             "whenever this is above 0.")
+    can_use_profit_report = models.BooleanField(
+        default=False, help_text="Profit per product and month after fees, refunds, ads and the seller's cost price.")
+    can_use_price_insights = models.BooleanField(
+        default=False, help_text="Competitor prices for the same item, buy box wins and category price ranges.")
+    can_use_auto_repricer = models.BooleanField(
+        default=False, help_text="Rules that keep a price competitive automatically, within the seller's min/max.")
+    can_use_demand_insights = models.BooleanField(
+        default=False, help_text="What shoppers search for in the seller's categories, incl. searches that found nothing.")
+    can_use_promotions = models.BooleanField(
+        default=False, help_text="Promotions autopilot: scheduled sales, multi-buy deals and win-back coupons.")
+    broadcasts_monthly_limit = models.PositiveIntegerField(
+        default=0, help_text="Messages to followers and past buyers per month (0 = not included).")
+    can_print_labels = models.BooleanField(
+        default=False, help_text="Print shipping labels, packing slips and pick lists for many orders at once.")
+    can_use_chat_tools = models.BooleanField(
+        default=False, help_text="Saved replies, away messages and response-time stats in shopper chat.")
+    can_use_store_link = models.BooleanField(
+        default=False, help_text="Short store link, printable QR code and a branded store page.")
+    can_use_api = models.BooleanField(
+        default=False, help_text="API keys and webhooks to sync stock and orders with the seller's own systems.")
+
     # Commission & Financials
     commission_rate = models.DecimalField(
         max_digits=5,

@@ -64,7 +64,7 @@ class VariantsSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Variants
-        fields = ['id', 'title', 'size', 'color', 'options', 'image', 'quantity', 'price', 'seller_sku', 'gallery',
+        fields = ['id', 'title', 'size', 'color', 'options', 'image', 'quantity', 'price', 'unit_cost', 'seller_sku', 'gallery',
                   'fulfilment_type', 'sourcing_min_days', 'sourcing_max_days']
 
     def to_representation(self, instance):
@@ -136,7 +136,7 @@ class ProductSerializer(serializers.ModelSerializer):
             'delivery_options', 'sku', 'seller_sku', 'review_note', 'date', 'updated', 'views',
             'p_images', 'variants',
             'fulfilment_type', 'sourcing_min_days', 'sourcing_max_days', 'sourced_from',
-            'gtin', 'variation_axes',
+            'gtin', 'variation_axes', 'unit_cost',
         ]
         # review_note is written by Negromart reviewers (e.g. why it was rejected).
         # variation_axes is read from the raw request (JSON in multipart) in validate().

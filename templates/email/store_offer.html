@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ headline }}</title>
+</head>
+<body style="margin:0; padding:0; background:#f4f4f4; font-family:Arial, Helvetica, sans-serif; color:#111111;">
+  <div style="display:none; max-height:0; overflow:hidden;">{{ intro }}</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f4;">
+    <tr><td align="center" style="padding:24px 12px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px; background:#ffffff; border:1px solid #e3e3e3;">
+        <tr><td style="padding:20px 28px; border-bottom:2px solid #111111;">
+          <a href="{{ site_url }}" style="text-decoration:none;"><img src="{{ site_logo_url }}" alt="{{ site_name }}" height="36" style="display:block; border:0; height:36px;"></a>
+        </td></tr>
+        <tr><td style="padding:28px 28px 8px;">
+          <p style="margin:0 0 6px; font-size:13px; color:#555555; text-transform:uppercase; letter-spacing:1px;">From {{ store_name }}</p>
+          <p style="margin:0 0 10px; font-size:22px; line-height:30px; font-weight:bold;">{{ headline }}</p>
+          <p style="margin:0; font-size:15px; line-height:22px; color:#444444;">Hi {{ first_name }}, {{ intro }}</p>
+        </td></tr>
+        {% if code %}
+        <tr><td style="padding:18px 28px 0;">
+          <table role="presentation" cellpadding="0" cellspacing="0" style="border:2px dashed #111111;"><tr>
+            <td style="padding:14px 22px; text-align:center;">
+              <div style="font-size:12px; color:#555555;">Your code</div>
+              <div style="font-size:24px; font-weight:bold; letter-spacing:2px;">{{ code }}</div>
+              <div style="font-size:13px; color:#555555; margin-top:4px;">{{ percent }}% off {{ store_name }} items{% if min_spend %} when you spend GHS {{ min_spend }} or more{% endif %} · valid until {{ valid_to|date:"j M Y" }} · for you only, once</div>
+            </td>
+          </tr></table>
+        </td></tr>
+        {% endif %}
+        {% if body %}
+        <tr><td style="padding:18px 28px 0; font-size:15px; line-height:23px; color:#222222;">{{ body|linebreaksbr }}</td></tr>
+        {% endif %}
+        {% for item in products %}
+        <tr><td style="padding:14px 28px 0;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e3e3e3;"><tr>
+            {% if item.image_url %}<td width="84" valign="top" style="padding:12px;"><a href="{{ item.url }}"><img src="{{ item.image_url }}" alt="" width="84" height="84" style="display:block; width:84px; height:84px; object-fit:cover; border:1px solid #eeeeee;"></a></td>{% endif %}
+            <td valign="top" style="padding:12px;">
+              <a href="{{ item.url }}" style="font-size:15px; line-height:21px; font-weight:bold; color:#111111; text-decoration:none;">{{ item.title }}</a>
+              <div style="margin-top:6px; font-size:16px; font-weight:bold;">GHS {{ item.price|floatformat:2 }}</div>
+            </td>
+          </tr></table>
+        </td></tr>
+        {% endfor %}
+        <tr><td style="padding:22px 28px 28px;">
+          <a href="{{ store_url }}" style="display:inline-block; background:#111111; color:#ffffff; font-size:15px; font-weight:bold; text-decoration:none; padding:12px 22px;">{{ button_text|default:"Shop now" }}</a>
+        </td></tr>
+        <tr><td style="padding:18px 28px 24px; font-size:12px; line-height:18px; color:#777777; border-top:1px solid #eeeeee;">
+          You're getting this because you bought from or follow {{ store_name }} on {{ site_name }}.
+          <a href="{{ opt_out_url }}" style="color:#0b57d0;">Stop offers from stores</a>
+          <br>&copy; {{ year }} {{ site_name }}
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

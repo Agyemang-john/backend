@@ -12,6 +12,7 @@ from order.models import *
 from product.models import Product, Variants
 from product.listing import listing_page_size
 from product import variations
+from tools.storefront import public_branding
 from .product_filters import apply_filters as apply_product_filters, facets as product_facets
 
 from rest_framework import status, generics, permissions
@@ -832,6 +833,8 @@ class VendorDetailView(APIView):
             'views': vendor.views,
             # Storefront shows "Message" / "Contact business" only for stores on a plan with chat.
             'accepts_messages': store_accepts_messages(vendor),
+            # Accent colour, tagline, announcement, featured products (paid store tool; None otherwise).
+            'branding': public_branding(vendor, request),
         }, status=status.HTTP_200_OK)
 
     def post(self, request, slug):

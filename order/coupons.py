@@ -122,6 +122,8 @@ def check_live(coupon, user, strict=True):
     """The checks that don't depend on the cart. Raises CouponError."""
     if not coupon.active:
         raise CouponError('inactive', "This coupon is no longer available.")
+    if coupon.only_for_id and (user is None or getattr(user, 'pk', None) != coupon.only_for_id):
+        raise CouponError('not_yours', "This coupon was sent to another account.")
     now = timezone.now()
     if strict:
         if now < coupon.valid_from:

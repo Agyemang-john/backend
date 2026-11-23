@@ -1,0 +1,38 @@
+from django.urls import path
+
+from . import views
+
+urlpatterns = [
+    path('', views.ToolsOverviewView.as_view(), name='tools-overview'),
+    path('products/', views.ToolProductsView.as_view(), name='tools-products'),
+    path('bulk-edit/', views.BulkEditRowsView.as_view(), name='tools-bulk-edit'),
+    path('bulk-edit/action/', views.BulkEditActionView.as_view(), name='tools-bulk-edit-action'),
+    path('bulk-edit/csv/', views.BulkEditCsvView.as_view(), name='tools-bulk-edit-csv'),
+    path('stock/', views.StockForecastView.as_view(), name='tools-stock'),
+    path('demand/', views.DemandView.as_view(), name='tools-demand'),
+    path('broadcasts/', views.BroadcastsView.as_view(), name='tools-broadcasts'),
+    path('store/', views.StoreToolView.as_view(), name='tools-store'),
+    path('api-setup/', views.ApiSetupView.as_view(), name='tools-api-setup'),
+    path('api-setup/keys/<int:pk>/', views.ApiKeyView.as_view(), name='tools-api-key'),
+    path('api-setup/webhooks/', views.WebhooksView.as_view(), name='tools-webhooks'),
+    path('api-setup/webhooks/<int:pk>/', views.WebhookView.as_view(), name='tools-webhook'),
+    path('api/products/', views.ApiProductsView.as_view(), name='seller-api-products'),
+    path('api/orders/', views.ApiOrdersView.as_view(), name='seller-api-orders'),
+    path('api/stock/', views.ApiStockView.as_view(), name='seller-api-stock'),
+    path('s/<slug:handle>/', views.StoreLinkResolveView.as_view(), name='tools-store-link'),
+    path('chat/replies/', views.SavedRepliesView.as_view(), name='tools-chat-replies'),
+    path('chat/replies/<int:pk>/', views.SavedReplyView.as_view(), name='tools-chat-reply'),
+    path('chat/away/', views.AwayView.as_view(), name='tools-chat-away'),
+    path('labels/orders/', views.LabelOrdersView.as_view(), name='tools-label-orders'),
+    path('labels/', views.LabelsPdfView.as_view(), name='tools-labels'),
+    path('promotions/', views.PromotionsView.as_view(), name='tools-promotions'),
+    path('promotions/<str:kind>/', views.PromotionView.as_view(), name='tools-promotion'),
+    path('listing-doctor/', views.ListingScoresView.as_view(), name='tools-listing-doctor'),
+    path('listing-doctor/<int:pk>/suggest/', views.ListingSuggestView.as_view(), name='tools-listing-suggest'),
+    path('listing-doctor/<int:pk>/apply/', views.ListingApplyView.as_view(), name='tools-listing-apply'),
+    path('profit/', views.ProfitReportView.as_view(), name='tools-profit'),
+    path('pricing/', views.PriceInsightsView.as_view(), name='tools-pricing'),
+    path('pricing/rules/', views.RepricerRulesView.as_view(), name='tools-repricer-rules'),
+    path('pricing/rules/<int:product_id>/', views.RepricerRuleView.as_view(), name='tools-repricer-rule'),
+    path('pricing/changes/', views.PriceChangesView.as_view(), name='tools-price-changes'),
+]

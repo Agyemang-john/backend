@@ -76,6 +76,7 @@ INSTALLED_APPS = [
     'analytics',
     'audit',
     'twofactor',
+    'tools',
 ]
 
 MIDDLEWARE = [
@@ -282,6 +283,7 @@ REST_FRAMEWORK = {
         "bank_validation": "30/hour",
         "checkout": "20/hour",
         "password_reset": "3/min",
+        "seller_api": "120/min",
     },
 }
 
@@ -289,6 +291,12 @@ REST_FRAMEWORK = {
 # Cloudflare Turnstile CAPTCHA
 TURNSTILE_SECRET_KEY = config('TURNSTILE_SECRET_KEY', default='')
 TURNSTILE_SITE_KEY = config('TURNSTILE_SITE_KEY', default='')
+
+# Seller tools: the listing doctor's AI rewrites (tools/listing_doctor.py). Empty key = feature shows
+# "not set up yet" and no allowance is used.
+ANTHROPIC_API_KEY = config('ANTHROPIC_API_KEY', default='')
+LISTING_ASSISTANT_MODEL = config('LISTING_ASSISTANT_MODEL', default='claude-opus-5-5')
+LISTING_ASSISTANT_EFFORT = config('LISTING_ASSISTANT_EFFORT', default='medium')
 
 #Paystack configuration
 PAYSTACK_SECRET_KEY = config('PAYSTACK_SECRET_KEY')
@@ -666,6 +674,27 @@ CELERY_BEAT_SCHEDULE = {
     "sync-courier-tracking": {
         "task": "order.tasks.sync_courier_tracking",
         "schedule": 1800,  # 30 minutes
+    },
+    # Seller tools (tools/)
+    "tools-run-repricer": {
+        "task": "tools.tasks.run_repricer",
+        "schedule": 900,   # 15 minutes
+    },
+    "tools-run-promotions": {
+        "task": "tools.tasks.run_promotions",
+        "schedule": crontab(hour=9, minute=0),   # coupons land mid-morning, when people shop
+    },
+    "tools-refresh-demand-terms": {
+        "task": "tools.tasks.refresh_demand_terms",
+        "schedule": crontab(hour=2, minute=40),   # nightly, after the day's searches are in
+    },
+    "tools-purge-webhook-deliveries": {
+        "task": "tools.tasks.purge_webhook_deliveries",
+        "schedule": crontab(hour=3, minute=50),
+    },
+    "tools-stock-forecast-alerts": {
+        "task": "tools.tasks.stock_forecast_alerts",
+        "schedule": crontab(hour=7, minute=30),   # morning, before the store's day starts
     },
 
     # ── Vendor subscription lifecycle tasks ───────────────────────────────────

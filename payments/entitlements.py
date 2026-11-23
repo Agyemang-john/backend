@@ -196,4 +196,13 @@ def plan_summary(vendor):
         'max_images_per_product': plan.max_images_per_product if plan else None,
         'commission_rate': str(commission_rate(vendor)),
         'payout_delay_days': payout_delay_days(vendor),
+        # Paid seller tools: which are included, and the cheapest plan that unlocks the others.
+        'tools': _tools_summary(vendor),
     }
+
+
+def _tools_summary(vendor):
+    if vendor is None:
+        return {}
+    from tools.registry import summary
+    return {t['key']: {k: v for k, v in t.items() if k not in ('key', 'summary')} for t in summary(vendor)}

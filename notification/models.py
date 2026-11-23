@@ -119,6 +119,8 @@ class Notification(models.Model):
         ("vendor_orders_late",        "Orders Past Ship-by Date"),
         ("vendor_sourcing_due",       "Imported Orders Need Attention"),
         ("vendor_delivery_problem",   "Courier Delivery Problem"),
+        ("vendor_stock_running_out",  "Stock Running Out"),
+        ("vendor_repricer_at_minimum", "Repricer At Your Minimum"),
         ("vendor_return_requested",   "Return Requested"),
         ("customer_return_update",    "Return Update"),
 
@@ -133,6 +135,8 @@ class Notification(models.Model):
 
         # ── Re-engagement (engagement/) ──
         ("customer_cart_reminder",     "Items Left in Cart"),
+        ("customer_store_offer",       "Offer From a Store"),
+        ("customer_store_news",        "News From a Store"),
 
         # ── Buyer protection (protection/) ──
         ("customer_claim_update",      "Claim Update"),

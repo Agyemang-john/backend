@@ -80,6 +80,25 @@ class SubscriptionPlanAdmin(admin.ModelAdmin):
                 "is_featured_vendor",
             ),
         }),
+        ("Seller tools", {
+            "description": "Paid tools on the Seller tools page (tools/registry.py). The AI allowance is "
+                           "rewrites per month; 0 means the listing doctor is not included.",
+            "fields": (
+                "can_bulk_edit",
+                "can_use_stock_forecast",
+                "listing_assistant_monthly_limit",
+                "can_use_profit_report",
+                "can_use_price_insights",
+                "can_use_auto_repricer",
+                "can_use_demand_insights",
+                "can_use_promotions",
+                "broadcasts_monthly_limit",
+                "can_print_labels",
+                "can_use_chat_tools",
+                "can_use_store_link",
+                "can_use_api",
+            ),
+        }),
         ("Commission & financials", {
             "fields": ("commission_rate", "payout_delay_days"),
         }),

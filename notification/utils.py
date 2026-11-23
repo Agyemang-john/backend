@@ -57,6 +57,8 @@ VERB_META = {
     "vendor_orders_late":        {"title": "Orders Past Ship-by Date",  "icon": "schedule",        "color": "#C62828"},
     "vendor_sourcing_due":       {"title": "Imported Orders Need Attention", "icon": "flight_land", "color": "#E65100"},
     "vendor_delivery_problem":   {"title": "Courier Delivery Problem",  "icon": "report",          "color": "#C62828"},
+    "vendor_stock_running_out":  {"title": "Stock Running Out",         "icon": "inventory_2",     "color": "#E65100"},
+    "vendor_repricer_at_minimum": {"title": "Repricer At Your Minimum", "icon": "price_change",    "color": "#6D4C41"},
     "vendor_return_requested":   {"title": "Return Requested",          "icon": "assignment_return", "color": "#E65100"},
     "customer_return_update":    {"title": "Return Update",             "icon": "assignment_return", "color": "#1565C0"},
     # Reviews
@@ -68,6 +70,8 @@ VERB_META = {
     "customer_question_answered": {"title": "Your Question Was Answered", "icon": "question_answer", "color": "#2E7D32"},
     # Re-engagement
     "customer_cart_reminder":     {"title": "Still Thinking It Over?",  "icon": "shopping_cart",   "color": "#E65100"},
+    "customer_store_offer":       {"title": "A Coupon For You",         "icon": "local_offer",     "color": "#2E7D32"},
+    "customer_store_news":        {"title": "News From a Store",        "icon": "storefront",      "color": "#1565C0"},
     # Buyer protection
     "customer_claim_update":      {"title": "Claim Update",             "icon": "gavel",           "color": "#6A1B9A"},
     "vendor_claim_update":        {"title": "Claim Update",             "icon": "gavel",           "color": "#C62828"},
