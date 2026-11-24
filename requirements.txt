@@ -76,7 +76,7 @@ python-magic==0.4.27
 PyPDF2==3.0.1
 shortuuid==1.0.13
 colorama==0.4.6
-typing_extensions==4.12.2
+typing_extensions==4.16.0
 whitenoise==6.9.0
 gunicorn==23.0.0
 uvicorn[standard]==0.32.0
