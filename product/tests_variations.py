@@ -161,11 +161,83 @@ class StorefrontSelectorTests(VariationTestCase):
         self.assertTrue(flavours['Chocolate']['available'])
         self.assertFalse(flavours['Chocolate']['in_stock'])
         # Strawberry only comes in 1 kg: clicking it opens that one.
-        self.assertFalse(flavours['Strawberry']['available'])
+        self.assertTrue(flavours['Strawberry']['available'])
         self.assertEqual(flavours['Strawberry']['variant_id'], self.pick('Strawberry', '1 kg').pk)
-        # 1 kg keeps Vanilla.
+        # Sizes follow the flavour: Vanilla comes in both; 1 kg keeps Vanilla.
+        self.assertEqual(list(sizes), ['500 g', '1 kg'])
         self.assertEqual(sizes['1 kg']['variant_id'], self.pick('Vanilla', '1 kg').pk)
         self.assertTrue(sizes['500 g']['selected'])
+
+    def test_later_rows_only_show_what_the_choices_above_come_in(self):
+        """Pringles: Original 12; Barbecue 12 + 24; Sour Cream 24. Picking a flavour shows only its packs."""
+        res = self.create(
+            [{'key': 'flavor'}, {'key': 'pack_size'}],
+            [self.row({'flavor': 'Original', 'pack_size': '12 pack'}, price='20.00'),
+             self.row({'flavor': 'Barbecue', 'pack_size': '12 pack'}, price='21.00'),
+             self.row({'flavor': 'Barbecue', 'pack_size': '24 pack'}, price='38.00', quantity=0),
+             self.row({'flavor': 'Sour Cream', 'pack_size': '24 pack'}, price='39.00')],
+            title='Potato Crisps', slug='potato-crisps')
+        self.assertEqual(res.status_code, 201, res.content)
+        chips = Product.objects.get(pk=res.data['id'])
+        v = {(x.options['flavor'], x.options['pack_size']): x for x in chips.variants.all()}
+        every = list(chips.variants.order_by('id'))
+        price = lambda x: x.price  # noqa: E731
+
+        def packs(current):
+            rows = variations.selector(chips, current, every, price_of=price)
+            return rows, {e['value']: e for e in rows[1]['values']}
+
+        rows, shown = packs(v[('Barbecue', '12 pack')])
+        self.assertEqual([e['value'] for e in rows[0]['values']], ['Original', 'Barbecue', 'Sour Cream'])
+        self.assertEqual(list(shown), ['12 pack', '24 pack'])
+        self.assertFalse(shown['24 pack']['in_stock'])
+        self.assertEqual(shown['24 pack']['price'], Decimal('38.00'))
+        flavours = {e['value']: e for e in rows[0]['values']}
+        self.assertEqual(flavours['Original']['variant_id'], v[('Original', '12 pack')].pk, 'keeps the 12 pack')
+        self.assertEqual(flavours['Sour Cream']['variant_id'], v[('Sour Cream', '24 pack')].pk, 'only pack it has')
+        self.assertEqual(flavours['Barbecue']['price'], Decimal('21.00'))
+        self.assertTrue(flavours['Barbecue']['price_from'], 'Barbecue still depends on the pack')
+
+        _, shown = packs(v[('Sour Cream', '24 pack')])
+        self.assertEqual(list(shown), ['24 pack'], 'Sour Cream only comes in 24')
+        _, shown = packs(v[('Original', '12 pack')])
+        self.assertEqual(list(shown), ['12 pack'])
+
+    def test_three_options_each_row_narrows_by_everything_above(self):
+        """Flavour → Pack → Can size. Row 3 depends on rows 1 AND 2."""
+        combos = [('Original', '12 pack', '40 g'), ('Original', '12 pack', '158 g'),
+                  ('Original', '24 pack', '40 g'),
+                  ('Barbecue', '12 pack', '158 g'), ('Barbecue', '24 pack', '40 g'), ('Barbecue', '24 pack', '158 g')]
+        res = self.create(
+            [{'key': 'flavor'}, {'key': 'pack_size'}, {'key': 'size'}],
+            [self.row({'flavor': f, 'pack_size': p, 'size': s}) for f, p, s in combos],
+            title='Crisps Variety', slug='crisps-variety')
+        self.assertEqual(res.status_code, 201, res.content)
+        chips = Product.objects.get(pk=res.data['id'])
+        v = {(x.options['flavor'], x.options['pack_size'], x.options['size']): x for x in chips.variants.all()}
+        every = list(chips.variants.order_by('id'))
+
+        def rows(*combo):
+            return [[e['value'] for e in r['values']] for r in variations.selector(chips, v[combo], every)]
+
+        self.assertEqual(rows('Original', '12 pack', '40 g'),
+                         [['Original', 'Barbecue'], ['12 pack', '24 pack'], ['40 g', '158 g']])
+        self.assertEqual(rows('Original', '24 pack', '40 g')[2], ['40 g'], 'Original 24 only comes in 40 g')
+        self.assertEqual(rows('Barbecue', '12 pack', '158 g')[2], ['158 g'], 'Barbecue 12 only comes in 158 g')
+        self.assertEqual(rows('Barbecue', '24 pack', '158 g')[2], ['40 g', '158 g'])
+
+        # Switching flavour keeps pack and can size when that version exists...
+        opts = variations.selector(chips, v[('Original', '24 pack', '40 g')], every)
+        barbecue = next(e for e in opts[0]['values'] if e['value'] == 'Barbecue')
+        self.assertEqual(barbecue['variant_id'], v[('Barbecue', '24 pack', '40 g')].pk)
+        # ...and otherwise keeps as much as it can (Original 12/158 → Barbecue 12/158).
+        opts = variations.selector(chips, v[('Original', '12 pack', '158 g')], every)
+        barbecue = next(e for e in opts[0]['values'] if e['value'] == 'Barbecue')
+        self.assertEqual(barbecue['variant_id'], v[('Barbecue', '12 pack', '158 g')].pk)
+        # Picking a pack the current size doesn't come in opens the closest one.
+        opts = variations.selector(chips, v[('Barbecue', '12 pack', '158 g')], every)
+        pack24 = next(e for e in opts[1]['values'] if e['value'] == '24 pack')
+        self.assertEqual(pack24['variant_id'], v[('Barbecue', '24 pack', '158 g')].pk, 'keeps flavour and size')
 
     def test_product_page_api(self):
         url = f'/api/v1/product/{self.product.sku}/{self.product.slug}/'

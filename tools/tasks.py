@@ -71,3 +71,10 @@ def purge_webhook_deliveries():
     """Daily: drop webhook delivery logs older than two weeks."""
     from tools.webhooks import purge_old
     return purge_old()
+
+
+@shared_task(soft_time_limit=120, time_limit=180)
+def requeue_stuck_broadcasts():
+    """Every few minutes: send store messages left queued, close ones that stopped half-way."""
+    from tools.broadcasts import requeue_stuck
+    return requeue_stuck()

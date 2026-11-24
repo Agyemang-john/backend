@@ -246,12 +246,18 @@ def selector(product, current, variants, image_url=lambda v: None, price_of=lamb
     variant to open when it is clicked:
 
         [{"key": "flavor", "label": "Flavour", "kind": "button", "selected": "Vanilla",
-          "values": [{"value": "Vanilla", "variant_id": 4, "in_stock": true,
-                      "available": true, "selected": true, "image": "...", "swatch": null}]}]
+          "values": [{"value": "Vanilla", "variant_id": 4, "in_stock": true, "available": true,
+                      "selected": true, "image": "...", "swatch": null, "price": 12.5, "price_from": false}]}]
 
-    Clicking a value keeps the shopper's other choices where such a variant
-    exists ("available"), preferring one in stock; otherwise it opens the
-    closest variant with that value, as Amazon does.
+    The rows cascade, like Walmart and Amazon: the first option (in the order
+    the seller set) lists every value; each later row lists only the values
+    sold with the choices in the rows above it. So with Flavour then Pack
+    size, picking Barbecue shows only the packs Barbecue comes in.
+
+    Clicking a value keeps the shopper's choices in the other rows where such
+    a version exists, preferring one in stock; otherwise it opens the closest
+    version with that value. "price" is that value's price, or the lowest of
+    several ("price_from") when the rows below still change it.
     """
     axes = effective_axes(product)
     if not axes or current is None:
@@ -265,11 +271,13 @@ def selector(product, current, variants, image_url=lambda v: None, price_of=lamb
         return (same, v.quantity > 0, -v.pk)
 
     result = []
-    for a in axes:
+    for index, a in enumerate(axes):
         key = a['key']
-        others = [b['key'] for b in axes if b['key'] != key]
+        above = [b['key'] for b in axes[:index]]
+        # Only versions sold with the shopper's choices in the rows above.
+        pool = [(v, opts) for v, opts in rows if all(opts.get(k) == chosen.get(k) for k in above)] or rows
         values, order = {}, []
-        for v, opts in rows:
+        for v, opts in pool:
             value = opts.get(key)
             if not value:
                 continue
@@ -280,18 +288,18 @@ def selector(product, current, variants, image_url=lambda v: None, price_of=lamb
         entries = []
         for value in order:
             candidates = values[value]
-            best_v, best_opts = max(candidates, key=lambda c: score(c[1], c[0], key))
-            exact = [v for v, opts in candidates
-                     if all(opts.get(k) == chosen.get(k) for k in others)]
+            best_v, _ = max(candidates, key=lambda c: score(c[1], c[0], key))
+            prices = {p for p in (price_of(v) for v, _ in candidates) if p is not None}
             entries.append({
                 'value': value,
                 'variant_id': best_v.pk,
-                'available': bool(exact),
-                'in_stock': any(v.quantity > 0 for v in (exact or [best_v])),
+                'available': True,
+                'in_stock': any(v.quantity > 0 for v, _ in candidates),
                 'selected': chosen.get(key) == value,
                 'image': image_url(best_v) if a['kind'] == 'swatch' else None,
                 'swatch': _colour_code(best_v) if key == 'color' else None,
-                'price': price_of(best_v),
+                'price': min(prices) if prices else None,
+                'price_from': len(prices) > 1,
             })
         result.append({**a, 'selected': chosen.get(key), 'values': entries})
     return result

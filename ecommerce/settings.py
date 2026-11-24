@@ -688,6 +688,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "tools.tasks.refresh_demand_terms",
         "schedule": crontab(hour=2, minute=40),   # nightly, after the day's searches are in
     },
+    "tools-requeue-stuck-broadcasts": {
+        "task": "tools.tasks.requeue_stuck_broadcasts",
+        "schedule": 300,   # every 5 minutes
+    },
     "tools-purge-webhook-deliveries": {
         "task": "tools.tasks.purge_webhook_deliveries",
         "schedule": crontab(hour=3, minute=50),

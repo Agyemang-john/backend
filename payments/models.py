@@ -156,6 +156,8 @@ class SubscriptionPlan(models.Model):
         default=False, help_text="Promotions autopilot: scheduled sales, multi-buy deals and win-back coupons.")
     broadcasts_monthly_limit = models.PositiveIntegerField(
         default=0, help_text="Messages to followers and past buyers per month (0 = not included).")
+    broadcast_sms_monthly_limit = models.PositiveIntegerField(
+        default=0, help_text="SMS texts per month for those messages, one per shopper reached (0 = no SMS).")
     can_print_labels = models.BooleanField(
         default=False, help_text="Print shipping labels, packing slips and pick lists for many orders at once.")
     can_use_chat_tools = models.BooleanField(

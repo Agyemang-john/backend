@@ -124,12 +124,15 @@ class BroadcastsView(APIView):
         vendor = get_current_vendor(request.user)
         item = next(t for t in registry.summary(vendor) if t['key'] == 'broadcasts')
         wait = broadcasts.next_allowed(vendor)
+        sms_limit, sms_used = broadcasts.sms_allowance(vendor)
         return Response({
             'allowance': item.get('allowance', 0), 'used': item.get('used', 0),
+            'sms_allowance': sms_limit, 'sms_used': sms_used,
             'audience_sizes': broadcasts.sizes(vendor),
             'next_allowed_at': wait.isoformat() if wait else None,
             'results': [{'id': b.pk, 'subject': b.subject, 'message': b.message, 'audience': b.audience,
                          'status': b.status, 'recipients': b.recipients, 'emailed': b.emailed,
+                         'with_sms': b.with_sms, 'sms_sent': b.sms_sent, 'error': b.error,
                          'created_at': b.created_at.isoformat(), 'sent_at': b.sent_at.isoformat() if b.sent_at else None}
                         for b in Broadcast.objects.filter(vendor=vendor).order_by('-created_at')[:30]],
         })
@@ -138,8 +141,11 @@ class BroadcastsView(APIView):
         vendor = get_current_vendor(request.user)
         d = request.data
         try:
+            if d.get('preview'):
+                return Response(broadcasts.preview(vendor, request.user, d.get('subject'), d.get('message'),
+                                                   d.get('product_ids') or []))
             b = broadcasts.create(vendor, request.user, d.get('audience'), d.get('subject'), d.get('message'),
-                                  d.get('product_ids') or [])
+                                  d.get('product_ids') or [], with_sms=bool(d.get('with_sms')))
         except broadcasts.BroadcastError as exc:
             return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response({'id': b.pk, 'status': b.status}, status=status.HTTP_201_CREATED)

@@ -394,7 +394,7 @@ class BroadcastTests(ToolsTestCase):
         from tools.models import Broadcast
         EmailOptOut.objects.create(user=self.fan, category=EmailOptOut.STORE_OFFERS)
         sizes = self.api.get('/api/v1/tools/broadcasts/').data['audience_sizes']
-        self.assertEqual(sizes, {'followers': 1, 'buyers': 1, 'everyone': 2})
+        self.assertEqual({k: v['people'] for k, v in sizes.items()}, {'followers': 1, 'buyers': 1, 'everyone': 2})
 
         res = self.post(product_ids=[self.product.pk])
         self.assertEqual(res.status_code, 201, res.content)
@@ -420,6 +420,103 @@ class BroadcastTests(ToolsTestCase):
         res = self.post()
         self.assertEqual(res.status_code, 400)
         self.assertIn('all 1 messages', res.data['error'])
+
+    def verify_phone(self, user, phone):
+        type(user).objects.filter(pk=user.pk).update(phone=phone, phone_verified_at=timezone.now())
+
+    def test_sms_goes_to_verified_ghana_numbers_and_unused_texts_come_back(self):
+        from unittest import mock
+
+        from tools.models import Broadcast
+        SubscriptionPlan.objects.filter(pk=self.plan.pk).update(broadcast_sms_monthly_limit=10)
+        self.verify_phone(self.fan, '024 412 3456')
+        self.verify_phone(self.customer, '+44 7700 900123')          # not Ghanaian: no SMS
+        sizes = self.api.get('/api/v1/tools/broadcasts/').data['audience_sizes']
+        self.assertEqual(sizes['everyone'], {'people': 2, 'sms': 1})
+
+        client = mock.MagicMock()
+        client.send_sms.return_value = {'status': 'success'}
+        with mock.patch('userauths.tasks._get_sms_client', return_value=client):
+            res = self.post(with_sms=True)
+        self.assertEqual(res.status_code, 201, res.content)
+        b = Broadcast.objects.get(pk=res.data['id'])
+        self.assertEqual((b.status, b.sms_reserved, b.sms_sent, b.error), ('sent', 1, 1, ''))
+        kwargs = client.send_sms.call_args.kwargs
+        self.assertEqual(kwargs['recipients'], ['233244123456'])
+        self.assertTrue(kwargs['message'].startswith(f'{self.vendor.name}: New arrivals.'))
+        self.assertIn('Stop:', kwargs['message'])
+        self.assertLessEqual(len(kwargs['message']), 306)
+        self.assertEqual(ToolUsage.used(self.vendor, 'broadcast_sms'), 1)
+
+    def test_sms_failure_keeps_the_message_and_returns_the_texts(self):
+        from unittest import mock
+
+        from tools.models import Broadcast
+        SubscriptionPlan.objects.filter(pk=self.plan.pk).update(broadcast_sms_monthly_limit=10)
+        self.verify_phone(self.fan, '0244123456')
+        client = mock.MagicMock()
+        client.send_sms.return_value = {'status': 'error', 'message': 'Insufficient balance'}
+        with mock.patch('userauths.tasks._get_sms_client', return_value=client):
+            res = self.post(with_sms=True)
+        b = Broadcast.objects.get(pk=res.data['id'])
+        self.assertEqual((b.status, b.recipients, b.sms_sent), ('sent', 2, 0))
+        self.assertIn('Insufficient balance', b.error)
+        self.assertEqual(ToolUsage.used(self.vendor, 'broadcast_sms'), 0)
+
+    def test_sms_needs_plan_and_enough_texts(self):
+        self.verify_phone(self.fan, '0244123456')
+        res = self.post(with_sms=True)
+        self.assertIn('does not include SMS', res.data['error'])
+        SubscriptionPlan.objects.filter(pk=self.plan.pk).update(broadcast_sms_monthly_limit=1)
+        ToolUsage.objects.create(vendor=self.vendor, tool='broadcast_sms', month=timezone.localdate().replace(day=1), count=1)
+        res = self.post(with_sms=True)
+        self.assertIn('you have 0 left', res.data['error'])
+        self.assertEqual(ToolUsage.used(self.vendor, 'broadcasts'), 0, 'refused: no message used either')
+
+    def test_preview_goes_to_the_seller_only_and_costs_nothing(self):
+        from django.core import mail
+        res = self.api.post('/api/v1/tools/broadcasts/', {'preview': True, 'subject': 'New arrivals',
+                                                          'message': 'Fresh kettles just landed this week.'}, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertTrue(res.data['emailed'])
+        self.assertEqual([m.to for m in mail.outbox], [[self.owner.email]])
+        self.assertTrue(mail.outbox[0].subject.startswith('[Preview]'))
+        self.assertIn('Stop:', res.data['sms_text'])
+        self.assertEqual(ToolUsage.used(self.vendor, 'broadcasts'), 0)
+        self.assertIsNone(broadcasts_module().next_allowed(self.vendor), 'a preview does not start the 24h wait')
+
+    def test_empty_audience_explains_why_and_team_is_left_out(self):
+        self.vendor.followers.clear()
+        self.vendor.followers.add(self.owner)                       # the seller following their own store
+        Order.objects.filter(pk=self.order.pk).update(is_ordered=False)
+        res = self.post(audience='followers')
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('Your own team never gets your messages', res.data['error'])
+
+    def test_stuck_messages_are_sent_or_closed(self):
+        from datetime import timedelta as td
+        from unittest import mock
+
+        from tools.models import Broadcast
+        queued = Broadcast.objects.create(vendor=self.vendor, audience='everyone', subject='Hello there',
+                                          message='Fresh kettles just landed.')
+        half = Broadcast.objects.create(vendor=self.vendor, audience='everyone', subject='Hello again',
+                                        message='Fresh kettles just landed.', status='sending', sms_reserved=3)
+        Broadcast.objects.filter(pk__in=[queued.pk, half.pk]).update(created_at=timezone.now() - td(hours=2))
+        ToolUsage.objects.create(vendor=self.vendor, tool='broadcasts', month=timezone.localdate().replace(day=1), count=2)
+        ToolUsage.objects.create(vendor=self.vendor, tool='broadcast_sms', month=timezone.localdate().replace(day=1), count=3)
+        with mock.patch('tools.tasks.send_broadcast.delay') as send:
+            result = broadcasts_module().requeue_stuck()
+        send.assert_called_once_with(queued.pk)
+        self.assertEqual(result, {'requeued': 1, 'stopped': 1})
+        half.refresh_from_db()
+        self.assertEqual(half.status, 'failed')
+        self.assertEqual((ToolUsage.used(self.vendor, 'broadcasts'), ToolUsage.used(self.vendor, 'broadcast_sms')), (1, 0))
+
+
+def broadcasts_module():
+    from tools import broadcasts
+    return broadcasts
 
 
 class LabelTests(ToolsTestCase):
@@ -685,3 +782,28 @@ class SellerApiTests(ToolsTestCase):
         with mock.patch('tools.tasks.deliver_webhook.delay'), self.captureOnCommitCallbacks(execute=True):
             order.save()                                        # nothing changed: no new event
         self.assertEqual(WebhookDelivery.objects.filter(webhook=hook).count(), 1)
+
+
+class EmptyStoreTests(ToolsTestCase):
+    """A brand-new store (no products, orders, followers or settings) opens every tool page without errors."""
+
+    PAGES = ['', 'products/', 'products/?all=1', 'bulk-edit/', 'bulk-edit/csv/', 'stock/', 'demand/', 'broadcasts/',
+             'store/', 'api-setup/', 'chat/replies/', 'chat/away/', 'labels/orders/', 'promotions/',
+             'listing-doctor/', 'profit/', 'pricing/', 'pricing/rules/', 'pricing/changes/']
+
+    def test_every_tool_page_loads_for_a_new_store(self):
+        from payments.models import VendorSubscription
+        owner = make_user(30)
+        store = Vendor.objects.create(name='Brand New Shop', user=owner, email='new-shop@example.com',
+                                      contact='+233550003030', is_approved=True, status='VERIFIED')
+        VendorSubscription.objects.create(vendor=store, plan=self.plan, status='active',
+                                          end_date=timezone.now() + timedelta(days=30))
+        api = vendor_client(owner)
+        for page in self.PAGES:
+            with self.subTest(page=page):
+                res = api.get(f'/api/v1/tools/{page}')
+                self.assertEqual(res.status_code, 200, getattr(res, 'data', res.content[:300]))
+        res = api.post('/api/v1/tools/broadcasts/', {'audience': 'everyone', 'subject': 'Hello there',
+                                                     'message': 'Our very first message.'}, format='json')
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('Nobody in this audience yet', res.data['error'])

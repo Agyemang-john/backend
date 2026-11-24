@@ -40,6 +40,21 @@ class ToolUsage(models.Model):
         """Return a unit taken for work that then failed."""
         cls.objects.filter(vendor=vendor, tool=tool, month=month_start(), count__gt=0).update(count=F('count') - 1)
 
+    @classmethod
+    def take_many(cls, vendor, tool, n, limit):
+        """Use n units at once if that many are left this month (atomic, like take)."""
+        if n <= 0:
+            return True
+        month = month_start()
+        cls.objects.get_or_create(vendor=vendor, tool=tool, month=month)
+        return bool(cls.objects.filter(vendor=vendor, tool=tool, month=month, count__lte=limit - n)
+                    .update(count=F('count') + n))
+
+    @classmethod
+    def give_back_many(cls, vendor, tool, n):
+        if n > 0:
+            cls.objects.filter(vendor=vendor, tool=tool, month=month_start(), count__gte=n).update(count=F('count') - n)
+
 
 class RepricerRule(models.Model):
     """Keeps one listing's price competitive within the seller's limits (tools/repricer.py)."""
@@ -124,6 +139,10 @@ class Broadcast(models.Model):
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=QUEUED)
     recipients = models.PositiveIntegerField(default=0)
     emailed = models.PositiveIntegerField(default=0)
+    with_sms = models.BooleanField(default=False)
+    sms_reserved = models.PositiveIntegerField(default=0)      # SMS allowance taken when queued
+    sms_sent = models.PositiveIntegerField(default=0)
+    error = models.CharField(max_length=200, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
     sent_at = models.DateTimeField(null=True, blank=True)
 

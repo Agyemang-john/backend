@@ -533,6 +533,11 @@ class ProductSerializer(serializers.ModelSerializer):
         if instance.status == 'draft' and (instance.image or instance.variants.exclude(image='product.jpg').exists()):
             instance.status = 'in_review'
             instance.save(update_fields=['status'])
+        # A rejected product the seller has edited goes back to review (sellers can't set the status
+        # themselves). The reviewer's note stays until the next decision, so the seller can still read it.
+        elif instance.status == 'rejected':
+            instance.status = 'in_review'
+            instance.save(update_fields=['status'])
         return instance
  
 from product.models import ProductReview

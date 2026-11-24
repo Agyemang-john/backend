@@ -279,6 +279,21 @@ class DraftFinishTests(BulkTestCase):
         self.product.refresh_from_db()
         self.assertEqual(self.product.status, 'in_review')
 
+    def test_editing_a_rejected_product_sends_it_back_to_review(self):
+        Product.objects.filter(pk=self.product.pk).update(status='rejected', review_note='Photo has a watermark.')
+        res = self.client.put(f'/api/v1/vendor/products/{self.product.pk}/', self.form(self.product), format='multipart')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.status, 'in_review')
+        self.assertEqual(self.product.review_note, 'Photo has a watermark.', 'kept until the next decision')
+
+    def test_editing_a_live_product_keeps_it_live(self):
+        Product.objects.filter(pk=self.product.pk).update(status='published')
+        self.client.put(f'/api/v1/vendor/products/{self.product.pk}/', self.form(self.product, price='50'),
+                        format='multipart')
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.status, 'published')
+
 
 class RemoteImageTests(OpsTestCase):
 

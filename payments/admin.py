@@ -93,6 +93,7 @@ class SubscriptionPlanAdmin(admin.ModelAdmin):
                 "can_use_demand_insights",
                 "can_use_promotions",
                 "broadcasts_monthly_limit",
+                "broadcast_sms_monthly_limit",
                 "can_print_labels",
                 "can_use_chat_tools",
                 "can_use_store_link",
