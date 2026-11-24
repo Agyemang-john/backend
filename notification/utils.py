@@ -103,6 +103,41 @@ def send_notification(recipient, verb, target=None, actor=None, data=None):
     return notification
 
 
+def push_new_notification(notification):
+    """
+    Ring the recipient's bells for a saved notification (after commit). The
+    post_save signal does this for .save()/.create(); call it yourself after
+    bulk_create, which sends no signals.
+    """
+    import logging
+
+    from asgiref.sync import async_to_sync
+    from channels.layers import get_channel_layer
+    from django.db import transaction
+
+    event = {
+        "type": "new_notification",
+        "notification_id": notification.id,
+        # Lets each socket skip notifications meant for the other app (models.in_app).
+        "verb": notification.verb,
+        "audience": (notification.data or {}).get("audience"),
+    }
+    group = f"user_{notification.recipient_id}"
+
+    def push():
+        layer = get_channel_layer()
+        if not layer:
+            return
+        try:
+            async_to_sync(layer.group_send)(group, event)
+        except Exception:
+            logging.getLogger(__name__).exception("notification push to %s failed", group)
+
+    # After commit: the sockets recount from the database, and inside an open
+    # transaction they would count without this row.
+    transaction.on_commit(push)
+
+
 def push_unread_count(user_id):
     """
     Read state changed outside a notification socket (REST, chat read): every

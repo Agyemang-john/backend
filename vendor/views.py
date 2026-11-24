@@ -847,6 +847,8 @@ class VendorDetailView(APIView):
         else:
             vendor.followers.add(request.user)
             is_following = True
+        from tools.broadcasts import forget_sizes
+        forget_sizes(vendor.pk)       # "Messages to followers" shows the new count straight away
         return Response({'is_following': is_following, 'followers_count': vendor.followers.count()})
 
 

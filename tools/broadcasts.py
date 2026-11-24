@@ -43,7 +43,7 @@ BUYERS_WINDOW_DAYS = 365
 MIN_GAP = timedelta(hours=24)
 MAX_PRODUCTS = 4
 PREVIEWS_PER_DAY = 10
-SIZES_CACHE = 300
+SIZES_CACHE = 60
 STUCK_QUEUED = timedelta(minutes=3)
 STUCK_SENDING = timedelta(hours=1)
 
@@ -106,9 +106,18 @@ def sms_numbers(user_ids):
     return out
 
 
+def sizes_key(vendor_id):
+    return f'tools:broadcast_sizes:{vendor_id}'
+
+
+def forget_sizes(vendor_id):
+    """Someone followed/unfollowed: the seller page must not keep showing the old count (it blocks Send at 0)."""
+    cache.delete(sizes_key(vendor_id))
+
+
 def sizes(vendor):
-    """People per audience, and how many of them SMS can reach (cached a few minutes)."""
-    key = f'tools:broadcast_sizes:{vendor.pk}'
+    """People per audience, and how many of them SMS can reach (cached a minute)."""
+    key = sizes_key(vendor.pk)
     found = cache.get(key)
     if found is None:
         groups = _groups(vendor)
@@ -211,7 +220,7 @@ def create(vendor, user, audience, subject, message, product_ids, with_sms=False
     broadcast = Broadcast.objects.create(vendor=vendor, created_by=user, audience=audience, subject=subject,
                                          message=message, product_ids=ids, with_sms=bool(sms_count),
                                          sms_reserved=sms_count)
-    cache.delete(f'tools:broadcast_sizes:{vendor.pk}')
+    forget_sizes(vendor.pk)
     from tools.tasks import send_broadcast
     transaction.on_commit(lambda: send_broadcast.delay(broadcast.pk))
     return broadcast
@@ -243,12 +252,23 @@ def _email(user, store, subject, message, products, preview=False):
     return build_email(user, f'[Preview] {title}' if preview else title, 'store_offer', ctx)
 
 
-def _notification(user, store, subject, message):
+def _notification(user, store, subject, message, preview=False):
+    """A preview goes to a seller, whose dashboard bell hides customer_* verbs: send it as an announcement."""
     from notification.models import Notification
     from notification.utils import VERB_META
-    return Notification(recipient=user, verb='customer_store_news', data={
-        **VERB_META.get('customer_store_news', {}), 'title': f'{store.name}: {subject}', 'message': message[:200],
-        'url': f'/seller/{store.slug}', 'store': store.name})
+    verb = 'announcement' if preview else 'customer_store_news'
+    title = f'{store.name}: {subject}'
+    return Notification(recipient=user, verb=verb, data={
+        **VERB_META['customer_store_news'], 'title': f'[Preview] {title}' if preview else title,
+        'message': message[:200], 'url': f'/seller/{store.slug}', 'store': store.name})
+
+
+def _create_and_push(notifications):
+    """bulk_create skips post_save, so the bells would stay quiet until a reload: ring them here."""
+    from notification.models import Notification
+    from notification.utils import push_new_notification
+    for n in Notification.objects.bulk_create(notifications, batch_size=BATCH):
+        push_new_notification(n)
 
 
 def _send_sms(numbers, text):
@@ -268,7 +288,6 @@ def deliver(broadcast_id):
     """Send one queued broadcast (Celery). Safe to run twice: only a queued broadcast is sent."""
     from engagement.emails import opted_out_user_ids, send_batch
     from engagement.models import EmailOptOut
-    from notification.models import Notification
     from tools.models import ToolUsage
 
     claimed = Broadcast.objects.filter(pk=broadcast_id, status=Broadcast.QUEUED).update(status=Broadcast.SENDING)
@@ -285,8 +304,7 @@ def deliver(broadcast_id):
         for start in range(0, len(ids), BATCH):
             chunk = ids[start:start + BATCH]
             users = list(User.objects.filter(pk__in=chunk, is_active=True).only('pk', 'email', 'first_name'))
-            Notification.objects.bulk_create([_notification(u, store, b.subject, b.message) for u in users],
-                                             batch_size=BATCH)
+            _create_and_push([_notification(u, store, b.subject, b.message) for u in users])
             blocked = opted_out_user_ids([u.pk for u in users], EmailOptOut.STORE_OFFERS)
             emailed += send_batch([_email(u, store, b.subject, b.message, products)
                                    for u in users if u.email and u.pk not in blocked])
@@ -322,8 +340,7 @@ def preview(vendor, user, subject, message, product_ids):
     if cache.incr(key) > PREVIEWS_PER_DAY:
         raise BroadcastError(f'Up to {PREVIEWS_PER_DAY} previews a day. Try again tomorrow.')
     from engagement.emails import send_batch
-    from notification.models import Notification
-    Notification.objects.bulk_create([_notification(user, vendor, subject, message)])
+    _create_and_push([_notification(user, vendor, subject, message, preview=True)])
     emailed = send_batch([_email(user, vendor, subject, message, _products(ids), preview=True)]) if user.email else 0
     return {'emailed': bool(emailed), 'email': user.email, 'sms_text': sms_text(vendor, subject, message)}
 

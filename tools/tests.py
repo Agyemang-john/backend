@@ -485,6 +485,30 @@ class BroadcastTests(ToolsTestCase):
         self.assertEqual(ToolUsage.used(self.vendor, 'broadcasts'), 0)
         self.assertIsNone(broadcasts_module().next_allowed(self.vendor), 'a preview does not start the 24h wait')
 
+    def test_following_updates_the_audience_count_straight_away(self):
+        from rest_framework.test import APIClient
+        self.vendor.followers.clear()
+        self.assertEqual(self.api.get('/api/v1/tools/broadcasts/').data['audience_sizes']['followers']['people'], 0)
+        shopper = APIClient()
+        shopper.force_authenticate(self.fan)
+        shopper.post(f'/api/v1/vendor/seller-detail/{self.vendor.slug}/')
+        self.assertTrue(self.vendor.followers.filter(pk=self.fan.pk).exists())
+        self.assertEqual(self.api.get('/api/v1/tools/broadcasts/').data['audience_sizes']['followers']['people'], 1)
+
+    def test_preview_shows_in_the_seller_dashboard_bell(self):
+        from notification.models import in_app
+        self.api.post('/api/v1/tools/broadcasts/', {'preview': True, 'subject': 'New arrivals',
+                                                    'message': 'Fresh kettles just landed this week.'}, format='json')
+        n = Notification.objects.get(recipient=self.owner)
+        self.assertTrue(in_app('seller', n.verb, n.data))
+        self.assertTrue(n.data['title'].startswith('[Preview]'))
+
+    def test_sending_rings_each_shoppers_bell(self):
+        from unittest import mock
+        with mock.patch('notification.utils.push_new_notification') as push:
+            self.post()
+        self.assertEqual(push.call_count, 2)
+
     def test_empty_audience_explains_why_and_team_is_left_out(self):
         self.vendor.followers.clear()
         self.vendor.followers.add(self.owner)                       # the seller following their own store
