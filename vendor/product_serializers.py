@@ -144,7 +144,7 @@ class ProductSerializer(serializers.ModelSerializer):
         # a draft moves to review on its own once it has a photo (update()).
         read_only_fields = ['vendor', 'sku', 'review_note', 'date', 'updated', 'views', 'variation_axes', 'status']
 
-    PRODUCT_VIDEO_MAX_BYTES = 50 * 1024 * 1024    # what the seller help page promises
+    PRODUCT_VIDEO_MAX_BYTES = 15 * 1024 * 1024    # same as the seller form (hooks.js) and help page
 
     def validate_video(self, value):
         # MP4, WebM or MOV by content, stored under a generated name: Spaces

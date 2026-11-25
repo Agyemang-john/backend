@@ -93,6 +93,19 @@ class ProductGalleryEditTests(TestCase):
         self.assertEqual(res.status_code, 200, res.data)
         self.assertEqual(self.product.p_images.count(), 0)
 
+    def video(self, mb):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        head = b'\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00'
+        return SimpleUploadedFile('clip.mp4', head + b'\x00' * (int(mb * 1024 * 1024) - len(head)), content_type='video/mp4')
+
+    def test_product_video_up_to_15_mb(self):
+        url = f'/api/v1/vendor/products/{self.product.id}/'
+        ok = self.client.patch(url, {'video': self.video(14.5)}, format='multipart')
+        self.assertEqual(ok.status_code, 200, ok.data)
+        too_big = self.client.patch(url, {'video': self.video(15.5)}, format='multipart')
+        self.assertEqual(too_big.status_code, 400)
+        self.assertIn('15 MB', str(too_big.data['video']))
+
     def test_no_keep_list_keeps_photos(self):
         self.existing(2)
         res = self.client.patch(f'/api/v1/vendor/products/{self.product.id}/', {'title': 'Photo Kettle 2'}, format='multipart')
