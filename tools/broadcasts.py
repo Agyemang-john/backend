@@ -298,7 +298,7 @@ def deliver(broadcast_id):
     products = _products(b.product_ids)
     ids = audience_ids(store, b.audience)
     User = get_user_model()
-    total = emailed = sms_sent = 0
+    total = emailed = sms_sent = to_email = 0
     error = ''
     try:
         for start in range(0, len(ids), BATCH):
@@ -306,8 +306,9 @@ def deliver(broadcast_id):
             users = list(User.objects.filter(pk__in=chunk, is_active=True).only('pk', 'email', 'first_name'))
             _create_and_push([_notification(u, store, b.subject, b.message) for u in users])
             blocked = opted_out_user_ids([u.pk for u in users], EmailOptOut.STORE_OFFERS)
-            emailed += send_batch([_email(u, store, b.subject, b.message, products)
-                                   for u in users if u.email and u.pk not in blocked])
+            mails = [_email(u, store, b.subject, b.message, products) for u in users if u.email and u.pk not in blocked]
+            to_email += len(mails)
+            emailed += send_batch(mails)
             total += len(users)
     except Exception as exc:
         logger.exception('Broadcast %s failed after %s recipients', b.pk, total)
@@ -318,13 +319,17 @@ def deliver(broadcast_id):
             ToolUsage.give_back(store, 'broadcasts')
         raise
 
+    if emailed < to_email:     # send_batch logs and swallows SMTP failures: tell the seller
+        error = (f'Only {emailed} of {to_email} emails went out (the email service refused the rest). '
+                 'Everyone still got it in the app.')
+
     if b.sms_reserved:
         numbers = list(sms_numbers(ids).values())[:b.sms_reserved]     # never more than was reserved
         try:
             sms_sent = _send_sms(numbers, sms_text(store, b.subject, b.message))
         except Exception as exc:   # app and email went out; report the SMS problem, keep the rest
             logger.exception('Broadcast %s SMS failed', b.pk)
-            error = f'SMS not sent: {exc}'[:200]
+            error = ' '.join(filter(None, [error, f'SMS not sent: {exc}']))[:200]
         ToolUsage.give_back_many(store, 'broadcast_sms', b.sms_reserved - sms_sent)
 
     Broadcast.objects.filter(pk=b.pk).update(status=Broadcast.SENT, recipients=total, emailed=emailed,

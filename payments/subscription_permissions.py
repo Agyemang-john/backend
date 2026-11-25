@@ -242,6 +242,27 @@ class SubscriptionGateMixin:
             if vendor is not None:
                 sync_usage(vendor)
 
+    def perform_update(self, serializer):
+        """
+        Edits can add gallery photos too: count the photos the product will have
+        (kept + new) against the plan. Only adding is blocked, so a store that
+        downgraded keeps the photos it already has and can still edit the rest.
+        """
+        if self.check_image_limit:
+            new = len(self.request.FILES.getlist("images[]", []))
+            if new:
+                existing = list(serializer.instance.p_images.values_list("id", flat=True))
+                kept = len(existing)
+                if "keep_images" in self.request.POST:
+                    import json
+                    try:
+                        keep = {int(i) for i in json.loads(self.request.POST["keep_images"])}
+                    except (TypeError, ValueError):
+                        keep = set(existing)
+                    kept = len(keep & set(existing))
+                self._gate_image_limit(kept + new)
+        serializer.save()
+
     def perform_destroy(self, instance):
         super().perform_destroy(instance)
         if getattr(self, 'check_product_limit', False):

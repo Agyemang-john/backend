@@ -503,6 +503,16 @@ class BroadcastTests(ToolsTestCase):
         self.assertTrue(in_app('seller', n.verb, n.data))
         self.assertTrue(n.data['title'].startswith('[Preview]'))
 
+    def test_refused_emails_are_reported_on_the_message(self):
+        from unittest import mock
+
+        from tools.models import Broadcast
+        with mock.patch('django.core.mail.backends.locmem.EmailBackend.send_messages', side_effect=OSError('refused')):
+            res = self.post()
+        b = Broadcast.objects.get(pk=res.data['id'])
+        self.assertEqual((b.status, b.recipients, b.emailed), ('sent', 2, 0))
+        self.assertIn('Only 0 of 2 emails went out', b.error)
+
     def test_sending_rings_each_shoppers_bell(self):
         from unittest import mock
         with mock.patch('notification.utils.push_new_notification') as push:

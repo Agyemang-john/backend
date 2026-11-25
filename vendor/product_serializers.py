@@ -432,12 +432,13 @@ class ProductSerializer(serializers.ModelSerializer):
         regions = validated_data.pop('available_in_regions', None)
         variants_data = validated_data.pop('variants', None)
 
-        keep_images = []
+        # None = the form didn't say (keep every photo); [] = the seller removed them all.
+        keep_images = None
         if 'keep_images' in self.context['request'].POST:
             try:
-                keep_images = json.loads(self.context['request'].POST['keep_images'])
-            except json.JSONDecodeError:
-                pass
+                keep_images = [int(i) for i in json.loads(self.context['request'].POST['keep_images'])]
+            except (json.JSONDecodeError, TypeError, ValueError):
+                keep_images = None
 
         if 'title' in validated_data:
             validated_data['slug'] = slugify(validated_data['title'])
@@ -452,7 +453,7 @@ class ProductSerializer(serializers.ModelSerializer):
             instance.available_in_regions.set(regions)
 
         # Handle product images
-        if keep_images:
+        if keep_images is not None:
             instance.p_images.exclude(id__in=keep_images).delete()
 
         new_images = self.context['request'].FILES.getlist('images[]')
