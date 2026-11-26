@@ -30,9 +30,10 @@ from decimal import Decimal, InvalidOperation
 from django.core.files.base import ContentFile
 from django.db import transaction
 
+from product import sourcing as product_sourcing
 from product import variations
 from product.models import (
-    Brand, DeliveryOption, Product, ProductDeliveryOption, ProductImages, Sub_Category, Variants,
+    Brand, DeliveryOption, Product, ProductDeliveryOption, ProductImages, Sub_Category, VariantImage, Variants,
 )
 from vendor.remote_images import RemoteImageError, fetch_photo, to_product_photo
 
@@ -49,19 +50,24 @@ COLUMNS = [
     ('stock', True, 'How many you have. For versions: stock of this version.', '25'),
     ('weight_kg', True, 'Packed weight in kg, used for delivery prices.', '0.6'),
     ('compare_at_price', False, 'Old price shown crossed out. Leave empty if there is no discount.', '150.00'),
+    ('unit_cost', False, 'What one item costs you, for your profit reports (shoppers never see it). For versions: this version\'s cost.', '80.00'),
     ('condition', False, 'new, used, refurbished, grocery or book. Empty = new.', 'grocery'),
     ('brand', False, 'Brand from the list on the upload page. Leave empty if none.', ''),
     ('description', False, 'What shoppers read. Plain text; new lines become paragraphs.', 'Whey protein with 24 g per scoop.'),
     ('features', False, 'Key features or ingredients, one per line or separated by ;', 'Gluten free; 24 g protein'),
     ('specifications', False, 'Extra details (size, materials...).', ''),
     ('delivery_returns', False, 'Your delivery and returns note.', ''),
+    ('specs', False, 'Item specifics for the category, as Name: value separated by ; (the names for each category are on the upload page). Shoppers filter by them.', 'Material: Cotton; Waterproof: no'),
     ('return_days', False, 'Days the buyer has to return it. Empty = no returns.', '7'),
     ('seller_sku', False, 'Your own code for this product or version. Must be unique in your store.', 'PS-VAN-500'),
     ('barcode', False, 'GTIN/EAN/UPC barcode (8, 12, 13 or 14 digits).', ''),
     ('image_url', False, 'Link to the main photo (or this version\'s photo). Direct image, Google Drive or Dropbox link.', 'https://example.com/shake-vanilla.jpg'),
-    ('more_image_urls', False, 'More photo links, separated by ;', ''),
+    ('more_image_urls', False, 'More photo links, separated by ;. On a version row after the first: more photos of that version.', ''),
     ('ships_to', False, 'Countries you ship to (codes or names, separated by ;). Empty = the same as your latest product.', 'GH'),
     ('delivery_methods', False, 'Delivery methods by name, separated by ;. The first is the default. Empty = the same as your latest product.', ''),
+    ('stock_type', False, 'in_stock (empty), ships_from_abroad (you order it after a sale) or made_to_order (you make it after a sale).', ''),
+    ('sourcing_days', False, 'Ships from abroad / made to order only: days until you have the item, as shortest-longest. "4-6 weeks" also works.', '28-42'),
+    ('sourced_from', False, 'Ships from abroad only (optional): the country you order it from.', ''),
     ('option1_name', False, 'What changes between versions, e.g. Colour, Size, Flavour, Scent, Pack size.', 'Flavour'),
     ('option1_value', False, 'This version\'s value for option 1.', 'Vanilla'),
     ('option2_name', False, 'Second option (optional).', 'Size'),
@@ -78,6 +84,16 @@ ALIASES = {
     'old_price': 'compare_at_price', 'total_quantity': 'stock', 'quantity': 'stock',
     'product_type': 'condition', 'weight': 'weight_kg', 'gtin': 'barcode',
     'return_period_days': 'return_days', 'sku': 'seller_sku', 'image': 'image_url',
+    'cost': 'unit_cost', 'cost_price': 'unit_cost', 'fulfilment': 'stock_type', 'fulfilment_type': 'stock_type',
+    'fulfillment': 'stock_type', 'attributes': 'specs', 'item_specifics': 'specs',
+}
+
+STOCK_TYPES = {
+    'in_stock': product_sourcing.IN_STOCK, 'in stock': product_sourcing.IN_STOCK, 'stock': product_sourcing.IN_STOCK,
+    'ships_from_abroad': product_sourcing.IMPORTED, 'ships from abroad': product_sourcing.IMPORTED,
+    'imported': product_sourcing.IMPORTED, 'abroad': product_sourcing.IMPORTED, 'import': product_sourcing.IMPORTED,
+    'made_to_order': product_sourcing.MADE_TO_ORDER, 'made to order': product_sourcing.MADE_TO_ORDER,
+    'made-to-order': product_sourcing.MADE_TO_ORDER, 'handmade': product_sourcing.MADE_TO_ORDER,
 }
 
 CONDITIONS = {'new': 'new', 'used': 'used', 'second-hand': 'used', 'refurbished': 'refurbished',
@@ -127,6 +143,9 @@ def normalise_row(raw):
             continue
         name = str(key).strip().lower().replace(' ', '_')
         name = ALIASES.get(name, name)
+        if name == 'specs' and isinstance(value, dict):
+            row[name] = value                 # the browser table sends specs as the form does
+            continue
         value = '' if value is None else str(value).strip()
         if value or name not in row:      # an old and a new column for the same thing: the filled one wins
             row[name] = value
@@ -227,6 +246,7 @@ class Context:
 
         plan = plan_for_vendor(vendor)
         self.max_images = plan.max_images_per_product if plan else None
+        self.max_version_extra = plan.max_images_per_variant if plan else 0
         self.titles_seen = set()
         self.skus_seen = set()
 
@@ -284,6 +304,126 @@ def _list_html(value):
     return '<ul>' + ''.join(f'<li>{html.escape(i)}</li>' for i in items) + '</ul>'
 
 
+def _clean_sourcing(row, ctx, errors):
+    """stock_type / sourcing_days / sourced_from → the product's fulfilment fields (product/sourcing.py)."""
+    raw = ' '.join((row.get('stock_type') or '').split()).casefold()
+    kind = STOCK_TYPES.get(raw or 'in_stock') or STOCK_TYPES.get(raw.replace('_', ' '))
+    if kind is None:
+        errors['stock_type'] = 'Use in_stock, ships_from_abroad or made_to_order.'
+        return None
+    if kind == product_sourcing.IN_STOCK:
+        return {'fulfilment_type': kind, 'sourcing_min_days': 0, 'sourcing_max_days': 0, 'sourced_from': None}
+
+    text = (row.get('sourcing_days') or '').casefold()
+    numbers = [int(n) for n in re.findall(r'\d+', text)]
+    if not numbers:
+        errors['sourcing_days'] = 'Say how many days it takes to get the item, e.g. 28-42.'
+        return None
+    unit = 7 if 'week' in text else 1
+    low, high = numbers[0] * unit, (numbers[1] if len(numbers) > 1 else numbers[0]) * unit
+    message = product_sourcing.validate(kind, low, high)
+    if message:
+        errors['sourcing_days'] = message
+        return None
+
+    origin = None
+    if kind == product_sourcing.IMPORTED and row.get('sourced_from'):
+        origin = ctx.countries.get(row['sourced_from'].strip().casefold())
+        if origin is None:
+            errors['sourced_from'] = f'Unknown country: {row["sourced_from"]}.'
+            return None
+    return {'fulfilment_type': kind, 'sourcing_min_days': low, 'sourcing_max_days': high, 'sourced_from': origin}
+
+
+_YES = {'yes', 'y', 'true', '1', 'oui'}
+_NO = {'no', 'n', 'false', '0', 'non'}
+
+
+def _clean_specs(raw, category, errors):
+    """
+    The `specs` column → {slug: value} in the form's format (attributes/services.py), or {}.
+    Text "Name: value; Name: value" (sheet) or a {slug: value} dict (the browser table).
+    Returns (values, missing required spec names).
+    """
+    from attributes import services as attribute_services
+    from attributes.models import AttributeDefinition
+
+    defs = attribute_services.definitions_for(category) if category else []
+    if raw in (None, '', {}) or category is None:
+        return {}, [d.name for d in defs if d.required]
+    by_name = {}
+    for d in defs:
+        by_name.setdefault(d.slug.casefold(), d)
+        by_name.setdefault(d.name.casefold(), d)
+
+    if isinstance(raw, dict):
+        pairs = list(raw.items())
+    else:
+        pairs = []
+        for part in re.split(r'[;\n]', str(raw)):
+            if not part.strip():
+                continue
+            if ':' not in part:
+                errors['specs'] = f'"{part.strip()[:40]}": write each spec as Name: value.'
+                return {}, []
+            name, value = part.split(':', 1)
+            pairs.append((name.strip(), value.strip()))
+
+    values = {}
+    for name, value in pairs:
+        d = by_name.get(str(name).strip().casefold())
+        if d is None:
+            known = ', '.join(x.name for x in defs[:10])
+            errors['specs'] = (f'"{name}" is not a spec of this category. '
+                               + (f'Use: {known}.' if defs else 'This category has no specs: leave the column empty.'))
+            return {}, []
+        if value in (None, '', []):
+            continue
+        if isinstance(raw, dict):
+            values[d.slug] = value          # already in the form's format (option ids, numbers, booleans)
+            continue
+        if d.type == AttributeDefinition.CHOICE:
+            options = {}
+            for o in d.options.all():
+                options.setdefault(o.value.casefold(), o.pk)
+                options.setdefault(o.slug.casefold(), o.pk)
+            wanted = [v.strip() for v in value.split(',') if v.strip()] if d.multi else [value]
+            ids = []
+            for w in wanted:
+                pk = options.get(w.casefold())
+                if pk is None:
+                    allowed = ', '.join(o.value for o in list(d.options.all())[:12])
+                    errors['specs'] = f'{d.name}: "{w}" is not one of the choices ({allowed}).'
+                    return {}, []
+                ids.append(pk)
+            values[d.slug] = ids if d.multi else ids[0]
+        elif d.type == AttributeDefinition.NUMBER:
+            found = re.search(r'-?\d+(?:[.,]\d+)?', value)
+            if not found:
+                errors['specs'] = f'{d.name}: "{value}" is not a number.'
+                return {}, []
+            values[d.slug] = found.group().replace(',', '.')
+        elif d.type == AttributeDefinition.BOOLEAN:
+            word = value.casefold()
+            if word not in _YES | _NO:
+                errors['specs'] = f'{d.name}: write yes or no.'
+                return {}, []
+            values[d.slug] = word in _YES
+        else:
+            values[d.slug] = value
+
+    # Same checks the product form's save runs, before anything is created.
+    for slug, value in values.items():
+        d = by_name[slug.casefold()]
+        try:
+            attribute_services._coerce(d, value, {o.pk: o for o in d.options.all()})
+        except attribute_services.AttributeValueError as exc:
+            errors['specs'] = str(exc)
+            return {}, []
+    missing = [d.name for d in defs if d.required and d.slug not in values]
+    return values, missing
+
+
 def clean_spec(spec, ctx, files=None):
     """
     Check one product (its rows) and return everything needed to create it.
@@ -336,6 +476,9 @@ def clean_spec(spec, ctx, files=None):
             errors['weight_kg'] = f'"{raw_weight}" is not a weight in kg (e.g. 0.5).'
 
     compare_at = _money(first.get('compare_at_price'), 'compare_at_price', errors, required=False)
+    unit_cost = _money(first.get('unit_cost'), 'unit_cost', errors, required=False)
+    sourcing = _clean_sourcing(first, ctx, errors)
+    spec_values, missing_specs = _clean_specs(first.get('specs'), category, errors)
     return_days = _whole(first.get('return_days'), 'return_days', errors, required=False) or 0
 
     barcode = ''
@@ -407,9 +550,16 @@ def clean_spec(spec, ctx, files=None):
             field, message = next(iter(version_errors.items()))
             errors[field] = f'{" / ".join(options.values())}: {message}'
             break
-        versions.append({'options': options, 'price': price, 'stock': stock,
+        cost = _money(row.get('unit_cost'), 'unit_cost', version_errors, required=False) if i else None
+        if version_errors:
+            field, message = next(iter(version_errors.items()))
+            errors[field] = f'{" / ".join(options.values())}: {message}'
+            break
+        versions.append({'options': options, 'price': price, 'stock': stock, 'unit_cost': cost,
                          'seller_sku': (row.get('seller_sku') or '').strip()[:64],
-                         'image_url': (row.get('image_url') or '').strip() if i else ''})
+                         'image_url': (row.get('image_url') or '').strip() if i else '',
+                         # The first row's extra links are the product's own gallery.
+                         'more_image_urls': _split(row.get('more_image_urls', '')) if i else []})
 
     price = stock = None
     if axes:
@@ -434,13 +584,27 @@ def clean_spec(spec, ctx, files=None):
 
     # Photos: links (sheet) or files (table).
     image_urls = [u for u in [first.get('image_url', ''), *_split(first.get('more_image_urls', ''))] if u]
-    for url in image_urls + [v['image_url'] for v in versions if v['image_url']]:
+    version_links = [u for v in versions for u in [v['image_url'], *v['more_image_urls']] if u]
+    for url in image_urls + version_links:
         if not re.match(r'https?://', url, re.I):
             errors['image_url'] = f'"{url[:60]}" is not a link (it must start with http:// or https://).'
             break
     image_count = len(image_urls) + len(files.get('images') or [])
-    if ctx.max_images is not None and image_count > max(ctx.max_images, 1):
-        errors['more_image_urls'] = f'Your plan allows {ctx.max_images} photos per product ({image_count} given).'
+    # Like the product form: a main photo plus up to max_images_per_product more.
+    if ctx.max_images is not None and image_count - 1 > ctx.max_images:
+        errors['more_image_urls'] = (f'Your plan allows a main photo and {ctx.max_images} more per product '
+                                     f'({image_count} given).')
+    table_versions = files.get('version_images') or {}
+    for i, version in enumerate(versions):
+        attached = table_versions.get(i) or []
+        extra = len(version['more_image_urls']) + max(len(attached) - 1, 0)
+        if extra > ctx.max_version_extra:
+            name = ' / '.join(version['options'].values())
+            errors['more_image_urls'] = (
+                f'{name}: your plan does not include extra photos per version. Keep one photo per version.'
+                if not ctx.max_version_extra else
+                f'{name}: your plan allows {ctx.max_version_extra} extra photos per version ({extra} given).')
+            break
 
     if errors:
         raise SpecError(errors)
@@ -455,6 +619,7 @@ def clean_spec(spec, ctx, files=None):
         'specifications': _text_html(first.get('specifications')),
         'delivery_returns': _text_html(first.get('delivery_returns')),
         'axes': axes, 'versions': versions, 'image_urls': image_urls, 'files': files,
+        'unit_cost': unit_cost, 'sourcing': sourcing, 'specs': spec_values, 'missing_specs': missing_specs,
     }
 
 
@@ -483,14 +648,17 @@ def _gather_photos(cleaned):
 
     sources = list(cleaned['files'].get('images') or []) + cleaned['image_urls']
     product_photos = [p for p in (get(s, 'Photo') for s in sources) if p]
-    version_photos = {}
+    version_photos, version_galleries = {}, {}
     table_version_files = cleaned['files'].get('version_images') or {}
     for i, version in enumerate(cleaned['versions']):
-        source = table_version_files.get(i) or version['image_url']
-        if source:
-            photo = get(source, f'Photo for {" / ".join(version["options"].values())}')
-            if photo:
-                version_photos[i] = photo
+        name = " / ".join(version["options"].values())
+        attached = list(table_version_files.get(i) or [])
+        sources = attached or ([version['image_url']] if version['image_url'] else [])
+        sources += version['more_image_urls']
+        photos = [p for p in (get(s, f'Photo for {name}') for s in sources) if p]
+        if photos:
+            version_photos[i] = photos[0]
+            version_galleries[i] = photos[1:]
     # The first row's photo is also the first version's photo (a copy: deleting
     # a variant deletes its file).
     if cleaned['versions'] and 0 not in version_photos and product_photos:
@@ -498,7 +666,7 @@ def _gather_photos(cleaned):
         source.seek(0)
         version_photos[0] = ContentFile(source.read(), name=f'{uuid.uuid4().hex}.jpg')
         source.seek(0)
-    return product_photos, version_photos, warnings
+    return product_photos, version_photos, version_galleries, warnings
 
 
 def create_product(vendor, cleaned):
@@ -508,7 +676,9 @@ def create_product(vendor, cleaned):
     """
     from payments.entitlements import reserve_product_slots
 
-    product_photos, version_photos, warnings = _gather_photos(cleaned)
+    from attributes import services as attribute_services
+
+    product_photos, version_photos, version_galleries, warnings = _gather_photos(cleaned)
     main_photo = product_photos[0] if product_photos else (version_photos.get(0) or next(iter(version_photos.values()), None))
     status = 'in_review' if main_photo else 'draft'
     if not main_photo:
@@ -520,8 +690,9 @@ def create_product(vendor, cleaned):
         product = Product(
             vendor=vendor, title=cleaned['title'], sub_category=cleaned['category'], brand=cleaned['brand'],
             product_type=cleaned['condition'], price=cleaned['price'], old_price=cleaned['compare_at'],
-            total_quantity=cleaned['stock'], weight=cleaned['weight'], volume=0,
+            total_quantity=cleaned['stock'], weight=cleaned['weight'],
             return_period_days=cleaned['return_days'], seller_sku=cleaned['seller_sku'], gtin=cleaned['barcode'],
+            unit_cost=cleaned['unit_cost'], life='', **cleaned['sourcing'],
             description=cleaned['description'], features=cleaned['features'],
             specifications=cleaned['specifications'], delivery_returns=cleaned['delivery_returns'],
             variant=variations.variant_type_for(axes), variation_axes=axes, status=status,
@@ -537,12 +708,21 @@ def create_product(vendor, cleaned):
             extra.images.save(photo.name, photo, save=True)
         for i, version in enumerate(cleaned['versions']):
             variant = Variants(product=product, options=version['options'], price=version['price'],
-                               quantity=version['stock'], seller_sku=version['seller_sku'])
+                               quantity=version['stock'], seller_sku=version['seller_sku'],
+                               unit_cost=version['unit_cost'])
             variations.mirror_foreign_keys(variant)
             photo = version_photos.get(i)
             if photo:
                 variant.image.save(photo.name, photo, save=False)
             variant.save()
+            for position, extra in enumerate(version_galleries.get(i) or []):
+                gallery = VariantImage(variant=variant, position=position)
+                gallery.images.save(extra.name, extra, save=True)
+        if cleaned['specs']:
+            attribute_services.save_values(product, cleaned['specs'])
+    if cleaned['missing_specs']:
+        names = ', '.join(cleaned['missing_specs'][:5])
+        warnings.append(f'Add its specs ({names}) from My Products so shoppers can find it with filters.')
     return {'product_id': product.pk, 'status': status, 'warnings': warnings}
 
 

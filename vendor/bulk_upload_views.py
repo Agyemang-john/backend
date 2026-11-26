@@ -162,6 +162,7 @@ class BulkUploadMetaAPIView(APIView):
                 "default_suggested": variations.DEFAULT_SUGGESTED, "max_axes": variations.MAX_AXES,
             },
             "max_images_per_product": plan.max_images_per_product if plan else None,
+            "max_images_per_variant": plan.max_images_per_variant if plan else 0,
             "sync_threshold": SYNC_THRESHOLD,
             "max_rows": bulk_upload.MAX_ROWS,
             "remaining_slots": remaining,
@@ -258,9 +259,10 @@ class BulkProductDirectAPIView(APIView):
             photos = request.FILES.getlist(f"photos_{index}")
             version_photos = {}
             for v in range(len(rows)):
-                upload = request.FILES.get(f"version_photo_{index}_{v}")
-                if upload:
-                    version_photos[v] = upload
+                # Several files: the first is the version's photo, the rest its gallery.
+                uploads = request.FILES.getlist(f"version_photo_{index}_{v}")
+                if uploads:
+                    version_photos[v] = uploads
             if photos or version_photos:
                 files_by_spec[spec_index] = {"images": photos, "version_images": version_photos}
         return _run(vendor, specs, files_by_spec)

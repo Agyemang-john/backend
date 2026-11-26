@@ -295,6 +295,157 @@ class DraftFinishTests(BulkTestCase):
         self.assertEqual(self.product.status, 'published')
 
 
+class SameAsProductFormTests(BulkTestCase):
+    """A product added in bulk ends up like the same product added with the product form."""
+
+    def setUp(self):
+        super().setUp()
+        from attributes.models import AttributeDefinition, AttributeOption
+        self.material = AttributeDefinition.objects.create(name='Material', type=AttributeDefinition.CHOICE)
+        self.material.sub_categories.add(self.sub)
+        self.cotton = AttributeOption.objects.create(definition=self.material, value='Cotton', slug='cotton')
+        AttributeOption.objects.create(definition=self.material, value='Leather', slug='leather')
+        self.capacity = AttributeDefinition.objects.create(name='Capacity', type=AttributeDefinition.NUMBER, unit='L')
+        self.capacity.sub_categories.add(self.sub)
+        self.waterproof = AttributeDefinition.objects.create(name='Waterproof', type=AttributeDefinition.BOOLEAN,
+                                                             required=True)
+        self.waterproof.sub_categories.add(self.sub)
+        from attributes import services
+        services.clear_definitions_cache()
+        self.plan.max_images_per_variant = 2
+        self.plan.save()
+
+    def specs_of(self, product):
+        from attributes import services
+        return services.values_for_edit(product)
+
+    def test_bulk_matches_the_product_form(self):
+        china, _ = Country.objects.get_or_create(name='China', defaults={'code': 'CN'})
+        photo = SimpleUploadedFile('p.jpg', jpeg_bytes(), 'image/jpeg')
+        form = {
+            'title': 'Form Tote', 'slug': 'form-tote', 'sub_category': self.sub.pk, 'brand': '', 'variant': 'None', 'price': '45',
+            'old_price': '0', 'total_quantity': '30', 'weight': '0.3', 'product_type': 'new',
+            'available_in_regions': [self.ghana.pk], 'return_period_days': '7', 'unit_cost': '20',
+            'fulfilment_type': 'imported', 'sourcing_min_days': '28', 'sourcing_max_days': '42',
+            'sourced_from': china.pk, 'life': '', 'image': photo,
+            'delivery_options': json.dumps([{'deliveryOptionId': self.express.pk, 'default': True}]),
+            'attributes': json.dumps({'material': self.cotton.pk, 'capacity': 12, 'waterproof': False}),
+        }
+        res = self.client.post('/api/v1/vendor/products/', form, format='multipart')
+        self.assertEqual(res.status_code, 201, res.content)
+        by_form = Product.objects.get(title='Form Tote')
+
+        products = [{'title': 'Bulk Tote', 'category': self.sub.slug, 'price': '45', 'stock': '30', 'weight_kg': '0.3',
+                     'return_days': '7', 'unit_cost': '20', 'stock_type': 'ships from abroad',
+                     'sourcing_days': '4-6 weeks', 'sourced_from': 'China', 'delivery_methods': 'Express',
+                     'specs': 'Material: cotton; Capacity: 12 L; Waterproof: no'}]
+        files = {'photos_0': SimpleUploadedFile('p.jpg', jpeg_bytes(), 'image/jpeg')}
+        res = self.client.post(f'{BASE}direct/', {'products': json.dumps(products), **files}, format='multipart')
+        self.assertEqual(res.status_code, 201, res.content)
+        by_bulk = Product.objects.get(title='Bulk Tote')
+
+        fields = ['status', 'sub_category_id', 'price', 'old_price', 'total_quantity', 'weight', 'volume', 'life',
+                  'product_type', 'return_period_days', 'unit_cost', 'fulfilment_type', 'sourcing_min_days',
+                  'sourcing_max_days', 'sourced_from_id', 'variant']
+        self.assertEqual({f: getattr(by_bulk, f) for f in fields}, {f: getattr(by_form, f) for f in fields})
+        self.assertEqual(by_bulk.slug, 'bulk-tote')
+        self.assertEqual(list(by_bulk.available_in_regions.all()), list(by_form.available_in_regions.all()))
+        self.assertEqual(list(by_bulk.productdeliveryoption_set.values_list('delivery_option', 'default')),
+                         list(by_form.productdeliveryoption_set.values_list('delivery_option', 'default')))
+        self.assertEqual(self.specs_of(by_bulk), self.specs_of(by_form))
+        self.assertEqual(res.data['products'][0]['warnings'], [])
+
+    def test_spec_and_stock_type_mistakes_are_explained(self):
+        rows = [
+            self.row(title='Bad Spec Name', specs='Colourway: red'),
+            self.row(title='Bad Choice', specs='Material: Silk'),
+            self.row(title='Bad Yes No', specs='Waterproof: maybe'),
+            self.row(title='No Colon', specs='Cotton'),
+            self.row(title='Bad Stock Type', stock_type='pre-order'),
+            self.row(title='No Days', stock_type='made_to_order'),
+            self.row(title='Too Long', stock_type='imported', sourcing_days='20 weeks'),
+            self.row(title='Missing Spec Ok'),
+        ]
+        res = self.upload_csv(rows)
+        self.assertEqual(res.status_code, 207, res.content)
+        problems = {e['title']: e['errors'] for e in res.data['errors']}
+        self.assertIn('Capacity, Material, Waterproof', problems['Bad Spec Name']['specs'])
+        self.assertIn('Cotton, Leather', problems['Bad Choice']['specs'])
+        self.assertIn('yes or no', problems['Bad Yes No']['specs'])
+        self.assertIn('Name: value', problems['No Colon']['specs'])
+        self.assertIn('made_to_order', problems['Bad Stock Type']['stock_type'])
+        self.assertIn('how many days', problems['No Days']['sourcing_days'])
+        self.assertIn('weeks', problems['Too Long']['sourcing_days'])
+        saved = res.data['products'][0]
+        self.assertEqual(saved['title'], 'Missing Spec Ok')
+        self.assertTrue(any('Waterproof' in w for w in saved['warnings']), 'required spec missing: a warning')
+        made = Product.objects.get(title='Missing Spec Ok')
+        self.assertEqual((made.fulfilment_type, made.sourcing_max_days), ('in_stock', 0))
+
+    def test_version_costs_and_extra_photos(self):
+        rows = [
+            self.row(title='Mug', unit_cost='10', image_url='https://img.example.com/white.jpg',
+                     more_image_urls='https://img.example.com/side.jpg',
+                     option1_name='Colour', option1_value='White', seller_sku='MUG-W'),
+            self.row(title='Mug', category='', price='50', unit_cost='14', image_url='https://img.example.com/black.jpg',
+                     more_image_urls='https://img.example.com/b2.jpg; https://img.example.com/b3.jpg',
+                     option1_name='Colour', option1_value='Black', seller_sku='MUG-B'),
+        ]
+        res = self.upload_csv(rows)
+        job = BulkUploadJob.objects.get(pk=res.data['job_id'])
+        self.assertEqual(job.success_count, 1, job.errors)
+        mug = Product.objects.get(title='Mug')
+        self.assertEqual(mug.unit_cost, Decimal('10'))
+        self.assertEqual(mug.p_images.count(), 1, 'first row: the product gallery')
+        white, black = mug.variants.get(seller_sku='MUG-W'), mug.variants.get(seller_sku='MUG-B')
+        self.assertIsNone(white.unit_cost, 'empty = the product cost, like the form')
+        self.assertEqual(black.unit_cost, Decimal('14'))
+        self.assertEqual(black.variantimage_set.count(), 2)
+
+        self.plan.max_images_per_variant = 0
+        self.plan.save()
+        rows[0]['title'] = rows[1]['title'] = 'Mug Two'
+        rows[0]['seller_sku'], rows[1]['seller_sku'] = 'M2-W', 'M2-B'
+        res = self.upload_csv(rows)
+        job = BulkUploadJob.objects.get(pk=res.data['job_id'])
+        self.assertIn('extra photos per version', job.errors[0]['errors']['more_image_urls'])
+
+    def test_table_version_photos_first_is_main_rest_gallery(self):
+        products = [{'rows': [
+            {'title': 'Lamp', 'category': self.sub.slug, 'price': '25', 'stock': '3', 'weight_kg': '1',
+             'option1_name': 'Colour', 'option1_value': 'Red'},
+            {'title': 'Lamp', 'price': '27', 'stock': '2', 'option1_name': 'Colour', 'option1_value': 'Blue'},
+        ]}]
+        files = {'version_photo_0_1': [SimpleUploadedFile(f'{n}.jpg', jpeg_bytes(), 'image/jpeg') for n in 'abc']}
+        res = self.client.post(f'{BASE}direct/', {'products': json.dumps(products), **files}, format='multipart')
+        self.assertEqual(res.status_code, 201, res.content)
+        blue = Product.objects.get(title='Lamp').variants.get(options__color='Blue')
+        self.assertNotEqual(blue.image.name, 'product.jpg')
+        self.assertEqual(blue.variantimage_set.count(), 2)
+
+    def test_photo_limit_counts_like_the_form(self):
+        # The form allows a main photo plus max_images_per_product more.
+        self.plan.max_images_per_product = 2
+        self.plan.save()
+        ok = [{'title': 'Three Photos', 'category': self.sub.slug, 'price': '5', 'stock': '1', 'weight_kg': '0.1'}]
+        files = {'photos_0': [SimpleUploadedFile(f'{n}.jpg', jpeg_bytes(), 'image/jpeg') for n in 'abc']}
+        res = self.client.post(f'{BASE}direct/', {'products': json.dumps(ok), **files}, format='multipart')
+        self.assertEqual(res.status_code, 201, res.content)
+        self.assertEqual(Product.objects.get(title='Three Photos').p_images.count(), 2)
+        ok[0]['title'] = 'Four Photos'
+        files = {'photos_0': [SimpleUploadedFile(f'{n}.jpg', jpeg_bytes(), 'image/jpeg') for n in 'abcd']}
+        res = self.client.post(f'{BASE}direct/', {'products': json.dumps(ok), **files}, format='multipart')
+        self.assertEqual(res.status_code, 400)
+
+    def test_table_sends_specs_like_the_form(self):
+        products = [{'title': 'Table Tote', 'category': self.sub.slug, 'price': '5', 'stock': '1', 'weight_kg': '0.1',
+                     'specs': {'material': self.cotton.pk, 'capacity': 3, 'waterproof': True}}]
+        res = self.client.post(f'{BASE}direct/', {'products': json.dumps(products)}, format='multipart')
+        self.assertEqual(res.status_code, 201, res.content)
+        self.assertEqual(self.specs_of(Product.objects.get(title='Table Tote')),
+                         {'material': self.cotton.pk, 'capacity': Decimal('3'), 'waterproof': True})
+
+
 class RemoteImageTests(OpsTestCase):
 
     def test_share_links_become_direct(self):
