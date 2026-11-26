@@ -52,7 +52,7 @@ def save_carts_before_logout(sender, request, user, **kwargs):
 
 def product_detail_cache_key(product):
     # Must match product/views.get_cached_product_data.
-    return f"product_detail_v2:{product.sku}:{product.slug}"
+    return f"product_detail_v3:{product.sku}:{product.slug}"
 
 
 @receiver([post_save, post_delete], sender=Product)

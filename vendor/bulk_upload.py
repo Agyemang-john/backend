@@ -32,6 +32,7 @@ from django.db import transaction
 
 from product import sourcing as product_sourcing
 from product import variations
+from product import info_sections
 from product.models import (
     Brand, DeliveryOption, Product, ProductDeliveryOption, ProductImages, Sub_Category, VariantImage, Variants,
 )
@@ -55,7 +56,8 @@ COLUMNS = [
     ('brand', False, 'Brand from the list on the upload page. Leave empty if none.', ''),
     ('description', False, 'What shoppers read. Plain text; new lines become paragraphs.', 'Whey protein with 24 g per scoop.'),
     ('features', False, 'Key features or ingredients, one per line or separated by ;', 'Gluten free; 24 g protein'),
-    ('specifications', False, 'Extra details (size, materials...).', ''),
+    ('sections', False, 'Product information in your own sections, as Title: text separated by |. Name them for your product (Ingredients, Display, Size & fit...).', 'Ingredients: Whey protein, cocoa | How to use: 1 scoop in 250 ml of water'),
+    ('specifications', False, 'Other details as plain text. Shown as a section called "Additional details".', ''),
     ('delivery_returns', False, 'Your delivery and returns note.', ''),
     ('specs', False, 'Item specifics for the category, as Name: value separated by ; (the names for each category are on the upload page). Shoppers filter by them.', 'Material: Cotton; Waterproof: no'),
     ('return_days', False, 'Days the buyer has to return it. Empty = no returns.', '7'),
@@ -86,6 +88,7 @@ ALIASES = {
     'return_period_days': 'return_days', 'sku': 'seller_sku', 'image': 'image_url',
     'cost': 'unit_cost', 'cost_price': 'unit_cost', 'fulfilment': 'stock_type', 'fulfilment_type': 'stock_type',
     'fulfillment': 'stock_type', 'attributes': 'specs', 'item_specifics': 'specs',
+    'info_sections': 'sections', 'product_information': 'sections',
 }
 
 STOCK_TYPES = {
@@ -143,8 +146,8 @@ def normalise_row(raw):
             continue
         name = str(key).strip().lower().replace(' ', '_')
         name = ALIASES.get(name, name)
-        if name == 'specs' and isinstance(value, dict):
-            row[name] = value                 # the browser table sends specs as the form does
+        if (name == 'specs' and isinstance(value, dict)) or (name == 'sections' and isinstance(value, list)):
+            row[name] = value                 # the browser table sends these as the form does
             continue
         value = '' if value is None else str(value).strip()
         if value or name not in row:      # an old and a new column for the same thing: the filled one wins
@@ -295,6 +298,35 @@ def _text_html(value):
         return clean_html(value)
     paragraphs = [p.strip() for p in re.split(r'\n\s*\n|\r\n\r\n', value) if p.strip()]
     return ''.join(f'<p>{html.escape(p).replace(chr(10), "<br>")}</p>' for p in paragraphs)
+
+
+def _clean_sections(raw, extra_text, errors):
+    """
+    "Ingredients: water, sugar | Storage: keep cool" → [{title, body}] (the
+    form's Product information sections), plus the old free-text
+    specifications column as "Additional details".
+    """
+    sections = []
+    if isinstance(raw, list):                         # the browser table: [{title, body as plain text}]
+        sections = [{'title': str(x.get('title') or ''), 'body': _text_html(str(x.get('body') or ''))}
+                    for x in raw if isinstance(x, dict)]
+    else:
+        for part in re.split(r'\s*\|\s*', (raw or '').strip()):
+            if not part:
+                continue
+            title, sep, body = part.partition(':')
+            if not sep or not title.strip() or not body.strip():
+                errors['sections'] = f'"{part[:40]}": write each section as Title: text, separated by |.'
+                return []
+            sections.append({'title': title.strip(), 'body': _text_html(body)})
+    extra = _text_html(extra_text)
+    if extra:
+        sections.append({'title': info_sections.LEGACY_TITLE, 'body': extra})
+    try:
+        return info_sections.clean_sections(sections)
+    except info_sections.SectionError as exc:
+        errors['sections'] = str(exc)
+        return []
 
 
 def _list_html(value):
@@ -479,6 +511,7 @@ def clean_spec(spec, ctx, files=None):
     unit_cost = _money(first.get('unit_cost'), 'unit_cost', errors, required=False)
     sourcing = _clean_sourcing(first, ctx, errors)
     spec_values, missing_specs = _clean_specs(first.get('specs'), category, errors)
+    sections = _clean_sections(first.get('sections'), first.get('specifications'), errors)
     return_days = _whole(first.get('return_days'), 'return_days', errors, required=False) or 0
 
     barcode = ''
@@ -616,7 +649,7 @@ def clean_spec(spec, ctx, files=None):
         'price': price, 'compare_at': compare_at or Decimal('0'), 'stock': stock, 'return_days': return_days,
         'seller_sku': product_sku, 'barcode': barcode, 'regions': regions, 'delivery': delivery,
         'description': _text_html(first.get('description')), 'features': _list_html(first.get('features')),
-        'specifications': _text_html(first.get('specifications')),
+        'sections': sections,
         'delivery_returns': _text_html(first.get('delivery_returns')),
         'axes': axes, 'versions': versions, 'image_urls': image_urls, 'files': files,
         'unit_cost': unit_cost, 'sourcing': sourcing, 'specs': spec_values, 'missing_specs': missing_specs,
@@ -694,7 +727,8 @@ def create_product(vendor, cleaned):
             return_period_days=cleaned['return_days'], seller_sku=cleaned['seller_sku'], gtin=cleaned['barcode'],
             unit_cost=cleaned['unit_cost'], life='', **cleaned['sourcing'],
             description=cleaned['description'], features=cleaned['features'],
-            specifications=cleaned['specifications'], delivery_returns=cleaned['delivery_returns'],
+            info_sections=cleaned['sections'], specifications=info_sections.render_html(cleaned['sections']),
+            delivery_returns=cleaned['delivery_returns'],
             variant=variations.variant_type_for(axes), variation_axes=axes, status=status,
         )
         if main_photo:

@@ -307,6 +307,9 @@ class Product(models.Model):
     features = CKEditor5Field(null=True, blank=True, default="Black")
     description = CKEditor5Field(null=True, blank=True, default="I sell good products only")
     specifications = CKEditor5Field(null=True, blank=True, default="Black")
+    # Seller-named sections ("Processor", "Ingredients"...): [{"title", "body"}].
+    # product/info_sections.py; specifications keeps their joined HTML for search.
+    info_sections = models.JSONField(default=list, blank=True)
     delivery_returns = CKEditor5Field(null=True, blank=True, default="We offer free standard shipping on all orders")
     available_in_regions = models.ManyToManyField(Country, blank=True, related_name='products')
     product_type = models.CharField(max_length=50, choices=OPTIONS, null=True, blank=True, default='new')

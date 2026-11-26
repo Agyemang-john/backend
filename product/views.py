@@ -4,6 +4,7 @@ from django.db import transaction
 from django.shortcuts import get_object_or_404
 from ads import services as ad_services
 from attributes import services as attr_services
+from product import info_sections as product_info_sections
 from rest_framework.response import Response
 from .models import *
 from order.models import *
@@ -93,7 +94,7 @@ def get_cached_product_data(sku: str, slug: str, request):
     """
     Fast cached product detail data — NO related/vendor products
     """
-    cache_key = f"product_detail_v2:{sku}:{slug}"
+    cache_key = f"product_detail_v3:{sku}:{slug}"
     cached = cache.get(cache_key)
 
     if cached:
@@ -128,6 +129,8 @@ def get_cached_product_data(sku: str, slug: str, request):
         "review_count": product.review_count,
         # Structured specs (attributes/): [{name, slug, value}] for the specs table.
         "specs": attr_services.specs_for([product.id]).get(product.id, []),
+        # Seller-named sections ("Processor", "Ingredients"...): [{title, body}].
+        "info_sections": product_info_sections.sections_for(product),
         "delivery_options": ProductDeliveryOptionSerializer(
             ProductDeliveryOption.objects.filter(product=product).select_related('delivery_option', 'product', 'variant'), many=True
         ).data,

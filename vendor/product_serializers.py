@@ -1,5 +1,6 @@
 from product import sourcing as product_sourcing
 from product import variations
+from product import info_sections
 import re
 from django.db import transaction
 from rest_framework import serializers
@@ -136,13 +137,15 @@ class ProductSerializer(serializers.ModelSerializer):
             'delivery_options', 'sku', 'seller_sku', 'review_note', 'date', 'updated', 'views',
             'p_images', 'variants',
             'fulfilment_type', 'sourcing_min_days', 'sourcing_max_days', 'sourced_from',
-            'gtin', 'variation_axes', 'unit_cost',
+            'gtin', 'variation_axes', 'unit_cost', 'info_sections',
         ]
         # review_note is written by Negromart reviewers (e.g. why it was rejected).
         # variation_axes is read from the raw request (JSON in multipart) in validate().
         # status is Negromart's review decision (a seller can't publish their own product);
         # a draft moves to review on its own once it has a photo (update()).
-        read_only_fields = ['vendor', 'sku', 'review_note', 'date', 'updated', 'views', 'variation_axes', 'status']
+        # info_sections, like variation_axes, is JSON in multipart: read in validate().
+        read_only_fields = ['vendor', 'sku', 'review_note', 'date', 'updated', 'views', 'variation_axes', 'status',
+                            'info_sections']
 
     PRODUCT_VIDEO_MAX_BYTES = 15 * 1024 * 1024    # same as the seller form (hooks.js) and help page
 
@@ -215,6 +218,17 @@ class ProductSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({'sourcing_max_days': error})
         if kind == product_sourcing.IN_STOCK:
             attrs.update(sourcing_min_days=0, sourcing_max_days=0, sourced_from=None)
+
+        # Product information sections the seller named (product/info_sections.py).
+        # Not sent = keep what is saved; the old free-text field then still works.
+        raw_sections = self.context['request'].data.get('info_sections')
+        if raw_sections is not None:
+            try:
+                sections = info_sections.clean_sections(raw_sections)
+            except info_sections.SectionError as exc:
+                raise serializers.ValidationError({'info_sections': str(exc)})
+            attrs['info_sections'] = sections
+            attrs['specifications'] = info_sections.render_html(sections)
 
         # Variants arrive as a JSON string in multipart requests, outside the
         # nested serializer; check their SKUs here, before anything is saved.
@@ -335,6 +349,7 @@ class ProductSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         data['variation_axes'] = variations.effective_axes(instance)   # older Size/Color products too
+        data['info_sections'] = info_sections.sections_for(instance)   # older free-text details too
         if getattr(self, '_variant_keys', None):
             data['variant_keys'] = self._variant_keys
         return data
