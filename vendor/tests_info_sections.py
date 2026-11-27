@@ -112,3 +112,23 @@ class BulkSectionsTests(BulkTestCase):
             {'title': 'Ingredients', 'body': '<p>Raw shea butter</p>'},
             {'title': 'How to use', 'body': '<p>Warm in hands.</p><p>Apply to skin.</p>'},
         ])
+
+
+class ProductCreateEndpointTests(BulkTestCase):
+    """products/create/ saves once: one copy of each photo, owned by the store."""
+
+    def test_create_saves_the_product_once(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from product.models import Brand
+        from vendor.tests_bulk_upload import jpeg_bytes
+        brand = Brand.objects.create(title='Linen Co')
+        res = self.client.post('/api/v1/vendor/products/create/', {
+            'title': 'Linen Shirt', 'slug': 'linen-shirt', 'sub_category': self.sub.id, 'brand': brand.id,
+            'available_in_regions': [self.ghana.id], 'price': '80', 'total_quantity': '5',
+            'images[]': [SimpleUploadedFile('a.jpg', jpeg_bytes(), 'image/jpeg'),
+                         SimpleUploadedFile('b.jpg', jpeg_bytes(), 'image/jpeg')],
+        }, format='multipart')
+        self.assertEqual(res.status_code, 201, res.data)
+        product = Product.objects.get(title='Linen Shirt')
+        self.assertEqual(product.vendor, self.vendor)
+        self.assertEqual(product.p_images.count(), 2)

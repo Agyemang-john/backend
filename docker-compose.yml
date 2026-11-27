@@ -25,6 +25,25 @@ services:
       - redis
     restart: always
 
+  # Websockets only (chat, notifications, live order updates). Nginx sends
+  # /ws/ here; every other request goes to `web`.
+  ws:
+    logging: *logging
+    image: ecommerce_app:latest
+    command: uvicorn ecommerce.asgi:application --host 0.0.0.0 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips "*"
+    environment:
+      - DJANGO_SETTINGS_MODULE=ecommerce.settings
+      - DJANGO_ENV=production
+      - DB_CONN_MAX_AGE=0
+    expose:
+      - "8000"
+    env_file:
+      - .env
+    depends_on:
+      - migrate
+      - redis
+    restart: always
+
   nginx:
     logging: *logging
     image: nginx:1.25
@@ -39,6 +58,7 @@ services:
       - certbot-var:/var/lib/letsencrypt
     depends_on:
       - web
+      - ws
     restart: always
 
   certbot:
@@ -54,7 +74,9 @@ services:
   celery:
     logging: *logging
     image: ecommerce_app:latest
-    command: celery -A ecommerce worker --loglevel=info --concurrency=1
+    # A fresh worker process after 50 tasks or ~350 MB, so a recommender
+    # training run gives its memory back instead of holding it all day.
+    command: celery -A ecommerce worker --loglevel=info --concurrency=1 --max-tasks-per-child=50 --max-memory-per-child=350000
     env_file:
       - .env
     depends_on:

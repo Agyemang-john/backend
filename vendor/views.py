@@ -592,12 +592,13 @@ class ProductCreateView(SubscriptionGateMixin, generics.CreateAPIView):
     check_product_limit = True
     check_image_limit   = True
 
-    def perform_create(self, serializer):
+    # One save, with the store (the mixin saves; saving again here re-ran the
+    # whole update and uploaded every photo a second time).
+    def get_perform_create_kwargs(self) -> dict:
         vendor = self.request.user.current_vendor
         if not vendor:
             raise serializers.ValidationError("Vendor profile is required.")
-        super().perform_create(serializer)
-        serializer.save(vendor=vendor)
+        return {'vendor': vendor}
 
 
 class ProductDetailView(SubscriptionGateMixin, generics.RetrieveUpdateDestroyAPIView):

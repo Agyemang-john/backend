@@ -138,7 +138,11 @@ else:
     DATABASES = {
         'default': dj_database_url.parse(
             config('DATABASE_POOL_URL'),
-            conn_max_age=600,
+            # Threaded web workers reuse a connection for a minute. The
+            # websocket server (ASGI) sets DB_CONN_MAX_AGE=0: under ASGI kept
+            # connections pile up until the database pool runs dry and every
+            # request hangs.
+            conn_max_age=config('DB_CONN_MAX_AGE', default=60, cast=int),
             ssl_require=True,
             conn_health_checks=True,
         )

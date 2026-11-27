@@ -19,8 +19,10 @@ RUN pip install --upgrade pip && \
 # Copy source code
 COPY . .
 
-# --forwarded-allow-ips="*" tells gunicorn to trust X-Forwarded-For from any IP.
-# Required because Nginx contacts Django via Docker's bridge network (172.x.x.x),
-# and gunicorn's default only trusts 127.0.0.1.
-# CMD ["daphne", "-b", "0.0.0.0", "-p", "8000", "ecommerce.asgi:application", "--access-log", "-", "--proxy-headers"]
-CMD ["gunicorn", "ecommerce.asgi:application", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--workers", "2", "--timeout", "300", "--forwarded-allow-ips", "*"]
+# HTTP: threaded WSGI workers. Each of the 2 processes serves 8 requests at
+# once, so a slow photo upload to storage no longer freezes a whole worker
+# (under ASGI every plain Django view in a process shares one thread).
+# Workers restart after ~1000 requests to give memory back.
+# Websockets run in their own small ASGI container (the `ws` service).
+# --forwarded-allow-ips="*": Nginx reaches us over Docker's bridge network.
+CMD ["gunicorn", "ecommerce.wsgi:application", "-k", "gthread", "--workers", "2", "--threads", "8", "-b", "0.0.0.0:8000", "--timeout", "120", "--graceful-timeout", "30", "--max-requests", "1000", "--max-requests-jitter", "100", "--forwarded-allow-ips", "*"]
