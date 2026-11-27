@@ -496,6 +496,8 @@ class Variants(models.Model):
             models.Index(fields=['product', 'color', 'size']),
             models.Index(fields=['color']),
             models.Index(fields=['size']),
+            # Listing filters by option (product/option_filters.py): "has this option" lookups.
+            GinIndex(fields=['options'], name='variant_options_gin'),
         ]
 
     def get_combined_title(self):

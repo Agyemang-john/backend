@@ -657,3 +657,19 @@ class ReturnRequestAdmin(admin.ModelAdmin):
                 skipped += 1
         skipped += queryset.exclude(status=ReturnRequest.STATUS_RECEIVED).count()
         self.message_user(request, f"{done} refunded. {skipped} skipped (only 'Item received' returns can be refunded).")
+
+
+from .models import SharedCart
+
+
+@admin.register(SharedCart)
+class SharedCartAdmin(admin.ModelAdmin):
+    """Carts shoppers shared with friends and family (order/shared_cart.py)."""
+    list_display = ['token', 'user', 'sender_name', 'item_count', 'views', 'adds', 'created_at', 'expires_at']
+    search_fields = ['token', 'sender_name', 'user__email']
+    readonly_fields = ['token', 'user', 'session_key', 'fingerprint', 'items', 'views', 'adds', 'created_at']
+    list_select_related = ['user']
+
+    @admin.display(description='Items')
+    def item_count(self, obj):
+        return len(obj.items or [])

@@ -169,6 +169,7 @@ class DealsPageAPIView(APIView):
             'flash_count': data['flash_count'],
             'brands': data['brands'],
             'vendors': data['vendors'],
+            'attributes': data['attributes'],     # variant options (product/option_filters.py)
             'sizes': [],
             'colors': [],
             'min_price_unfiltered': round(data['min_price'] * to_currency, 2),

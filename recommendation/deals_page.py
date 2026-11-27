@@ -25,6 +25,7 @@ from django.core.cache import cache
 from django.utils import timezone
 
 from product.listing import listing_page_size
+from product import option_filters
 
 from .models import ProductDealScore
 
@@ -63,6 +64,7 @@ class DealFilters:
     sort: str = 'best'
     page: int = 1
     page_size: int = 30
+    options: dict = field(default_factory=dict)   # ?o_<key>= variant options (product/option_filters.py)
 
     @classmethod
     def from_query(cls, params, rate: Decimal) -> 'DealFilters':
@@ -94,6 +96,7 @@ class DealFilters:
             sort=sort if sort in SORTS else 'best',
             page=max(1, one_int('page') or 1),
             page_size=listing_page_size(params),
+            options=option_filters.parse(params),
         )
 
 
@@ -229,11 +232,22 @@ def deals_page(request, rate: Decimal) -> dict:
     from product.models import Brand, Category, Collection, Main_Category
     from vendor.models import Vendor
 
-    from .serving import _dismissed_ids
+    from .serving import _dismissed_ids, deals_version
 
     f = DealFilters.from_query(request.query_params, rate)
     hidden = _dismissed_ids(request)
     rows = [row for row in _deal_rows() if row['id'] not in hidden]
+
+    # Variant options (Flavour, Pack size, seller-named…). Counted on the deals
+    # the other filters allow; then every other facet works within the choice.
+    from product.models import Product
+    option_pool = Product.objects.filter(id__in=[row['id'] for row in rows if _matches(row, f)])
+    option_facets = option_filters.facets(
+        option_pool, f.options, cache_key=f"deals:{deals_version()}:{request.query_params.urlencode()}")
+    if f.options:
+        allowed = set(option_filters.apply(Product.objects.filter(id__in=[row['id'] for row in rows]), f.options)
+                      .values_list('id', flat=True))
+        rows = [row for row in rows if row['id'] in allowed]
 
     matched = [row for row in rows if _matches(row, f)]
     ids = _sorted_ids(request, matched, f.sort, f.page_size)
@@ -298,6 +312,7 @@ def deals_page(request, rate: Decimal) -> dict:
         'flash_count': flash_count,
         'brands': _names(Brand, {row['brand'] for row in rows if row['brand']}, 'title', 'slug'),
         'vendors': _names(Vendor, {row['vendor'] for row in rows if row['vendor']}, 'name', 'slug'),
+        'attributes': option_facets,
         'min_price': min(prices) if prices else 0.0,
         'max_price': max(prices) if prices else 0.0,
         'collection': collection,

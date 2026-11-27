@@ -2,6 +2,7 @@ from django.urls import path
 from . import views
 from . import admin_views
 from . import returns_views
+from . import shared_cart_views
 
 urlpatterns = [
     # ── Returns (customer) ─────────────────────────────────────────────────
@@ -31,6 +32,10 @@ urlpatterns = [
     path('sync-guest-cart/', views.SyncGuestCartView.as_view(), name='sync-cart'),
     path('quantity/', views.CartQuantityView.as_view(), name='quantity'),
     path('cart/', views.CartView.as_view(), name='cart'),
+    # Share a cart with friends and family (order/shared_cart.py).
+    path('cart/share/', shared_cart_views.ShareCartView.as_view(), name='cart-share'),
+    path('cart/shared/<str:token>/', shared_cart_views.SharedCartView.as_view(), name='cart-shared'),
+    path('cart/shared/<str:token>/add/', shared_cart_views.AddSharedCartView.as_view(), name='cart-shared-add'),
     path('info/', views.NavInfo.as_view(), name='info'),
     path('checkout/', views.CheckoutAPIView.as_view(), name='checkout'),
     path('update-delivery/', views.UpdateDeliveryOptionAPIView.as_view(), name='update-delivery'),

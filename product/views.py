@@ -5,6 +5,7 @@ from django.shortcuts import get_object_or_404
 from ads import services as ad_services
 from attributes import services as attr_services
 from product import info_sections as product_info_sections
+from product import option_filters
 from rest_framework.response import Response
 from .models import *
 from order.models import *
@@ -511,6 +512,14 @@ class SearchSuggestionsAPIView(APIView):
         return Response(suggestions, status=status.HTTP_200_OK)
 
 
+def _facet_key(request, prefix):
+    """Cache key for facet counts: every filter, minus paging and sorting."""
+    params = request.GET.copy()
+    for k in ('page', 'sort', 'page_size'):
+        params.pop(k, None)
+    return f"{prefix}:{hashlib.md5(params.urlencode().encode()).hexdigest()}"
+
+
 class CategoryProductListView(APIView):
     permission_classes = [AllowAny]
 
@@ -598,6 +607,11 @@ class CategoryProductListView(APIView):
             filtered_qs = filtered_qs.filter(avg_rating__gte=min(active_ratings))
         filtered_qs = filter_fast_delivery(filtered_qs, request)
 
+        # ── Variant options (Flavour, Scent, seller-named…): ?o_<key>=... ─────
+        option_active = option_filters.parse(request.GET)
+        standard_qs = filtered_qs
+        filtered_qs = option_filters.apply(standard_qs, option_active)
+
         # ── Structured attributes (attributes/): ?a_<slug>=... filters + counts ─
         attr_defs = attr_services.definitions_for(category)
         attr_active = attr_services.parse_filters(request.GET, attr_defs)
@@ -631,6 +645,10 @@ class CategoryProductListView(APIView):
             pre_attr_qs.select_related(None).prefetch_related(None), attr_defs, attr_active,
             cache_key=f"{slug}:{hashlib.md5(facet_params.urlencode().encode()).hexdigest()}",
         )
+        option_facets = option_filters.facets(
+            attr_services.apply_filters(standard_qs, attr_active).select_related(None), option_active,
+            cache_key=_facet_key(request, f"category:{slug}"),
+        )
 
         # ── Sidebar filter options (cached 1 h, from unfiltered base) ──────────
         filter_cache_key = f"filters:{slug}"
@@ -654,7 +672,8 @@ class CategoryProductListView(APIView):
 
         return Response({
             **filter_options,
-            "attributes": attribute_facets,
+            # Category specs, then variant options, in one list for the filter drawer.
+            "attributes": attribute_facets + option_facets,
             "category": SubCategorySerializer(category).data,
             "products_with_details": products_with_details,
             # Sponsored products (ads/): first page only, shown above the results, and
@@ -758,6 +777,12 @@ class BrandProductListView(APIView):
             filtered_qs = filtered_qs.filter(avg_rating__gte=min(active_ratings))
         filtered_qs = filter_fast_delivery(filtered_qs, request)
 
+        # Variant options (Flavour, Scent, seller-named…): ?o_<key>=...
+        option_active = option_filters.parse(request.GET)
+        option_facets = option_filters.facets(filtered_qs.select_related(None), option_active,
+                                              cache_key=_facet_key(request, f"brand:{slug}"))
+        filtered_qs = option_filters.apply(filtered_qs, option_active)
+
         # 'featured' and any unknown value → trending score
         filtered_qs = filtered_qs.order_by(_sort_map.get(sort, '-trending_score'))
 
@@ -798,6 +823,7 @@ class BrandProductListView(APIView):
         return Response({
             **brand_filter_options,
             "brand": BrandSerializer(brand).data,
+            "attributes": option_facets,
             "products_with_details": products_with_details,
             # Sponsored products from this brand (ads/), first page only, above the results.
             # Only ones the shopper's filters would show.
@@ -838,7 +864,7 @@ class ProductSearchAPIView(APIView):
                 "products_with_details": [], "total": 0,
                 "min_price": 0, "max_price": 0,
                 "min_price_unfiltered": 0, "max_price_unfiltered": 0,
-                "colors": [], "sizes": [], "brands": [], "vendors": [], "categories": [],
+                "colors": [], "sizes": [], "brands": [], "vendors": [], "categories": [], "attributes": [],
             })
 
         # ── Currency ───────────────────────────────────────────────────────────
@@ -894,7 +920,7 @@ class ProductSearchAPIView(APIView):
         max_price_unfiltered = unfiltered_pr['max_price_unfiltered'] or Decimal('0')
 
         # ── Apply filters (subquery for variants — no JOIN/DISTINCT) ───────────
-        def apply_filters(qs):
+        def apply_filters(qs, with_options=True):
             if active_colors:
                 qs = qs.filter(id__in=Variants.objects.filter(color_id__in=active_colors).values('product_id'))
             if active_sizes:
@@ -909,8 +935,11 @@ class ProductSearchAPIView(APIView):
                 qs = qs.filter(price__lte=max_price / exchange_rate)
             if active_ratings:
                 qs = qs.filter(avg_rating__gte=min(active_ratings))
-            return filter_fast_delivery(qs, request)
+            qs = filter_fast_delivery(qs, request)
+            return option_filters.apply(qs, option_active) if with_options else qs
 
+        # Variant options (Flavour, Scent, seller-named…): ?o_<key>=...
+        option_active = option_filters.parse(request.GET)
         filtered_qs = apply_filters(base_qs)
 
         # ── Sort ───────────────────────────────────────────────────────────────
@@ -948,6 +977,10 @@ class ProductSearchAPIView(APIView):
         if page == 1:
             record_search(request, query, total_items or len(facets["vendors"]))
 
+        # Counted without the option filters themselves (facets() applies them per group).
+        option_facets = option_filters.facets(apply_filters(base_qs, with_options=False).select_related(None), option_active,
+                                              cache_key=_facet_key(request, "search"))
+
         def build_url(page_num):
             if page_num < 1 or page_num > total_pages or total_items == 0:
                 return None
@@ -961,6 +994,7 @@ class ProductSearchAPIView(APIView):
             "vendors":    facets["vendors"],
             "brands":     facets["brands"],
             "categories": facets["categories"],
+            "attributes": option_facets,
             "products_with_details": products_with_details,
             # Keyword ads needn't match the text search, but must fit the shopper's
             # filters (price, brand, colour...): the same filters, minus the text match.
@@ -1182,6 +1216,12 @@ class CollectionAPIView(APIView):
             filtered = filtered.filter(avg_rating__gte=min(active_ratings))
         filtered = filter_fast_delivery(filtered, request)
 
+        # Variant options (Flavour, Scent, seller-named…): ?o_<key>=...
+        option_active = option_filters.parse(request.GET)
+        option_facets = option_filters.facets(filtered.select_related(None), option_active,
+                                              cache_key=_facet_key(request, f"collection:{slug}:{country}"))
+        filtered = option_filters.apply(filtered, option_active)
+
         sort = request.GET.get('sort', 'featured')
         _sort_map = {'price_asc': 'price', 'price_desc': '-price', 'rating': '-avg_rating', 'newest': '-date'}
         if not (sort == 'featured' and collection.filter_type == 'auto'):  # keep the curator's ranking
@@ -1235,6 +1275,7 @@ class CollectionAPIView(APIView):
             'max_price_unfiltered': float(price_agg['max_price'] or 0) * float(exchange_rate),
             'default_max_price':    float(price_agg['max_price'] or 10000) * float(exchange_rate),
             **filter_options,
+            'attributes': option_facets,
             'currency': currency,
         }, status=status.HTTP_200_OK)
 

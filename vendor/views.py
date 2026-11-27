@@ -939,6 +939,9 @@ class VendorProductsView(APIView):
         max_price = self._decimal(params.get('max_price'))
         min_rating = self._decimal(params.get('rating'))
         on_sale = params.get('on_sale') in ('1', 'true')
+        # Variant options (Flavour, Scent, seller-named…): ?o_<key>=a,b
+        from product import option_filters
+        options = option_filters.parse(params)
 
         # Price bounds arrive in the shopper's currency; prices are stored in GHS.
         ghs_min = (min_price / rate).quantize(Decimal('0.01')) if min_price is not None else None
@@ -960,6 +963,7 @@ class VendorProductsView(APIView):
 
         cache_key = 'vendor_products:{}:{}'.format(slug, '|'.join(map(str, (
             page, page_size, sort, category, ghs_min, ghs_max, min_rating, on_sale,
+            option_filters.cache_part(options),
         ))))
         payload = cache.get(cache_key)
 
@@ -968,7 +972,8 @@ class VendorProductsView(APIView):
             if vendor_id is None:
                 raise Http404
 
-            products = filtered(vendor_id)
+            without_options = filtered(vendor_id)
+            products = option_filters.apply(without_options, options)
             total = products.count()
             total_pages = max(1, -(-total // page_size))
             page = min(page, total_pages)
@@ -996,6 +1001,8 @@ class VendorProductsView(APIView):
                     for p in rows
                 ],
                 'categories': self._categories(slug, vendor_id),
+                # Option filters for this store (same shape as the listings' "attributes").
+                'attributes': option_filters.facets(without_options, options),
             }
             cache.set(cache_key, payload, self.PAGE_TTL)
 
@@ -1020,7 +1027,7 @@ class VendorProductsView(APIView):
         # This store's own sponsored products, first page only (ads/), and only
         # ones the shopper's filters would show (category, price, rating, on sale).
         sponsored = ad_services.sponsored(request, 'seller', scope=Q(vendor_id=vendor_id), scope_key=str(vendor_id),
-                                          within=filtered(vendor_id)) if vendor_id and payload['page'] == 1 else []
+                                          within=option_filters.apply(filtered(vendor_id), options)) if vendor_id and payload['page'] == 1 else []
         public = {k: v for k, v in payload.items() if k != 'vendor_id'}
         return Response({**public, 'currency': currency, 'results': results, 'sponsored': sponsored})
 

@@ -284,6 +284,8 @@ REST_FRAMEWORK = {
         "checkout": "20/hour",
         "password_reset": "3/min",
         "seller_api": "120/min",
+        "cart_share": "30/hour",        # order/shared_cart_views.py
+        "cart_share_add": "60/hour",
     },
 }
 

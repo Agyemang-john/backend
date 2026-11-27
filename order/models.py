@@ -842,3 +842,38 @@ class ReturnRequest(models.Model):
     @property
     def is_open(self):
         return self.status in self.OPEN_STATUSES
+
+
+class SharedCart(models.Model):
+    """
+    A cart a shopper shared with friends or family (order/shared_cart.py).
+    A snapshot of the lines at the moment of sharing; whoever opens the link
+    sees today's prices and stock and can add the items to their own cart,
+    signed in or not. The link stops working after EXPIRY_DAYS.
+    """
+    EXPIRY_DAYS = 30
+
+    token = models.CharField(max_length=24, unique=True)
+    # Who shared it: a signed-in shopper, or a guest's session (for re-sharing the same cart).
+    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='shared_carts')
+    session_key = models.CharField(max_length=40, blank=True, default='')
+    sender_name = models.CharField(max_length=60, blank=True, default='')
+    note = models.CharField(max_length=300, blank=True, default='')
+    # [{"product_id": 1, "variant_id": null, "quantity": 2}, ...]
+    items = models.JSONField(default=list)
+    # Same sharer + same lines + same name/note → the same link again.
+    fingerprint = models.CharField(max_length=64, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(db_index=True)
+    views = models.PositiveIntegerField(default=0)
+    adds = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Shared cart {self.token}"
+
+    @property
+    def is_expired(self):
+        return self.expires_at <= timezone.now()
