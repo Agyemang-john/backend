@@ -35,49 +35,37 @@ from product.serializers import LightProductSerializer
 
 from rest_framework.permissions import IsAdminUser
 
+SLIDERS_CACHE_KEY = 'home_sliders_v2'
+BANNERS_CACHE_KEY = 'banners_v2'
+
 
 class HomeSliderView(APIView):
-
+    """Hero slides showing now for this shopper (core/scheduling.py), prices in their currency."""
     permission_classes = [AllowAny]   # public
+
     def get(self, request):
-        cache_key = 'home_sliders_static_v1'
+        from core.scheduling import live_seasons, pick, schedule_of
+        from product.regions import storefront_country
 
-        static_data = cache.get(cache_key)
-        if static_data is None:
-            sliders = (
-                HomeSlider.objects
-                .filter(is_active=True)
-                .only(
-                    'id', 'title', 'deal_type', 'price',
-                    'price_prefix', 'link_url',
-                    'image_mobile', 'image_desktop',
-                    'order'
-                )
-                .order_by('order')
-            )
+        entries = cache.get(SLIDERS_CACHE_KEY)
+        if entries is None:
+            sliders = HomeSlider.objects.filter(is_active=True).order_by('order', 'id')
+            entries = [(HomeSliderSerializer(s, context={'static': True, 'request': request}).data, schedule_of(s))
+                       for s in sliders]
+            cache.set(SLIDERS_CACHE_KEY, entries, 60 * 60)  # 1 hour; cleared on every save
 
-            # Serialize WITHOUT request/currency
-            static_data = HomeSliderSerializer(
-                sliders,
-                many=True,
-                context={'static': True, 'request': request}
-            ).data
-
-            cache.set(cache_key, static_data, 60 * 60)  # 1 hour
+        shown = pick(entries, live_seasons(storefront_country(request)))
 
         # Always fresh currency & rates
         currency = request.headers.get('X-Currency', 'GHS')
-        rates = get_exchange_rates()  # fresh or redis-cached
-
-        # Inject dynamic data
-        for item in static_data:
-            base_price = item.get('price')
-            if base_price is not None:
-                exchange_rate = Decimal(str(rates.get(currency, 1)))
-                item['price'] = round(Decimal(base_price) * exchange_rate, 2)
+        exchange_rate = Decimal(str(get_exchange_rates().get(currency, 1)))
+        for item in shown:
+            if item.get('price') is not None:
+                item['price'] = round(Decimal(item['price']) * exchange_rate, 2)
             item['currency'] = currency
 
-        return Response(static_data, status=status.HTTP_200_OK)
+        return Response(shown, status=status.HTTP_200_OK)
+
 
 class PromoGridView(APIView):
     permission_classes = [AllowAny]
@@ -93,21 +81,20 @@ class PromoGridView(APIView):
 
 
 class BannersView(APIView):
-    """
-    API View to retrieve all banners with caching
-    """
+    """Side banners showing now for this shopper (core/scheduling.py)."""
     permission_classes = [AllowAny]   # public
+
     def get(self, request):
-        cache_key = 'banners'
-        cached_data = cache.get(cache_key)
-        
-        if cached_data is None:
-            banners = Banners.objects.all()
-            serializer = BannersSerializer(banners, many=True, context={'request': request})
-            cached_data = serializer.data
-            cache.set(cache_key, cached_data, timeout=60 * 60)  # Cache for 60 minutes
-        
-        return Response(cached_data, status=status.HTTP_200_OK)
+        from core.scheduling import live_seasons, pick, schedule_of
+        from product.regions import storefront_country
+
+        entries = cache.get(BANNERS_CACHE_KEY)
+        if entries is None:
+            banners = Banners.objects.filter(is_active=True).order_by('order', 'id')
+            entries = [(BannersSerializer(b, context={'request': request}).data, schedule_of(b)) for b in banners]
+            cache.set(BANNERS_CACHE_KEY, entries, timeout=60 * 60)  # cleared on every save
+
+        return Response(pick(entries, live_seasons(storefront_country(request))), status=status.HTTP_200_OK)
 
 class MainCategoryWithCategoriesAPIView(APIView):
     permission_classes = [AllowAny]   # public

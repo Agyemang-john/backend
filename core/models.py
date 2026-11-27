@@ -53,7 +53,42 @@ def user_directory_path(instance, filename):
 ####################### MAIN SLIDER MODEL ##################
 ############################################################
     
-class HomeSlider(models.Model):
+############################################################
+################ WHEN A SLIDE / BANNER SHOWS ###############
+############################################################
+
+class Scheduled(models.Model):
+    """
+    When a hero slide or side banner shows (core/scheduling.py):
+
+    - Seasonal: it has dates, an occasion or a holiday. It shows only while
+      that is running, and while any seasonal one runs the everyday ones step
+      aside (unless "Keep during seasons" is ticked).
+    - Everyday: none of those. These are what shoppers see between seasons,
+      so keep at least one active; the storefront has a built-in slide as a
+      last resort.
+    """
+    starts_at = models.DateTimeField(null=True, blank=True, help_text="Show from (blank = no start date)")
+    ends_at = models.DateTimeField(null=True, blank=True, help_text="Stop showing at (blank = no end date)")
+    occasion = models.ForeignKey(
+        'product.Occasion', null=True, blank=True, on_delete=models.SET_NULL, related_name='+',
+        help_text="Show only while this occasion is live (its dates and countries)")
+    holiday = models.ForeignKey(
+        'product.SeasonalEvent', null=True, blank=True, on_delete=models.SET_NULL, related_name='+',
+        help_text="Show every year while this holiday's occasion is live, e.g. Christmas")
+    keep_in_season = models.BooleanField(
+        default=False, verbose_name="Keep during seasons",
+        help_text="Everyday item: keep showing (after the seasonal ones) while a season runs")
+
+    class Meta:
+        abstract = True
+
+    @property
+    def is_seasonal(self):
+        return bool(self.starts_at or self.ends_at or self.occasion_id or self.holiday_id)
+
+
+class HomeSlider(Scheduled):
     DEAL_TYPES = [
         ('Daily Deal', 'Daily Deal'),
         ('Discount', 'Discount'),
@@ -152,7 +187,7 @@ class HomeSlider(models.Model):
 ####################### MAIN BANNERS MODEL ##################
 ############################################################
 
-class Banners(models.Model):
+class Banners(Scheduled):
     DEAL_TYPES = [
         ('Daily Deal', 'Daily Deal'),
         ('Discount', 'Discount'),

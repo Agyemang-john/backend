@@ -154,10 +154,10 @@ def invalidate_home_slider_cache(sender, instance, **kwargs):
 
 @receiver([post_save, post_delete], sender=Banners)
 def invalidate_banners_cache(sender, instance, **kwargs):
-    cache_key = 'banners'
-    cache.delete(cache_key)
+    from core.views import BANNERS_CACHE_KEY
+    cache.delete(BANNERS_CACHE_KEY)
 
-CACHE_KEY = 'home_sliders_static_v1'
+CACHE_KEY = 'home_sliders_v2'   # core.views.SLIDERS_CACHE_KEY
 
 
 @receiver(post_save, sender=HomeSlider)

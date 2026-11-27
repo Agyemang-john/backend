@@ -251,7 +251,8 @@ class HomeSliderSerializer(serializers.ModelSerializer):
 class BannersSerializer(serializers.ModelSerializer):
     class Meta:
         model = Banners
-        fields = '__all__'
+        fields = ['id', 'title', 'subtitle', 'image', 'deal_type', 'link', 'cta_label',
+                  'text_theme', 'content_align', 'is_active', 'order']
 
 
 class PromoCardSerializer(serializers.ModelSerializer):
