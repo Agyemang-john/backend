@@ -304,8 +304,9 @@ class Product(models.Model):
     # What one unit costs the seller (buying + packing), never shown to shoppers.
     # Used by the profit report (tools/profit.py). Empty = not given.
     unit_cost = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
-    features = CKEditor5Field(null=True, blank=True, default="Black")
-    description = CKEditor5Field(null=True, blank=True, default="I sell good products only")
+    features = CKEditor5Field(null=True, blank=True, default="")
+    # Optional: seller-named info sections can describe the product instead.
+    description = CKEditor5Field(null=True, blank=True, default="")
     specifications = CKEditor5Field(null=True, blank=True, default="Black")
     # Seller-named sections ("Processor", "Ingredients"...): [{"title", "body"}].
     # product/info_sections.py; specifications keeps their joined HTML for search.
